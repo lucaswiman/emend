@@ -16,7 +16,6 @@ from emend.policy import (
     CustomCheck,
     DeadCodeCheck,
     TypeCheck,
-    _run_datalog_check,
     _run_type_check,
     format_policy_violations,
     load_policies,
@@ -523,119 +522,33 @@ def test_check_cli_uses_rules_yaml(tmp_path, monkeypatch):
 
 
 class TestDatalogCheckColumnIndexing:
-    """Regression tests for _run_datalog_check column index extraction.
+    """Named result columns preserve zero indices, precedence and locations."""
 
-    _col_idx() returns int|None.  Using ``or`` to chain fallbacks treats
-    index **0** as falsy, silently skipping the first column.
-    """
-
-    def _make_policy(self):
-        check = DatalogCheck(cozoscript="?[file_path, line, message] <- ...")
-        return Policy(
-            name="test-policy",
-            description="test description",
-            severity="error",
-            checks=[check],
+    @pytest.mark.parametrize("headers,row,expected", [
+        (["file_path", "line", "col", "message"], ["app.py", 42, 7, "problem"],
+         ("app.py", 42, 7, "problem")),
+        (["line", "file_path", "message"], [10, "foo.py", "issue"],
+         ("foo.py", 10, 0, "issue")),
+        (["file_path", "line", "file", "message"], ["correct.py", 1, "wrong.py", "msg"],
+         ("correct.py", 1, 0, "msg")),
+        (["count", "name"], [3, "alpha"], ("<project>", 0, 0, "test description")),
+        (["file_path", "line", "col", "message"], ["app.py", "not-a-number", None, "boom"],
+         ("app.py", 0, 0, "boom")),
+        (["symbol"], ["my_func"], ("<project>", 0, 0, "test description")),
+        (["file", "col", "line"], ["app.py", "8", "12"],
+         ("app.py", 12, 8, "test description")),
+        (["file_path", "file_path", "line"], ["first.py", "last.py", 2],
+         ("first.py", 2, 0, "test description")),
+    ])
+    def test_named_columns(self, tmp_path, headers, row, expected):
+        check = DatalogCheck(f"?[{', '.join(headers)}] <- {json.dumps([row])}")
+        policy = Policy("test-policy", "test description", "error", [check])
+        violations = run_policy_checks(
+            [], [policy], project_path=str(tmp_path),
         )
-
-    def _run_with_mock_result(self, monkeypatch, headers, rows):
-        """Call _run_datalog_check with a mocked FactGraph."""
-        import emend.fact_graph
-
-        class _MockGraph:
-            def run_query(self, query):
-                return {"headers": headers, "rows": rows}
-
-        class _MockFactGraphCls:
-            @staticmethod
-            def build_from_project(path):
-                return _MockGraph()
-
-        monkeypatch.setattr(emend.fact_graph, "FactGraph", _MockFactGraphCls)
-        policy = self._make_policy()
-        return _run_datalog_check(policy.checks[0], policy, "/tmp/fake")
-
-    def test_file_path_at_column_zero(self, monkeypatch):
-        """file_path at index 0 must not be skipped by the or-chain."""
-        violations = self._run_with_mock_result(
-            monkeypatch,
-            headers=["file_path", "line", "message"],
-            rows=[["app.py", 42, "problem"]],
-        )
-        assert len(violations) == 1
-        assert violations[0].file_path == "app.py"
-        assert violations[0].line == 42
-        assert violations[0].message == "problem"
-
-    def test_line_at_column_zero(self, monkeypatch):
-        """line at index 0 must not be skipped by the or-chain."""
-        violations = self._run_with_mock_result(
-            monkeypatch,
-            headers=["line", "file_path", "message"],
-            rows=[[10, "foo.py", "issue"]],
-        )
-        assert len(violations) == 1
-        assert violations[0].line == 10
-        assert violations[0].file_path == "foo.py"
-
-    def test_file_path_at_zero_with_file_column_present(self, monkeypatch):
-        """file_path at 0 must take priority over a later 'file' column."""
-        violations = self._run_with_mock_result(
-            monkeypatch,
-            headers=["file_path", "line", "file", "message"],
-            rows=[["correct.py", 1, "wrong.py", "msg"]],
-        )
-        assert len(violations) == 1
-        assert violations[0].file_path == "correct.py"
-
-    def test_no_file_or_line_columns_uses_sentinel(self, monkeypatch):
-        """A query without file/line columns must not misinterpret data.
-
-        e.g. ``?[count, name]`` should not stringify the count as a file path
-        nor try to coerce the name into an int. Instead, a sentinel file path
-        and line 0 are used, and the full row is preserved in the witness.
-        """
-        violations = self._run_with_mock_result(
-            monkeypatch,
-            headers=["count", "name"],
-            rows=[[3, "alpha"]],
-        )
-        assert len(violations) == 1
-        v = violations[0]
-        # Must NOT guess column 0 (count=3) as the file path.
-        assert v.file_path == "<project>"
-        # Must NOT attempt int("alpha") from column 1 as the line.
-        assert v.line == 0
-        # The full row stays available in the witness so nothing is lost.
-        assert v.witness == ["count=3", "name=alpha"]
-
-    def test_non_numeric_line_value_does_not_crash(self, monkeypatch):
-        """A named 'line' column with a non-numeric value must not crash."""
-        violations = self._run_with_mock_result(
-            monkeypatch,
-            headers=["file_path", "line", "message"],
-            rows=[["app.py", "not-a-number", "boom"]],
-        )
-        assert len(violations) == 1
-        v = violations[0]
-        assert v.file_path == "app.py"
-        # Falls back to 0 rather than raising ValueError on int("not-a-number").
-        assert v.line == 0
-        assert v.message == "boom"
-        assert v.witness == ["file_path=app.py", "line=not-a-number", "message=boom"]
-
-    def test_single_unnamed_column_not_treated_as_file(self, monkeypatch):
-        """A single unnamed column must not be guessed as the file path."""
-        violations = self._run_with_mock_result(
-            monkeypatch,
-            headers=["symbol"],
-            rows=[["my_func"]],
-        )
-        assert len(violations) == 1
-        v = violations[0]
-        assert v.file_path == "<project>"
-        assert v.line == 0
-        assert v.witness == ["symbol=my_func"]
+        v, = violations
+        assert (v.file_path, v.line, v.col, v.message) == expected
+        assert v.witness == [f"{header}={value}" for header, value in zip(headers, row)]
 
 
 class TestRunChecksEngine:

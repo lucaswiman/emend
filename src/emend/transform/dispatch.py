@@ -3,12 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
-import io
 import json
 import logging
-import sys
 
 from ..component_selector import ExtendedSelector, parse_extended_selector
+from ..query import QueryFilter, format_query_results, query_symbols
 
 if TYPE_CHECKING:
     from ..type_oracle import TypeOracle
@@ -85,93 +84,41 @@ def _cmd_lookup_single_selector(  # noqa: C901
 
     # If wildcard without component and with query flags, treat as query
     if selector.has_wildcards() and not selector.component and (count or paths_only or json_output):
-        from emend.query import cmd_query
+        return format_query_results(
+            query_symbols(Path(file_or_pattern), QueryFilter(
+                case_insensitive=case_insensitive, smart_case=smart_case,
+            )),
+            output_json=json_output, paths_only=paths_only, count_only=count,
+        )
 
-        old_stdout = sys.stdout
-        sys.stdout = buffer = io.StringIO()
+    def lookup(concrete: ExtendedSelector) -> str:
+        return (
+            get_component(concrete) if concrete.component
+            else get_symbol_source(concrete, dedent=dedent)
+        )
+
+    if not selector.has_wildcards():
+        return lookup(selector)
+
+    from dataclasses import replace
+    from emend.ast_utils import find_nested_definitions, expand_wildcard_path
+
+    symbols = find_nested_definitions(selector.file_path, ext=selector.extension)
+    matched_symbols = expand_wildcard_path(symbols, selector.symbol_path)
+    if not matched_symbols:
+        raise ValueError(f"No symbols match pattern {'.'.join(selector.symbol_path)}")
+
+    results = []
+    for sym in matched_symbols:
         try:
-            cmd_query(
-                filepath=file_or_pattern,
-                kinds=None,
-                names=None,
-                decorators=None,
-                returns_patterns=None,
-                in_classes=None,
-                depths=None,
-                params=None,
-                case_insensitive=case_insensitive,
-                smart_case=smart_case,
-                output_json=json_output,
-                paths_only=paths_only,
-                count_only=count,
+            result = lookup(replace(selector, symbol_path=sym.path))
+            results.append(
+                {"symbol": '.'.join(sym.path), "value": result}
+                if selector.component and json_output else result
             )
-        finally:
-            sys.stdout = old_stdout
-
-        return buffer.getvalue()
-
-    # If component specified, act like get
-    if selector.component:
-        if selector.has_wildcards():
-            from emend.ast_utils import find_nested_definitions, expand_wildcard_path
-            file_path = Path(selector.file_path)
-            symbols = find_nested_definitions(str(file_path), ext=selector.extension)
-            matched_symbols = expand_wildcard_path(symbols, selector.symbol_path)
-
-            if not matched_symbols:
-                raise ValueError(f"No symbols match pattern {'.'.join(selector.symbol_path)}")
-
-            results = []
-            for sym in matched_symbols:
-                specific_selector = ExtendedSelector(
-                    file_path=selector.file_path,
-                    symbol_path=sym.path,
-                    component=selector.component,
-                    accessor=selector.accessor,
-                    pseudo_class=selector.pseudo_class,
-                    language_override=selector.language_override,
-                )
-                try:
-                    result = get_component(specific_selector)
-                    if json_output:
-                        results.append({"symbol": '.'.join(sym.path), "value": result})
-                    else:
-                        results.append(result)
-                except (ValueError, FileNotFoundError):
-                    pass
-
-            if json_output:
-                return json.dumps(results, indent=2)
-            else:
-                return '\n'.join(results)
-        else:
-            return get_component(selector)
-    else:
-        # No component - act like show
-        if selector.has_wildcards():
-            from emend.ast_utils import find_nested_definitions, expand_wildcard_path
-            file_path = Path(selector.file_path)
-            symbols = find_nested_definitions(str(file_path), ext=selector.extension)
-            matched_symbols = expand_wildcard_path(symbols, selector.symbol_path)
-
-            if not matched_symbols:
-                raise ValueError(f"No symbols match pattern {'.'.join(selector.symbol_path)}")
-
-            results = []
-            for sym in matched_symbols:
-                specific_selector = ExtendedSelector(
-                    file_path=selector.file_path,
-                    symbol_path=sym.path,
-                    language_override=selector.language_override,
-                )
-                try:
-                    result = get_symbol_source(specific_selector, dedent=dedent)
-                    results.append(result)
-                except (ValueError, FileNotFoundError):
-                    pass
-
-            return '\n'.join(results)
-        return get_symbol_source(selector, dedent=dedent)
+        except (ValueError, FileNotFoundError):
+            continue
+    return json.dumps(results, indent=2) if selector.component and json_output else '\n'.join(results)
 
 
 def cmd_lookup(
@@ -204,8 +151,6 @@ def cmd_lookup(
     """
     # If filter flags provided, act as query
     if any([kind, name, has_decorator, returns, in_class, depth, has_param]):
-        from emend.query import cmd_query
-
         # Expand file globs for query mode
         import glob as glob_mod
         from emend.language_registry import is_source_file, matches_language
@@ -230,70 +175,29 @@ def cmd_lookup(
         else:
             files_to_query = [file_or_pattern]
 
-        if out is not None and not count:
-            # Streaming path: write each file's output directly to out as it completes
-            for fpath in files_to_query:
-                old_stdout = sys.stdout
-                sys.stdout = out
-                try:
-                    cmd_query(
-                        filepath=fpath,
-                        kinds=kind,
-                        names=name,
-                        decorators=has_decorator,
-                        returns_patterns=returns,
-                        in_classes=in_class,
-                        depths=depth,
-                        params=has_param,
-                        case_insensitive=case_insensitive,
-                        smart_case=smart_case,
-                        output_json=json_output,
-                        paths_only=paths_only,
-                        count_only=False,
-                        type_oracle=type_oracle,
-                    )
-                finally:
-                    sys.stdout = old_stdout
-                out.flush()
-            return ''
-
+        filters = QueryFilter(
+            kinds=kind or [], names=name or [], decorators=has_decorator or [],
+            returns_patterns=returns or [], in_classes=in_class or [],
+            depths=depth or [], params=has_param or [],
+            case_insensitive=case_insensitive, smart_case=smart_case,
+        )
         all_output = []
-        total_count_val = 0
+        total_count = 0
         for fpath in files_to_query:
-            old_stdout = sys.stdout
-            sys.stdout = buffer = io.StringIO()
-            try:
-                cmd_query(
-                    filepath=fpath,
-                    kinds=kind,
-                    names=name,
-                    decorators=has_decorator,
-                    returns_patterns=returns,
-                    in_classes=in_class,
-                    depths=depth,
-                    params=has_param,
-                    case_insensitive=case_insensitive,
-                    smart_case=smart_case,
-                    output_json=json_output,
-                    paths_only=paths_only,
-                    count_only=count,
-                    type_oracle=type_oracle,
-                )
-            finally:
-                sys.stdout = old_stdout
-            result = buffer.getvalue()
-            if result:
-                if count:
-                    try:
-                        total_count_val += int(result.strip())
-                    except ValueError:
-                        all_output.append(result)
-                else:
-                    all_output.append(result)
+            symbols = query_symbols(Path(fpath), filters, type_oracle=type_oracle)
+            if count:
+                total_count += len(symbols)
+                continue
+            result = format_query_results(
+                symbols, output_json=json_output, paths_only=paths_only,
+            )
+            if out is not None:
+                out.write(result)
+                out.flush()
+            else:
+                all_output.append(result)
 
-        if count:
-            return str(total_count_val) + '\n'
-        return ''.join(all_output)
+        return f"{total_count}\n" if count else "".join(all_output)
 
     # Parse selector if provided
     if selector_str:
@@ -307,35 +211,8 @@ def cmd_lookup(
         if selector.has_file_glob():
             expanded_files = selector.expand_file_glob(language=language)
 
-            if out is not None and not matching:
-                # Streaming path: write each file's result to out as it completes
-                any_results = False
-                for fpath in expanded_files:
-                    concrete = selector.with_file_path(fpath)
-                    try:
-                        result = _cmd_lookup_single_selector(
-                            concrete,
-                            file_or_pattern=fpath,
-                            case_insensitive=case_insensitive,
-                            smart_case=smart_case,
-                            json_output=json_output,
-                            metadata=metadata,
-                            paths_only=paths_only,
-                            count=count,
-                            dedent=dedent,
-                        )
-                        if result:
-                            out.write(result)
-                            if not result.endswith('\n'):
-                                out.write('\n')
-                            out.flush()
-                            any_results = True
-                    except (ValueError, FileNotFoundError):
-                        continue
-                if not any_results:
-                    raise ValueError(f"No symbols found matching {selector_str}")
-                return ''
-
+            streaming = out is not None and not matching
+            any_results = False
             all_results = []
             for fpath in expanded_files:
                 concrete = selector.with_file_path(fpath)
@@ -352,13 +229,20 @@ def cmd_lookup(
                         dedent=dedent,
                     )
                     if result:
-                        all_results.append(result)
+                        any_results = True
+                        if streaming:
+                            out.write(result if result.endswith('\n') else result + '\n')
+                            out.flush()
+                        else:
+                            all_results.append(result)
                 except (ValueError, FileNotFoundError):
                     continue
 
-            if not all_results:
+            if not any_results:
                 raise ValueError(f"No symbols found matching {selector_str}")
 
+            if streaming:
+                return ''
             combined = '\n'.join(all_results)
 
             # Apply --matching filter if specified
@@ -542,44 +426,32 @@ def _dispatch_with_returns_filter(
     *single_fn* is called with each concrete selector and should return a diff
     string (empty string = no change).
     """
-    if returns_filter:
-        files = (
-            selector.expand_file_glob(language=language)
-            if selector.has_file_glob()
-            else [selector.file_path]
-        )
-        all_results = []
-        for fpath in files:
-            concrete_base = selector.with_file_path(fpath) if fpath != selector.file_path else selector
-            for concrete in _expand_selector_with_returns_filter(
-                concrete_base, returns_filter, type_oracle
-            ):
-                try:
-                    result = single_fn(concrete)
-                    if result:
-                        all_results.append(result)
-                except (ValueError, FileNotFoundError):
-                    continue
-        if not all_results:
-            raise ValueError(f"No symbols found matching {selector_str} with --returns {returns_filter}")
-        return '\n'.join(all_results)
+    if not returns_filter and not selector.has_file_glob():
+        return single_fn(selector)
 
-    if selector.has_file_glob():
-        expanded_files = selector.expand_file_glob(language=language)
-        all_results = []
-        for fpath in expanded_files:
-            concrete = selector.with_file_path(fpath)
+    files = (
+        selector.expand_file_glob(language=language)
+        if selector.has_file_glob()
+        else [selector.file_path]
+    )
+    all_results = []
+    for fpath in files:
+        base = selector.with_file_path(fpath) if fpath != selector.file_path else selector
+        selectors = (
+            _expand_selector_with_returns_filter(base, returns_filter, type_oracle)
+            if returns_filter else [base]
+        )
+        for concrete in selectors:
             try:
                 result = single_fn(concrete)
                 if result:
                     all_results.append(result)
             except (ValueError, FileNotFoundError):
                 continue
-        if not all_results:
-            raise ValueError(f"No symbols found matching {selector_str}")
-        return '\n'.join(all_results)
-
-    return single_fn(selector)
+    if not all_results:
+        suffix = f" with --returns {returns_filter}" if returns_filter else ""
+        raise ValueError(f"No symbols found matching {selector_str}{suffix}")
+    return '\n'.join(all_results)
 
 
 def _cmd_edit_single(

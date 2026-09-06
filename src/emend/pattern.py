@@ -407,8 +407,8 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
             return None
         return {"type": "attr", "value": value_ir, "attr": node.attr}
 
-    elif isinstance(node, _ast.List):
-        if len(node.elts) == 0:
+    elif isinstance(node, (_ast.List, _ast.Tuple, _ast.Set)):
+        if isinstance(node, _ast.List) and not node.elts:
             return {"type": "empty_list"}
         elems_ir = []
         for elt in node.elts:
@@ -416,25 +416,7 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
             if e_ir is None:
                 return None
             elems_ir.append(e_ir)
-        return {"type": "list", "elements": elems_ir}
-
-    elif isinstance(node, _ast.Tuple):
-        elems_ir = []
-        for elt in node.elts:
-            e_ir = _ast_to_rust_ir(elt, metavar_map)
-            if e_ir is None:
-                return None
-            elems_ir.append(e_ir)
-        return {"type": "tuple", "elements": elems_ir}
-
-    elif isinstance(node, _ast.Set):
-        elems_ir = []
-        for elt in node.elts:
-            e_ir = _ast_to_rust_ir(elt, metavar_map)
-            if e_ir is None:
-                return None
-            elems_ir.append(e_ir)
-        return {"type": "set", "elements": elems_ir}
+        return {"type": type(node).__name__.lower(), "elements": elems_ir}
 
     elif isinstance(node, _ast.Dict):
         elems_ir = []

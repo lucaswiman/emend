@@ -9,7 +9,6 @@ import fnmatch
 import json
 import logging
 import re
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -524,68 +523,20 @@ def query_symbols(filepath: Path, filters: QueryFilter, type_oracle: TypeOracle 
     return results
 
 
-def cmd_query(
-    filepath: str,
-    kinds: list[str] | None = None,
-    names: list[str] | None = None,
-    decorators: list[str] | None = None,
-    returns_patterns: list[str] | None = None,
-    in_classes: list[str] | None = None,
-    depths: list[str] | None = None,
-    params: list[str] | None = None,
-    case_insensitive: bool = False,
-    smart_case: bool = False,
+def format_query_results(
+    results: list[SymbolInfo],
+    *,
     output_json: bool = False,
     paths_only: bool = False,
     count_only: bool = False,
-    type_oracle: TypeOracle | None = None,
-) -> None:
-    """Execute the query command.
-
-    Args:
-        filepath: Path to Python file to query
-        kinds: Symbol kinds to match (OR logic)
-        names: Name patterns to match (OR logic)
-        decorators: Decorator patterns to match (OR logic)
-        returns_patterns: Return type patterns to match (OR logic)
-        in_classes: Class names to restrict to (OR logic)
-        depths: Depth filters like "1", "2", "2+"
-        params: Parameter patterns to match
-        case_insensitive: Enable case-insensitive matching
-        smart_case: Enable smart-case pattern matching (snake_case, camelCase, PascalCase)
-        output_json: Output as JSON
-        paths_only: Output only selector paths
-        count_only: Output only count of matches
-        type_oracle: Optional TypeOracle for type-aware returns filtering
-    """
-    path = Path(filepath)
-    if not path.exists():
-        print(f"Error: File not found: {filepath}", file=sys.stderr)
-        sys.exit(1)
-
-    filters = QueryFilter(
-        kinds=kinds or [],
-        names=names or [],
-        decorators=decorators or [],
-        returns_patterns=returns_patterns or [],
-        in_classes=in_classes or [],
-        depths=depths or [],
-        params=params or [],
-        case_insensitive=case_insensitive,
-        smart_case=smart_case,
-    )
-
-    results = query_symbols(path, filters, type_oracle=type_oracle)
-
-    # Output
+) -> str:
+    """Render query results without redirecting process-wide output."""
     if count_only:
-        print(len(results))
-    elif paths_only:
-        for symbol in results:
-            print(symbol.path)
-    elif output_json:
-        print(json.dumps([s.to_dict() for s in results], indent=2))
-    else:
-        # Human-readable format
-        for symbol in results:
-            print(f"{symbol.path} ({symbol.kind}, line {symbol.line})")
+        return f"{len(results)}\n"
+    if output_json and not paths_only:
+        return json.dumps([s.to_dict() for s in results], indent=2) + "\n"
+    return "".join(
+        f"{symbol.path}\n" if paths_only
+        else f"{symbol.path} ({symbol.kind}, line {symbol.line})\n"
+        for symbol in results
+    )

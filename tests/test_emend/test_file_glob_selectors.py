@@ -13,25 +13,15 @@ from emend.transform import cmd_lookup, cmd_edit, cmd_add, _apply_matching_filte
 
 
 class TestExtendedSelectorFileGlob:
-    def test_has_file_glob_star(self):
-        sel = parse_extended_selector("*.py::func")
-        assert sel.has_file_glob()
-
-    def test_has_file_glob_doublestar(self):
-        sel = parse_extended_selector("**/*.py::func")
-        assert sel.has_file_glob()
-
-    def test_has_file_glob_question_mark(self):
-        sel = parse_extended_selector("test_?.py::func")
-        assert sel.has_file_glob()
-
-    def test_no_file_glob(self):
-        sel = parse_extended_selector("file.py::func")
-        assert not sel.has_file_glob()
-
-    def test_no_file_glob_with_symbol_wildcard(self):
-        sel = parse_extended_selector("file.py::Test*")
-        assert not sel.has_file_glob()
+    @pytest.mark.parametrize("selector, expected", [
+        ("*.py::func", True),
+        ("**/*.py::func", True),
+        ("test_?.py::func", True),
+        ("file.py::func", False),
+        ("file.py::Test*", False),
+    ])
+    def test_has_file_glob(self, selector, expected):
+        assert parse_extended_selector(selector).has_file_glob() is expected
 
     def test_expand_file_glob(self, tmp_path):
         (tmp_path / "a.py").write_text("x = 1\n")
@@ -191,26 +181,32 @@ class TestLookupFileGlob:
 
 
 class TestEditFileGlob:
-    def test_edit_glob_returns(self, tmp_path):
+    @pytest.mark.parametrize("returns_filter", [None, ["str"]])
+    def test_edit_glob_returns(self, tmp_path, returns_filter):
         (tmp_path / "a.py").write_text("def hello() -> str:\n    return 'hi'\n")
         (tmp_path / "b.py").write_text("def hello() -> str:\n    return 'bye'\n")
+        (tmp_path / "c.py").write_text("def other() -> str:\n    pass\n")
 
         result = cmd_edit(
             selector_str=f"{tmp_path / '*.py'}::hello[returns]",
             value="int",
             apply=True,
+            returns_filter=returns_filter,
         )
-        # Both files should be edited
-        assert "int" in (tmp_path / "a.py").read_text()
-        assert "int" in (tmp_path / "b.py").read_text()
+        for name, greeting in (("a.py", "hi"), ("b.py", "bye")):
+            assert (tmp_path / name).read_text() == f"def hello() -> int:\n    return '{greeting}'\n"
+        assert result.count("+def hello() -> int:") == 2
+        assert (tmp_path / "c.py").read_text() == "def other() -> str:\n    pass\n"
 
-    def test_edit_glob_no_match(self, tmp_path):
+    @pytest.mark.parametrize("returns_filter", [None, ["str"]])
+    def test_edit_glob_no_match(self, tmp_path, returns_filter):
         (tmp_path / "a.py").write_text("x = 1\n")
 
         with pytest.raises(ValueError, match="No symbols found"):
             cmd_edit(
                 selector_str=f"{tmp_path / '*.py'}::nonexistent[returns]",
                 value="int",
+                returns_filter=returns_filter,
             )
 
 

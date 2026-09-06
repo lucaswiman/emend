@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from emend.checks.violations import PolicyViolation
+
 if TYPE_CHECKING:
-    from emend.policy import Policy, PolicyViolation
+    from emend.policy import Policy
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +24,6 @@ def run_deadcode_check(
     """Run dead code detection as a policy check."""
     from emend.checks.rules_config import deadcode_engine_kwargs
     from emend.transform import dead_code_result_details, find_dead_code
-    from emend.policy import PolicyViolation
 
     violations: list[PolicyViolation] = []
     for ds in find_dead_code(

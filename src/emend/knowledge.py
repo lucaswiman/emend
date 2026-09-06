@@ -445,16 +445,12 @@ class MappingStore:
         original_len = len(mappings)
         filtered = []
         for m in mappings:
-            if m.get("source_identifier") != source_identifier:
+            if (
+                m.get("source_identifier") != source_identifier
+                or (source_project and m.get("source_project") != source_project)
+                or (target_identifier and m.get("target_identifier") != target_identifier)
+            ):
                 filtered.append(m)
-                continue
-            if source_project and m.get("source_project") != source_project:
-                filtered.append(m)
-                continue
-            if target_identifier and m.get("target_identifier") != target_identifier:
-                filtered.append(m)
-                continue
-            # Match — skip this entry (delete it)
         self._data["identifier_mappings"] = filtered
         if len(filtered) < original_len:
             self._save()
@@ -522,16 +518,12 @@ class MappingStore:
         """Find all mappings where *identifier* appears as source or target."""
         results: list[IdentifierMapping] = []
         for d in self._data.get("identifier_mappings", []):
-            match = False
-            if direction in ("source", "both"):
-                if d.get("source_identifier") == identifier:
-                    if not project or d.get("source_project") == project:
-                        match = True
-            if direction in ("target", "both"):
-                if d.get("target_identifier") == identifier:
-                    if not project or d.get("target_project") == project:
-                        match = True
-            if match:
+            if any(
+                direction in (side, "both")
+                and d.get(f"{side}_identifier") == identifier
+                and (not project or d.get(f"{side}_project") == project)
+                for side in ("source", "target")
+            ):
                 results.append(_yaml_to_identifier_mapping(d))
         return results
 

@@ -523,37 +523,20 @@ def batch_cmd(
         emend batch refactor.json --apply
     """
     import json as json_mod
+    import yaml
 
     with cli_error_handler():
         ops_path = Path(ops_file)
-        if not ops_path.exists():
-            raise FileNotFoundError(f"Operations file not found: {ops_file}")
-
         content = ops_path.read_text()
-
-        # Parse based on file extension
         if ops_path.suffix in ('.yaml', '.yml'):
-            try:
-                import yaml
-            except ImportError:
-                raise ValueError(
-                    "PyYAML is required for YAML batch files. "
-                    "Install it with: pip install pyyaml"
-                )
             data = yaml.safe_load(content)
-        elif ops_path.suffix == '.json':
-            data = json_mod.loads(content)
         else:
             try:
                 data = json_mod.loads(content)
             except json_mod.JSONDecodeError:
-                try:
-                    import yaml
-                    data = yaml.safe_load(content)
-                except ImportError:
-                    raise ValueError(
-                        "Could not parse as JSON. Install PyYAML for YAML support."
-                    )
+                if ops_path.suffix == '.json':
+                    raise
+                data = yaml.safe_load(content)
 
         if not isinstance(data, dict) or "operations" not in data:
             raise ValueError(
@@ -573,8 +556,7 @@ def batch_cmd(
                     "(rename/replace/add/edit/remove)"
                 )
 
-            op_type = list(op.keys())[0]
-            op_args = op[op_type]
+            op_type, op_args = next(iter(op.items()))
 
             if not isinstance(op_args, dict):
                 raise ValueError(
@@ -582,38 +564,21 @@ def batch_cmd(
                     "expected a mapping of settings (e.g. 'selector', 'value')"
                 )
 
-            if op_type == "edit":
+            if op_type in ("edit", "add"):
                 selector_str = op_args.get("selector")
                 value = op_args.get("value")
                 if not selector_str or value is None:
                     raise ValueError(
-                        f"Operation #{i+1} (edit): requires 'selector' and 'value'"
+                        f"Operation #{i+1} ({op_type}): requires 'selector' and 'value'"
                     )
-                result = cmd_edit(
-                    selector_str=selector_str, value=value, apply=apply,
-                    language=_state["language"],
+                command = cmd_add if op_type == "add" else cmd_edit
+                positioning = (
+                    {key: op_args.get(key) for key in ("before", "after", "at")}
+                    if op_type == "add" else {}
                 )
-                if result.strip():
-                    all_output.append(result)
-
-            elif op_type == "add":
-                selector_str = op_args.get("selector")
-                value = op_args.get("value")
-                if not selector_str or value is None:
-                    raise ValueError(
-                        f"Operation #{i+1} (add): requires 'selector' and 'value'"
-                    )
-                before = op_args.get("before")
-                after = op_args.get("after")
-                at = op_args.get("at")
-                result = cmd_add(
-                    selector_str=selector_str,
-                    value=value,
-                    before=before,
-                    after=after,
-                    at=at,
-                    apply=apply,
-                    language=_state["language"],
+                result = command(
+                    selector_str=selector_str, value=value, apply=apply,
+                    language=_state["language"], **positioning,
                 )
                 if result.strip():
                     all_output.append(result)
@@ -635,7 +600,7 @@ def batch_cmd(
                 pattern = op_args.get("pattern")
                 replacement = op_args.get("replacement")
                 target_path = op_args.get("path")
-                if not pattern or not replacement or not target_path:
+                if not pattern or replacement is None or not target_path:
                     raise ValueError(
                         f"Operation #{i+1} (replace): requires 'pattern', "
                         "'replacement', and 'path'"

@@ -136,85 +136,38 @@ class SelectorTransformer(Transformer):
     def explicit_selector(self, items):
         # Filter out tokens (like ::), keep only transformed rules
         transformed = [item for item in items if not isinstance(item, Token)]
+        return self._build_selector(transformed[0], transformed[1:])
 
-        file_path = transformed[0]
+    def dotted_selector(self, items):
+        transformed = [item for item in items if not isinstance(item, Token)]
+        return self._build_selector("", transformed)
+
+    def _build_selector(self, file_path, rest):
         # symbol_path is optional (for module-level components like imports)
         symbol_path = []
         type_filter = None
-        components = []
-
-        rest = transformed[1:]
         # Consume symbol_path (list), then optional type_filter (str), then components (dicts)
         if rest and isinstance(rest[0], list):
             symbol_path = rest[0]
             rest = rest[1:]
-        if rest and isinstance(rest[0], str) and not isinstance(rest[0], dict):
+        if rest and isinstance(rest[0], str):
             type_filter = rest[0]
             rest = rest[1:]
-        components = rest
-
-        if components:
-            comp = components[0]
-            return ExtendedSelector(
-                file_path=file_path,
-                symbol_path=symbol_path,
-                component=comp["name"],
-                accessor=comp.get("accessor"),
-                pseudo_class=comp.get("pseudo_class"),
-                type_filter=type_filter,
-            )
-        else:
-            return ExtendedSelector(
-                file_path=file_path,
-                symbol_path=symbol_path,
-                type_filter=type_filter,
-            )
-
-    def dotted_selector(self, items):
-        # Filter out tokens, keep only transformed rules
-        transformed = [item for item in items if not isinstance(item, Token)]
-
-        # symbol_path is required for dotted_selector
-        symbol_path = transformed[0]
-        type_filter = None
-        components = []
-
-        rest = transformed[1:]
-        if rest and isinstance(rest[0], str) and not isinstance(rest[0], dict):
-            type_filter = rest[0]
-            rest = rest[1:]
-        components = rest
-
-        if components:
-            comp = components[0]
-            return ExtendedSelector(
-                file_path="",  # No explicit file path
-                symbol_path=symbol_path,
-                component=comp["name"],
-                accessor=comp.get("accessor"),
-                pseudo_class=comp.get("pseudo_class"),
-                type_filter=type_filter,
-            )
-        else:
-            return ExtendedSelector(
-                file_path="",
-                symbol_path=symbol_path,
-                type_filter=type_filter,
-            )
+        comp = rest[0] if rest else {}
+        return ExtendedSelector(
+            file_path=file_path,
+            symbol_path=symbol_path,
+            component=comp.get("name"),
+            accessor=comp.get("accessor"),
+            pseudo_class=comp.get("pseudo_class"),
+            type_filter=type_filter,
+        )
 
     def file_path(self, items):
         return str(items[0])
 
     def symbol_path(self, items):
-        # items will be symbol_segment nodes, extract their values
-        result = []
-        for item in items:
-            if isinstance(item, Token):
-                result.append(str(item))
-            else:
-                # It's a symbol_segment rule result
-                result.append(str(item))
-        return result
+        return [str(item) for item in items]
 
     def symbol_segment(self, items):
         # Extract the token value (WILDCARD or IDENTIFIER)
@@ -222,14 +175,7 @@ class SelectorTransformer(Transformer):
 
     def component(self, items):
         result = {"name": str(items[0])}
-        if len(items) > 1:
-            item = items[1]
-            if isinstance(item, _PseudoClassMarker):
-                result["pseudo_class"] = item.value
-            else:
-                result["accessor"] = item
-        if len(items) > 2:
-            item = items[2]
+        for item in items[1:]:
             if isinstance(item, _PseudoClassMarker):
                 result["pseudo_class"] = item.value
             else:
