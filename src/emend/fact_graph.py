@@ -53,6 +53,8 @@ from emend.analysis_snapshot import (
     ExportedSymbolFact,
     Fact,
     FileRevision,
+    FlowEdgeFact,
+    FlowEventFact,
     FuncSummaryFact,
     ImportFact,
     MethodCallFact,
@@ -68,7 +70,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-FACT_GRAPH_SCHEMA_VERSION = "9"
+FACT_GRAPH_SCHEMA_VERSION = "10"
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +212,37 @@ _SCHEMA_INIT = """\
     edge_kind: String,
     from_line: Int,
     to_line: Int
+}}
+
+{:create flow_event {
+    file_path: String,
+    event_id: Int
+    =>
+    func_id: String,
+    func_name: String,
+    func_start: Int,
+    role: String,
+    var: String,
+    access_path: String,
+    block: Int,
+    start_byte: Int,
+    end_byte: Int,
+    start_line: Int,
+    start_col: Int,
+    end_line: Int,
+    end_col: Int,
+    ordinal: Int,
+    call_id: Int default -1,
+    arg_index: Int default -1,
+    arg_name: String default "",
+    text: String default ""
+}}
+
+{:create flow_edge {
+    file_path: String,
+    from_event: Int,
+    to_event: Int,
+    edge_kind: String
 }}
 
 {:create def_use {
@@ -616,6 +649,53 @@ class FactGraph:
     def add_cfg_edge(self, fact: CfgEdgeFact) -> None:
         """Add a control flow edge fact."""
         self.add_cfg_edges_batch([fact])
+
+    def add_flow_event(self, fact: FlowEventFact) -> None:
+        """Add one value-flow occurrence fact."""
+        self.add_flow_events_batch([fact])
+
+    def add_flow_events_batch(self, facts: list[FlowEventFact]) -> None:
+        """Bulk-insert value-flow occurrence facts."""
+        if not facts:
+            return
+        rows = [[
+            f.file_path, f.event_id, f.func_id, f.func_name, f.func_start,
+            f.role, f.var or "", f.access_path or "", f.block, f.start_byte, f.end_byte,
+            f.start_line, f.start_col, f.end_line, f.end_col,
+            f.ordinal, -1 if f.call_id is None else f.call_id,
+            -1 if f.arg_index is None else f.arg_index,
+            f.arg_name or "", f.text,
+        ] for f in facts]
+        self._put_batch(
+            "flow_event",
+            "file_path, event_id, func_id, func_name, func_start, role, var, access_path, "
+            "block, start_byte, end_byte, start_line, start_col, end_line, "
+            "end_col, ordinal, call_id, arg_index, arg_name, text",
+            "file_path, event_id => func_id, func_name, func_start, role, var, access_path, "
+            "block, start_byte, end_byte, start_line, start_col, end_line, "
+            "end_col, ordinal, call_id, arg_index, arg_name, text",
+            rows,
+        )
+
+    def add_flow_edge(self, fact: FlowEdgeFact) -> None:
+        """Add one directed value-flow edge fact."""
+        self.add_flow_edges_batch([fact])
+
+    def add_flow_edges_batch(self, facts: list[FlowEdgeFact]) -> None:
+        """Bulk-insert value-flow edges.
+
+        ``edge_kind`` is intentionally part of the Cozo key: two occurrences
+        can have more than one semantic relationship between them.
+        """
+        if not facts:
+            return
+        rows = [[f.file_path, f.from_event, f.to_event, f.edge_kind] for f in facts]
+        self._put_batch(
+            "flow_edge",
+            "file_path, from_event, to_event, edge_kind",
+            "file_path, from_event, to_event, edge_kind",
+            rows,
+        )
 
     def add_def_use(self, fact: DefUseFact) -> None:
         """Add a definition-use fact."""
@@ -1114,6 +1194,67 @@ class FactGraph:
             for r in result["rows"]
         ]
 
+    def flow_events(
+        self,
+        file_path: str | None = None,
+        func_id: str | None = None,
+        role: str | None = None,
+    ) -> list[FlowEventFact]:
+        """Query occurrence/value events with optional narrow filters."""
+        clauses = [
+            "*flow_event[fp, eid, fid, fn, fs, role, var, ap, block, sb, eb, "
+            "sl, sc, el, ec, ord, cid, ai, an, text]"
+        ]
+        params: dict[str, Any] = {}
+        if file_path is not None:
+            clauses.append("fp == $file_path")
+            params["file_path"] = file_path
+        if func_id is not None:
+            clauses.append("fid == $func_id")
+            params["func_id"] = func_id
+        if role is not None:
+            clauses.append("role == $role")
+            params["role"] = role
+        result = self._client.run(
+            "?[fp, eid, fid, fn, fs, role, var, ap, block, sb, eb, sl, sc, el, ec, ord, cid, ai, an, text] := "
+            + ", ".join(clauses), params
+        )
+        return [
+            FlowEventFact(
+                file_path=r[0], event_id=r[1], func_id=r[2], func_name=r[3],
+                func_start=r[4], role=r[5], var=r[6] or None, access_path=r[7] or None,
+                block=r[8], start_byte=r[9], end_byte=r[10], start_line=r[11],
+                start_col=r[12], end_line=r[13], end_col=r[14], ordinal=r[15],
+                call_id=None if r[16] == -1 else r[16],
+                arg_index=None if r[17] == -1 else r[17],
+                arg_name=r[18] or None,
+                text=r[19],
+            )
+            for r in result["rows"]
+        ]
+
+    def flow_edges(
+        self,
+        file_path: str | None = None,
+        edge_kind: str | None = None,
+    ) -> list[FlowEdgeFact]:
+        """Query occurrence/value edges with optional filters."""
+        clauses = ["*flow_edge[fp, fr, to, kind]"]
+        params: dict[str, Any] = {}
+        if file_path is not None:
+            clauses.append("fp == $file_path")
+            params["file_path"] = file_path
+        if edge_kind is not None:
+            clauses.append("kind == $edge_kind")
+            params["edge_kind"] = edge_kind
+        result = self._client.run(
+            "?[fp, fr, to, kind] := " + ", ".join(clauses), params
+        )
+        return [
+            FlowEdgeFact(file_path=r[0], from_event=r[1], to_event=r[2], edge_kind=r[3])
+            for r in result["rows"]
+        ]
+
     def def_uses(
         self,
         func_qn: str | None = None,
@@ -1312,6 +1453,30 @@ class FactGraph:
             {"qn": symbol_qn},
         )
         return {r[0] for r in result["rows"]} - {symbol_qn}
+
+    @staticmethod
+    def _cozo_quote(value: str | int) -> str:
+        """Escape a value for a CozoScript single-quoted literal."""
+        if isinstance(value, str):
+            return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+        return str(value)
+
+    @staticmethod
+    def _inline_relation(
+        name: str,
+        columns: list[str],
+        rows: list[tuple[str | int, ...]],
+    ) -> str:
+        """Render a small in-memory relation for a CozoScript query."""
+        header = ", ".join(columns)
+        if not rows:
+            return f"{name}[{header}] <- []\n"
+        quote = FactGraph._cozo_quote
+        values = ", ".join(
+            "[" + ", ".join(quote(value) for value in row) + "]"
+            for row in rows
+        )
+        return f"{name}[{header}] <- [{values}]\n"
 
     # -- Dead code detection as Datalog ----------------------------------
 
@@ -1883,694 +2048,6 @@ class FactGraph:
             )
         return [(r[0], r[1]) for r in result["rows"]]
 
-    # -- Trace (data-flow) analysis via Datalog --------------------------------
-
-    @staticmethod
-    def _cozo_quote(v: str | int) -> str:
-        """Escape *v* for a CozoScript single-quoted string literal.
-
-        Subscript expressions like ``request.POST["id"]`` break double-quoted
-        CozoScript strings, so we use single-quoted literals throughout.
-        """
-        if isinstance(v, str):
-            escaped = v.replace("\\", "\\\\").replace("'", "\\'")
-            return f"'{escaped}'"
-        return str(v)
-
-    @staticmethod
-    def _inline_relation(
-        name: str,
-        cols: list[str],
-        rows: list[tuple[str | int, ...]],
-    ) -> str:
-        """Build a CozoScript inline-relation rule.
-
-        Returns a string like ``name[c1, c2] <- [[v1, v2], [v3, v4]]\\n``
-        or ``name[c1, c2] <- []\\n`` when *rows* is empty.
-        """
-        col_str = ", ".join(cols)
-        if not rows:
-            return f"{name}[{col_str}] <- []\n"
-        _q = FactGraph._cozo_quote
-        formatted = ", ".join(
-            "[" + ", ".join(_q(v) for v in row) + "]"
-            for row in rows
-        )
-        return f"{name}[{col_str}] <- [{formatted}]\n"
-
-    def trace_propagation_datalog(
-        self,
-        sources: list[tuple[str, str, str, int, str]],  # (file_path, func_qn, var_name, block_id, label)
-        sinks: list[tuple[str, str, str, int, str]] | None = None,  # (file_path, func_qn, var_name, block_id, label)
-        effect_sinks: list[tuple[str, str]] | None = None,  # (label, effect_kind) e.g. [("toctou", "writes")]
-        sanitizers: list[tuple[str, str, str, int, str]] | None = None,  # same as sources
-        sanitizer_quantifier: str = "all_paths",  # "all_paths" or "some_path"
-        source_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
-        sanitizer_lines: list[tuple[str, str, str, str, int, int]] | None = None,  # (fp, fq, var, lbl, block_id, line)
-        sink_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
-        scope_kills: list[tuple[str, str, str, int]] | None = None,  # (file_path, func_qn, label, block_id)
-        scope_kill_lines: list[tuple[str, str, str, int, int]] | None = None,  # (fp, fq, lbl, block_id, line)
-        scalar_types: list[str] | None = None,  # type names to filter out from sources (e.g. ["int", "float"])
-    ) -> list[TraceFlowFact]:
-        """Intraprocedural taint propagation via Datalog over def_use facts.
-
-        Pattern matching (identifying sources/sinks/sanitizers) stays in Python.
-        This method handles propagation: given pre-computed source/sink locations,
-        it traces taint through CFG-edge reachability and def-use chains.
-
-        **Path-sensitive sanitization**: Taint only propagates to blocks that are
-        *unsanitized-reachable* from the source via CFG edges.  With the default
-        ``all_paths`` quantifier, a sanitizer must appear on **every** CFG path
-        from source to sink to suppress the violation.  With ``some_path``, a
-        sanitizer on **any** path suffices (the old behaviour).
-
-        **Intra-block line ordering**: When a sanitizer and sink co-occur in the
-        same basic block, the violation is suppressed only if the sanitizer line
-        precedes the sink line.  Pass ``sanitizer_lines`` and ``sink_lines`` to
-        enable this guard.
-
-        When ``effect_sinks`` is provided, violations are also detected when a
-        tainted variable (or its attributes) is written/mutated in a reachable
-        block.  This replaces the old ``attribute_mutation_sinks`` mechanism.
-
-        Returns TraceFlowFact entries for each source-to-sink violation found.
-        """
-        if not sources:
-            return []
-        if not sinks and not effect_sinks:
-            return []
-
-        _ir = self._inline_relation
-        _5cols = ["fp", "fq", "var", "bid", "lbl"]
-
-        # Insert source/sink/sanitizer matches as inline relations
-        src_rule = _ir("trace_source", _5cols, sources)
-        sink_rule = _ir("trace_sink", _5cols, sinks or [])
-        # Per-variable sanitizer relation: includes the variable name so that
-        # sanitizing `a` does not clear taint on `b` in the same block.
-        sanitizer_var_rule = _ir(
-            "sanitizer_var", _5cols,
-            sanitizers or [],
-        )
-        # Block-level sanitizer (derived): a block has ANY sanitizer for a label.
-        # Used for scope-kill-style checks and some_path quantifier.
-        sanitizer_block_rule = (
-            "sanitizer_block[fp, fq, lbl, bid] := "
-            "sanitizer_var[fp, fq, _, bid, lbl]\n"
-        )
-
-        # Effect sink rules
-        effect_rules = ""
-        if effect_sinks:
-            effect_rules += _ir("effect_sink_label", ["lbl"],
-                                [(lbl,) for lbl, _ in effect_sinks])
-            effect_rules += 'mutate_kind[k] <- [["write"], ["aug_write"]]\n'
-
-        # Intra-block line-ordering
-        _5line = ["fp", "fq", "lbl", "bid", "line"]
-        _6line = ["fp", "fq", "var", "lbl", "bid", "line"]
-        source_line_rule = _ir("source_in_block", _5line, source_lines or [])
-        san_line_rule = _ir("sanitizer_in_block", _6line, sanitizer_lines or [])
-        sink_line_rule = _ir("sink_in_block", _5line, sink_lines or [])
-
-        # Scope kills
-        scope_kill_rule = _ir("scope_kill", ["fp", "fq", "lbl", "bid"],
-                              scope_kills or [])
-        scope_kill_line_rule = _ir("scope_kill_in_block", _5line,
-                                   scope_kill_lines or [])
-
-        # -- type-conditioned filtering --
-        if scalar_types:
-            type_filter_rules = (
-                _ir("scalar_type", ["t"], [(t,) for t in scalar_types])
-                + "scalar_typed[fp, fq, var, block] := "
-                "trace_source[fp, fq, var, block, _], "
-                "*type_binding[_, fp, line, _, type_str], "
-                "*def_use[fp, fq, var, _, block, _, line, _, _, _], "
-                "scalar_type[type_str]\n"
-                "effective_source[fp, fq, var, block, lbl] := "
-                "trace_source[fp, fq, var, block, lbl], "
-                "not scalar_typed[fp, fq, var, block]\n"
-            )
-            source_relation = "effective_source"
-        else:
-            type_filter_rules = ""
-            source_relation = "trace_source"
-
-        # -- Build the Datalog query --
-
-        if sanitizer_quantifier == "some_path":
-            # some_path: sanitizer on ANY path suppresses.
-            # If source can reach a sanitizer block, and that sanitizer block
-            # can reach the sink, the violation is suppressed.
-            # Per-variable: only suppresses taint for the specific sanitized variable.
-            query = (
-                f"{src_rule}"
-                f"{sink_rule}"
-                f"{sanitizer_var_rule}"
-                f"{sanitizer_block_rule}"
-                f"{effect_rules}"
-                f"{source_line_rule}"
-                f"{san_line_rule}"
-                f"{sink_line_rule}"
-                f"{scope_kill_rule}"
-                f"{type_filter_rules}"
-
-                # CFG reachability (for some_path sanitizer check)
-                "cfg_reaches[fp, fq, block, block] := "
-                "*cfg_block[fp, fq, block, _, _]\n"
-
-                "cfg_reaches[fp, fq, from_b, to_b] := "
-                "cfg_reaches[fp, fq, from_b, mid], "
-                "*cfg_edge[fp, fq, mid, to_b, _, _, _]\n"
-
-                # Per-variable: a sink var is sanitized if source→sanitizer(var)→sink via CFG
-                "sink_sanitized[fp, fq, var, lbl, sink_block] := "
-                f"{source_relation}[fp, fq, var, src_block, lbl], "
-                "sanitizer_var[fp, fq, var, san_block, lbl], "
-                "cfg_reaches[fp, fq, src_block, san_block], "
-                "cfg_reaches[fp, fq, san_block, sink_block]\n"
-
-                # Taint sources are tainted
-                "tainted[fp, fq, var, block, lbl] := "
-                f"{source_relation}[fp, fq, var, block, lbl]\n"
-
-                # Propagation through def-use chains (no blocking — sanitizer
-                # suppression happens at violation level for some_path)
-                "tainted[fp, fq, var, use_block, lbl] := "
-                "tainted[fp, fq, var, def_block, lbl], "
-                "*def_use[fp, fq, var, _kind, def_block, use_block, _, _, _, _], "
-                "not scope_kill[fp, fq, lbl, def_block]\n"
-
-                # Cross-variable taint via assignment (some_path variant)
-                "tainted[fp, fq, def_var, block, lbl] := "
-                "tainted[fp, fq, use_var, block, lbl], "
-                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, _], "
-                "*def_use[fp, fq, def_var, _, block, _, def_line, _, _, _], "
-                "use_var != def_var, "
-                "use_line == def_line, "
-                "not str_includes(def_var, \".\"), "
-                "not str_includes(def_var, \"[\"), "
-                "not scope_kill[fp, fq, lbl, block]\n"
-
-                # Field/subscript assignment taint (some_path variant):
-                # ``obj.field = tainted_var`` where def_col < use_col ensures
-                # genuine LHS=RHS assignment rather than coincidental same-line.
-                "tainted[fp, fq, def_var, block, lbl] := "
-                "tainted[fp, fq, use_var, block, lbl], "
-                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, use_col], "
-                "*def_use[fp, fq, def_var, _, block, _, def_line, _, def_col, _], "
-                "use_var != def_var, "
-                "use_line == def_line, "
-                "def_col < use_col, "
-                "not scope_kill[fp, fq, lbl, block]\n"
-
-                # Container mutation taint (some_path variant)
-                "tainted[fp, fq, receiver, block, lbl] := "
-                "tainted[fp, fq, use_var, block, lbl], "
-                "*method_call[fp, fq, receiver, _method, block, call_line], "
-                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, _], "
-                "use_line == call_line, "
-                "receiver != use_var, "
-                "not scope_kill[fp, fq, lbl, block]\n"
-
-                # Pattern-based violations: taint reaches sink, not sanitized
-                # Per-variable: only suppress if THIS sink_var was sanitized
-                "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
-                "tainted[fp, fq, sink_var, sink_block, lbl], "
-                "trace_sink[fp, fq, sink_var, sink_block, lbl], "
-                f"{source_relation}[fp, fq, src_var, src_block, lbl], "
-                "not sink_sanitized[fp, fq, sink_var, lbl, sink_block]\n"
-            )
-        else:
-            # all_paths (default): sanitizer must be on EVERY path.
-            # Per-variable: unsanitized reachability is tracked per (var, label)
-            # so that sanitizing variable `a` does not clear taint on variable `b`.
-            query = (
-                f"{src_rule}"
-                f"{sink_rule}"
-                f"{sanitizer_var_rule}"
-                f"{sanitizer_block_rule}"
-                f"{effect_rules}"
-                f"{source_line_rule}"
-                f"{san_line_rule}"
-                f"{sink_line_rule}"
-                f"{scope_kill_rule}"
-                f"{type_filter_rules}"
-
-                # Check if any CFG edges exist for functions with taint sources
-                "has_cfg[fp, fq] := "
-                f"{source_relation}[fp, fq, _, _, _], "
-                "*cfg_edge[fp, fq, _, _, _, _, _]\n"
-
-                # Per-variable unsanitized reachability.
-                # Base case: source variable is unsanitized at its source block
-                "unsanitized[fp, fq, var, lbl, block] := "
-                f"{source_relation}[fp, fq, var, block, lbl]\n"
-
-                # With CFG: propagate along CFG edges, blocked by sanitizer for
-                # this specific variable (not all variables in the block)
-                "unsanitized[fp, fq, var, lbl, to_block] := "
-                "unsanitized[fp, fq, var, lbl, from_block], "
-                "has_cfg[fp, fq], "
-                "*cfg_edge[fp, fq, from_block, to_block, _, _, _], "
-                "not sanitizer_var[fp, fq, var, from_block, lbl], "
-                "not scope_kill[fp, fq, lbl, from_block]\n"
-
-                # Without CFG (fallback): propagate unsanitized via def-use
-                "unsanitized[fp, fq, var, lbl, use_block] := "
-                "unsanitized[fp, fq, var, lbl, def_block], "
-                "not has_cfg[fp, fq], "
-                "*def_use[fp, fq, _, _, def_block, use_block, _, _, _, _], "
-                "not sanitizer_var[fp, fq, var, def_block, lbl], "
-                "not scope_kill[fp, fq, lbl, def_block]\n"
-
-                # A variable is tainted in a block if:
-                #   (a) it's a source in that block, OR
-                #   (b) taint propagates via def-use AND var is unsanitized at use block
-                #   (c) taint flows across variable names via assignment
-                "tainted[fp, fq, var, block, lbl] := "
-                f"{source_relation}[fp, fq, var, block, lbl]\n"
-
-                "tainted[fp, fq, var, use_block, lbl] := "
-                "tainted[fp, fq, var, def_block, lbl], "
-                "*def_use[fp, fq, var, _kind, def_block, use_block, _, _, _, _], "
-                "unsanitized[fp, fq, var, lbl, use_block]\n"
-
-                # Cross-variable taint via assignment: ``y = f(x)`` where x is
-                # tainted means y is tainted.  Uses use_var's unsanitized state
-                # to determine whether its taint should propagate.
-                "tainted[fp, fq, def_var, block, lbl] := "
-                "tainted[fp, fq, use_var, block, lbl], "
-                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, _], "
-                "*def_use[fp, fq, def_var, _, block, _, def_line, _, _, _], "
-                "use_var != def_var, "
-                "use_line == def_line, "
-                "not str_includes(def_var, \".\"), "
-                "not str_includes(def_var, \"[\"), "
-                "unsanitized[fp, fq, use_var, lbl, block]\n"
-
-                # Field/subscript assignment taint (all_paths variant):
-                # ``obj.field = tainted_var`` with column ordering guard.
-                "tainted[fp, fq, def_var, block, lbl] := "
-                "tainted[fp, fq, use_var, block, lbl], "
-                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, use_col], "
-                "*def_use[fp, fq, def_var, _, block, _, def_line, _, def_col, _], "
-                "use_var != def_var, "
-                "use_line == def_line, "
-                "def_col < use_col, "
-                "unsanitized[fp, fq, use_var, lbl, block]\n"
-
-                # Inherit unsanitized status for cross-variable taint:
-                # when def_var gets tainted from use_var, def_var is also
-                # unsanitized (unless it has its own sanitizer).
-                "unsanitized[fp, fq, def_var, lbl, block] := "
-                "unsanitized[fp, fq, use_var, lbl, block], "
-                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, _], "
-                "*def_use[fp, fq, def_var, _, block, _, def_line, _, _, _], "
-                "use_var != def_var, "
-                "use_line == def_line, "
-                "not str_includes(def_var, \".\"), "
-                "not str_includes(def_var, \"[\"), "
-                "not sanitizer_var[fp, fq, def_var, block, lbl]\n"
-
-                # Inherit unsanitized for field/subscript assignments.
-                "unsanitized[fp, fq, def_var, lbl, block] := "
-                "unsanitized[fp, fq, use_var, lbl, block], "
-                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, use_col], "
-                "*def_use[fp, fq, def_var, _, block, _, def_line, _, def_col, _], "
-                "use_var != def_var, "
-                "use_line == def_line, "
-                "def_col < use_col, "
-                "not sanitizer_var[fp, fq, def_var, block, lbl]\n"
-
-                # Container mutation taint: tainted var passed to method call
-                "tainted[fp, fq, receiver, block, lbl] := "
-                "tainted[fp, fq, use_var, block, lbl], "
-                "*method_call[fp, fq, receiver, _method, block, call_line], "
-                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, _], "
-                "use_line == call_line, "
-                "receiver != use_var, "
-                "unsanitized[fp, fq, use_var, lbl, block]\n"
-
-                # Inherit unsanitized for container mutation
-                "unsanitized[fp, fq, receiver, lbl, block] := "
-                "unsanitized[fp, fq, use_var, lbl, block], "
-                "*method_call[fp, fq, receiver, _method, block, call_line], "
-                "*def_use[fp, fq, use_var, _, _, block, _, use_line, _, _], "
-                "use_line == call_line, "
-                "receiver != use_var, "
-                "not sanitizer_var[fp, fq, receiver, block, lbl]\n"
-
-                # Pattern-based violations: taint reaches sink
-                "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
-                "tainted[fp, fq, sink_var, sink_block, lbl], "
-                "trace_sink[fp, fq, sink_var, sink_block, lbl], "
-                f"{source_relation}[fp, fq, src_var, src_block, lbl]\n"
-            )
-
-        # Effect-based violations: tainted var is written/mutated
-        # Three rule variants implement is_var_or_attr matching.
-        # Each excludes the source block to avoid self-triggering (the source
-        # definition itself is a "write" but should not count as a violation).
-        if effect_sinks:
-            # Variant 1: exact var match — write to the tainted var itself
-            query += (
-                "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
-                "tainted[fp, fq, sink_var, sink_block, lbl], "
-                "effect_sink_label[lbl], "
-                "*def_use[fp, fq, sink_var, kind, sink_block, _, _, _, _, _], "
-                "mutate_kind[kind], "
-                f"{source_relation}[fp, fq, src_var, src_block, lbl], "
-                "sink_block != src_block\n"
-            )
-            # Variant 2: dotted attribute — write to sink_var.field
-            query += (
-                "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
-                "tainted[fp, fq, sink_var, sink_block, lbl], "
-                "effect_sink_label[lbl], "
-                "*def_use[fp, fq, var_name, kind, sink_block, _, _, _, _, _], "
-                "mutate_kind[kind], "
-                'starts_with(var_name, concat(sink_var, ".")), '
-                f"{source_relation}[fp, fq, src_var, src_block, lbl], "
-                "sink_block != src_block\n"
-            )
-            # Variant 3: method call on tainted var (e.g. sink_var.append())
-            query += (
-                "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
-                "tainted[fp, fq, sink_var, sink_block, lbl], "
-                "effect_sink_label[lbl], "
-                "*method_call[fp, fq, sink_var, _, sink_block, _], "
-                f"{source_relation}[fp, fq, src_var, src_block, lbl], "
-                "sink_block != src_block\n"
-            )
-
-        # Same-block suppression: if sanitizer precedes sink in the same block,
-        # filter out those violations.  Per-variable: only suppress when the
-        # sanitized variable matches the sink variable.
-        query += (
-            f"{scope_kill_line_rule}"
-            "same_block_sanitized[fp, fq, var, lbl, block] := "
-            "sanitizer_in_block[fp, fq, var, lbl, block, san_line], "
-            "sink_in_block[fp, fq, lbl, block, sink_line], "
-            "san_line < sink_line\n"
-        )
-        # Scope kill same-block suppression: if scope sanitizer appears
-        # BETWEEN a source and a sink in the same block, suppress.
-        # The kill must be after the source (otherwise it kills taint
-        # that doesn't exist yet) and before the sink.
-        # All three line values use 1-based pattern-match line numbers.
-        # Scope kill same-block: applies to ALL variables for the label
-        # (scope kills are not per-variable), so we need a sink_var wildcard.
-        query += (
-            "same_block_sanitized[fp, fq, sink_var, lbl, block] := "
-            "scope_kill_in_block[fp, fq, lbl, block, kill_line], "
-            "sink_in_block[fp, fq, lbl, block, sink_line], "
-            "source_in_block[fp, fq, lbl, block, src_line], "
-            "trace_sink[fp, fq, sink_var, block, lbl], "
-            "kill_line > src_line, "
-            "kill_line < sink_line\n"
-        )
-        # For effect-based sinks: the mutation line is the def_line in def_use.
-        if effect_sinks:
-            # The sanitizer variable (e.g. "x") must match or be a prefix of
-            # the written variable (e.g. "x" or "x.dirty").  The violation's
-            # sink_var comes from the tainted relation and is the base variable.
-            query += (
-                "same_block_sanitized[fp, fq, san_var, lbl, block] := "
-                "sanitizer_in_block[fp, fq, san_var, lbl, block, san_line], "
-                "effect_sink_label[lbl], "
-                "*def_use[fp, fq, _, kind, block, _, write_line, _, _, _], "
-                "mutate_kind[kind], "
-                "san_line < write_line\n"
-            )
-
-        query += (
-            "?[fp, fq, src_var, sink_var, lbl, src_block, sink_block] := "
-            "violation[fp, fq, src_var, sink_var, lbl, src_block, sink_block], "
-            "not same_block_sanitized[fp, fq, sink_var, lbl, sink_block]"
-        )
-
-        result = self._client.run(query)
-        return [
-            TraceFlowFact(
-                source_var=r[2], sink_var=r[3], label=r[4],
-                file_path=r[0], func_qn=r[1],
-                source_line=r[5], sink_line=r[6],
-            )
-            for r in result["rows"]
-        ]
-
-    def interprocedural_trace_datalog(
-        self,
-        sources: list[tuple[str, str, str, int, str]] | None = None,
-        sinks: list[tuple[str, str, str, int, str]] | None = None,
-        max_iterations: int = 10,
-    ) -> list[TraceFlowFact]:
-        """Interprocedural taint analysis via recursive Datalog.
-
-        Replaces the Python fixed-point loop in run_interprocedural_taint_analysis().
-        Uses func_summary and call facts to propagate taint across function boundaries.
-
-        When *sources* and *sinks* are provided (as ``(file_path, func_qn, var_name,
-        block_id, label)`` tuples), they are used to seed the query via inline
-        relations so that only relevant label/param combinations are followed.
-        When omitted, all stored ``func_summary`` facts are considered.
-        """
-        _ir = self._inline_relation
-        _5cols = ["fp", "fq", "var", "bid", "lbl"]
-
-        # Seed inline relations when config-driven sources/sinks are provided.
-        # The interprocedural summary relation does not preserve exact match
-        # vars/blocks across call boundaries, so these seeds constrain the
-        # caller/callee functions and labels rather than pretending to track
-        # the original per-match tuples end-to-end.
-        config_seed = ""
-        if sources is not None:
-            config_seed += _ir("cfg_source", _5cols, sources)
-        if sinks is not None:
-            config_seed += _ir("cfg_sink", _5cols, sinks)
-
-        source_seed_rule = ""
-        source_violation_guard = ""
-        if sources is not None:
-            source_seed_rule = (
-                "seed_source[fp, fq, lbl] := cfg_source[fp, fq, _, _, lbl]\n"
-            )
-            source_violation_guard = ", seed_source[fp, caller_fq, lbl]"
-
-        sink_seed_rule = ""
-        sink_summary_guard = ""
-        if sinks is not None:
-            sink_seed_rule = (
-                "seed_sink[fq, lbl] := cfg_sink[_, fq, _, _, lbl]\n"
-            )
-            sink_summary_guard = ", seed_sink[fq, lbl]"
-
-        query = config_seed + source_seed_rule + sink_seed_rule + (
-            # Direct summaries (from intraprocedural analysis)
-            "param_flows_to_return[fq, param] := "
-            "*func_summary[fq, param, ftr, _, _], ftr == true\n"
-
-            # Direct summaries: param flows to sink
-            "param_flows_to_sink[fq, param, lbl] := "
-            f"*func_summary[fq, param, _, fts, lbl], fts == true{sink_summary_guard}\n"
-
-            # Transitive: if callee's param flows to return, propagate through call
-            "param_flows_to_return[caller_fq, caller_param] := "
-            "*call[caller_fq, callee_fq, _, _, _, _, _], "
-            "param_flows_to_return[callee_fq, callee_param], "
-            "*def_use[_, caller_fq, caller_param, _, _, _, _, _, _, _]\n"
-
-            # Violations: tainted param flows to sink through call chain
-            "violation[caller_fq, callee_fq, fp, param, lbl] := "
-            "*call[caller_fq, callee_fq, fp, _, _, _, _], "
-            f"param_flows_to_sink[callee_fq, param, lbl]{source_violation_guard}\n"
-
-            "?[caller_fq, callee_fq, fp, param, lbl] := "
-            "violation[caller_fq, callee_fq, fp, param, lbl]"
-        )
-
-        result = self._client.run(query)
-        return [
-            TraceFlowFact(
-                source_var=r[3], sink_var=r[3], label=r[4],
-                file_path=r[2], func_qn=r[0],
-                source_line=0, sink_line=0,
-            )
-            for r in result["rows"]
-        ]
-
-    def flow_rule_check_datalog(
-        self,
-        sources: list[tuple[str, str, str, int]],  # (file_path, func_qn, var_name, block_id)
-        sinks: list[tuple[str, str, str, int]],     # same format
-        through: list[tuple[str, str, str, int]] | None = None,  # must-pass-through points
-        not_through: list[tuple[str, str, str, int]] | None = None,  # must-not-pass-through points
-        source_lines: dict[tuple[str, str, int], int] | None = None,
-        sink_lines: dict[tuple[str, str, int], int] | None = None,
-        blocker_lines: dict[tuple[str, str, int], int] | None = None,
-        include_locations: bool = False,
-    ) -> list[tuple]:
-        """Check flow-based lint rules via Datalog.
-
-        Replaces _check_flow_rule() in lint.py for flows-from/flows-to/not-through rules.
-
-        ``through`` uses CFG-edge reachability: a violation fires if any path
-        from source to sink *avoids* the required through-point (i.e., the
-        complement of ``all_paths`` — the through-point must appear on every
-        path to suppress the violation).
-
-        ``not_through`` blocks propagation through the specified points.
-
-        ``source_lines``, ``sink_lines``, ``blocker_lines`` are optional dicts
-        keyed by ``(file_path, func_qn, block_id)`` mapping to line numbers.
-        When provided, same-block results are post-filtered in Python:
-        source_line < sink_line, and source_line < blocker_line < sink_line.
-
-        Returns list of ``(file_path, func_qn, source_var, sink_var)`` tuples.
-        When ``include_locations`` is true, the result also includes
-        ``(source_block, sink_block)``.
-        """
-        if not sources or not sinks:
-            return []
-
-        _ir = self._inline_relation
-        _4cols = ["fp", "fq", "var", "bid"]
-        src_rule = _ir("flow_source", _4cols, sources)
-        sink_ir = _ir("flow_sink", _4cols, sinks)
-        not_through_rule = _ir("blocked", _4cols, not_through or [])
-
-        if through:
-            required_rule = _ir("required", ["fp", "fq", "bid"],
-                                [(fp, fq, bid) for fp, fq, _var, bid in through])
-
-            # CFG-edge reachability that avoids required points
-            through_rules = (
-                f"{required_rule}"
-
-                # blocked_block: union of required (for through) and not_through blocks
-                "blocked_cfg[fp, fq, bid] := required[fp, fq, bid]\n"
-                "blocked_cfg[fp, fq, bid] := blocked[fp, fq, _, bid]\n"
-
-                # Base case: source blocks can avoid required points
-                "avoids_required[fp, fq, block] := "
-                "flow_source[fp, fq, _, block], "
-                "not blocked_cfg[fp, fq, block]\n"
-
-                # Recursive: propagate along CFG edges, skipping blocked blocks
-                "avoids_required[fp, fq, to_block] := "
-                "avoids_required[fp, fq, from_block], "
-                "*cfg_edge[fp, fq, from_block, to_block, _, _, _], "
-                "not blocked_cfg[fp, fq, from_block], "
-                "not blocked_cfg[fp, fq, to_block]\n"
-
-                # through-violation: sink reachable while avoiding required point
-                "through_violation[fp, fq, src_var, sink_var] := "
-                "avoids_required[fp, fq, sink_block], "
-                "flow_sink[fp, fq, sink_var, sink_block], "
-                "flow_source[fp, fq, src_var, _]\n"
-            )
-        else:
-            through_rules = ""
-
-        # Standard def-use reachability (for not_through and basic flow)
-        query = (
-            f"{src_rule}"
-            f"{sink_ir}"
-            f"{not_through_rule}"
-            f"{through_rules}"
-
-            "reaches[fp, fq, var, block] := "
-            "flow_source[fp, fq, var, block]\n"
-
-            "reaches[fp, fq, target, use_block] := "
-            "reaches[fp, fq, source, def_block], "
-            "*def_use[fp, fq, source, _kind, def_block, use_block, _, _, _, _], "
-            "target = source, "
-            "not blocked[fp, fq, source, def_block], "
-            "not blocked[fp, fq, source, use_block]\n"
-        )
-
-        if through:
-            # Violation requires BOTH: flow reaches sink AND path avoids required
-            query += (
-                "?[fp, fq, src_var, sink_var, src_block, sink_block] := "
-                "reaches[fp, fq, sink_var, sink_block], "
-                "flow_sink[fp, fq, sink_var, sink_block], "
-                "through_violation[fp, fq, src_var, sink_var], "
-                "flow_source[fp, fq, src_var, src_block]"
-            )
-        else:
-            query += (
-                "?[fp, fq, src_var, sink_var, src_block, sink_block] := "
-                "reaches[fp, fq, sink_var, sink_block], "
-                "flow_sink[fp, fq, sink_var, sink_block], "
-                "flow_source[fp, fq, src_var, src_block]"
-            )
-
-        result = self._client.run(query)
-        raw = [(r[0], r[1], r[2], r[3], r[4], r[5]) for r in result["rows"]]
-
-        # Post-filter: same-block line ordering
-        if source_lines or sink_lines or blocker_lines:
-            filtered: list[tuple] = []
-            _src_lines = source_lines or {}
-            _sink_lines = sink_lines or {}
-            _blk_lines = blocker_lines or {}
-            for fp, fq, src_var, sink_var, src_block, sink_block in raw:
-                src_key = (fp, fq, src_block)
-                sink_key = (fp, fq, sink_block)
-                src_ln = _src_lines.get(src_key)
-                sink_ln = _sink_lines.get(sink_key)
-
-                # If source and sink share a block, require source_line < sink_line
-                if src_block == sink_block and src_ln is not None and sink_ln is not None:
-                    if src_ln >= sink_ln:
-                        continue
-
-                # If blocker shares a block with source/sink, require ordering
-                skip = False
-                for blk_key, blk_ln in _blk_lines.items():
-                    blk_fp, blk_fq, blk_block = blk_key
-                    if blk_fp != fp or blk_fq != fq:
-                        continue
-                    # Blocker in same block as source: must be after source
-                    if blk_block == src_block and src_ln is not None:
-                        if blk_ln <= src_ln:
-                            continue  # blocker before source, doesn't count
-                        # Blocker after source in same block — should block
-                        # but only if also before sink
-                        if sink_ln is not None and blk_block == sink_block:
-                            if src_ln < blk_ln < sink_ln:
-                                skip = True
-                                break
-                        elif blk_block != sink_block:
-                            # blocker in source block, sink in different block
-                            skip = True
-                            break
-                    # Blocker in same block as sink: must be before sink
-                    elif blk_block == sink_block and sink_ln is not None:
-                        if blk_ln < sink_ln:
-                            # Check blocker is after source (if in different block, it always is)
-                            if src_block != sink_block:
-                                skip = True
-                                break
-                            elif src_ln is not None and src_ln < blk_ln:
-                                skip = True
-                                break
-                if skip:
-                    continue
-                if include_locations:
-                    filtered.append((fp, fq, src_var, sink_var, src_block, sink_block))
-                else:
-                    filtered.append((fp, fq, src_var, sink_var))
-            return filtered
-
-        if include_locations:
-            return raw
-        return [(fp, fq, src_var, sink_var) for fp, fq, src_var, sink_var, _sb, _skb in raw]
-
     # -- Generic query (predicate-based, for backwards compat) -----------
 
     def _fact_accessors(self) -> list[Callable[[], list[Fact]]]:
@@ -2597,6 +2074,8 @@ class FactGraph:
             self._all_entry_point_decorators,
             self._all_entry_point_names,
             self._all_exported_symbols,
+            self._all_flow_events,
+            self._all_flow_edges,
         ]
 
     def query(self, predicate: Callable[[Fact], bool]) -> list[Fact]:
@@ -2664,6 +2143,32 @@ class FactGraph:
             lambda r: CfgEdgeFact(
                 file_path=r[0], func_qn=r[1], from_block=r[2],
                 to_block=r[3], edge_kind=r[4], from_line=r[5], to_line=r[6],
+            ),
+        )
+
+    def _all_flow_events(self) -> list[FlowEventFact]:
+        return self._query_all(
+            "flow_event",
+            "fp, eid, fid, fn, fs, role, var, ap, block, sb, eb, sl, sc, el, ec, ord, cid, ai, an, text",
+            lambda r: FlowEventFact(
+                file_path=r[0], event_id=r[1], func_id=r[2], func_name=r[3],
+                func_start=r[4], role=r[5], var=r[6] or None, access_path=r[7] or None,
+                block=r[8], start_byte=r[9], end_byte=r[10], start_line=r[11],
+                start_col=r[12], end_line=r[13], end_col=r[14], ordinal=r[15],
+                call_id=None if r[16] == -1 else r[16],
+                arg_index=None if r[17] == -1 else r[17],
+                arg_name=r[18] or None,
+                text=r[19],
+            ),
+            relation_cols="fp, eid, fid, fn, fs, role, var, ap, block, sb, eb, sl, sc, el, ec, ord, cid, ai, an, text",
+        )
+
+    def _all_flow_edges(self) -> list[FlowEdgeFact]:
+        return self._query_all(
+            "flow_edge",
+            "fp, fr, to, kind",
+            lambda r: FlowEdgeFact(
+                file_path=r[0], from_event=r[1], to_event=r[2], edge_kind=r[3]
             ),
         )
 
@@ -2758,6 +2263,8 @@ class FactGraph:
             "TypeFact": (TypeFact, graph.add_type),
             "ImportFact": (ImportFact, graph.add_import),
             "CfgEdgeFact": (CfgEdgeFact, graph.add_cfg_edge),
+            "FlowEventFact": (FlowEventFact, graph.add_flow_event),
+            "FlowEdgeFact": (FlowEdgeFact, graph.add_flow_edge),
             "DefUseFact": (DefUseFact, graph.add_def_use),
             "MethodCallFact": (MethodCallFact, graph.add_method_call),
             "CfgBlockFact": (CfgBlockFact, graph.add_cfg_block),
@@ -2847,6 +2354,14 @@ class FactGraph:
                 "*cfg_edge[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line], "
                 "file_path == $fp  :rm cfg_edge "
                 "{file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}",
+                # flow_event/flow_edge are file-owned occurrence relations.
+                "?[file_path, event_id] := "
+                "*flow_event[file_path, event_id, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _], "
+                "file_path == $fp  :rm flow_event {file_path, event_id => }",
+                "?[file_path, from_event, to_event, edge_kind] := "
+                "*flow_edge[file_path, from_event, to_event, edge_kind], "
+                "file_path == $fp  :rm flow_edge "
+                "{file_path, from_event, to_event, edge_kind}",
                 # def_use
                 "?[file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line] := "
                 "*def_use[file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line, _, _], "
@@ -2926,6 +2441,15 @@ class FactGraph:
             "calls_by_file": ("call_by_file", "file_path, caller_qn, callee_qn, line, col, func_qn, block_id", "file_path, caller_qn, callee_qn, line, col => func_qn, block_id"),
             "cfg_blocks": ("cfg_block", "file_path, func_qn, block_id, is_entry, is_exit", "file_path, func_qn, block_id => is_entry, is_exit"),
             "cfg_edges": ("cfg_edge", "file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line", "file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line"),
+            "flow_events": (
+                "flow_event",
+                "file_path, event_id, func_id, func_name, func_start, role, var, access_path, block, start_byte, end_byte, start_line, start_col, end_line, end_col, ordinal, call_id, arg_index, arg_name, text",
+                "file_path, event_id => func_id, func_name, func_start, role, var, access_path, block, start_byte, end_byte, start_line, start_col, end_line, end_col, ordinal, call_id, arg_index, arg_name, text",
+            ),
+            "flow_edges": (
+                "flow_edge", "file_path, from_event, to_event, edge_kind",
+                "file_path, from_event, to_event, edge_kind",
+            ),
             "def_uses": ("def_use", "file_path, func_qn, var_name, kind, def_block, use_block, def_line, def_col, use_line, use_col", "file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line => def_col, use_col"),
             "method_calls": ("method_call", "file_path, func_qn, receiver, method, block_id, line", "file_path, func_qn, receiver, method, block_id, line"),
             "source_locs": ("source_loc", "file_path, loc_kind, loc_id, line, col, end_line, rel_line", "file_path, loc_kind, loc_id => line, col, end_line, rel_line"),
@@ -2939,7 +2463,7 @@ class FactGraph:
             ),
         }
         for key, (relation, cols, schema) in specs.items():
-            relation_rows = rows[key]
+            relation_rows = rows.get(key, [])
             if relation_rows:
                 self._put_batch(
                     relation, cols, schema, relation_rows, operations

@@ -139,6 +139,82 @@ class CfgEdgeFact:
 
 
 @dataclass(frozen=True)
+class FlowEventFact:
+    """One ordered value-flow occurrence in a source file.
+
+    ``event_id`` is local to the extracted file revision.  Keeping the file
+    path in the fact (rather than relying on the caller to provide it) makes
+    the relation removable with the rest of a file's facts.
+    """
+
+    file_path: str
+    event_id: int
+    func_id: str
+    func_name: str
+    func_start: int
+    role: str
+    var: str | None
+    access_path: str | None
+    block: int
+    start_byte: int
+    end_byte: int
+    start_line: int
+    start_col: int
+    end_line: int
+    end_col: int
+    ordinal: int
+    call_id: int | None = None
+    arg_index: int | None = None
+    arg_name: str | None = None
+    text: str = ""
+
+    @property
+    def id(self) -> int:
+        """Rust API spelling for the local occurrence identifier."""
+        return self.event_id
+
+    @property
+    def start_column(self) -> int:
+        """Compatibility spelling used by some Python callers."""
+        return self.start_col
+
+    @property
+    def end_column(self) -> int:
+        """Compatibility spelling used by some Python callers."""
+        return self.end_col
+
+    @property
+    def line(self) -> int:
+        return self.start_line
+
+    @property
+    def col(self) -> int:
+        return self.start_col
+
+    @property
+    def block_id(self) -> int:
+        return self.block
+
+
+@dataclass(frozen=True)
+class FlowEdgeFact:
+    """A directed relationship between two value-flow occurrences."""
+
+    file_path: str
+    from_event: int
+    to_event: int
+    edge_kind: str
+
+    @property
+    def from_id(self) -> int:
+        return self.from_event
+
+    @property
+    def to_id(self) -> int:
+        return self.to_event
+
+
+@dataclass(frozen=True)
 class DefUseFact:
     file_path: str
     func_qn: str
@@ -221,6 +297,8 @@ Fact = Union[
     TypeFact,
     ImportFact,
     CfgEdgeFact,
+    FlowEventFact,
+    FlowEdgeFact,
     DefUseFact,
     MethodCallFact,
     CfgBlockFact,

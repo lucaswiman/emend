@@ -4,22 +4,14 @@ Tests cover:
 - type_constraint field on TraceSource/TraceSink/TraceSanitizer dataclasses
 - evaluate_type_constraint() boolean expression parser
 - YAML config loading with type_constraint
-- Datalog scalar_types parameter on trace_propagation_datalog()
-- Python fallback type filtering via _filter_vars_by_type()
-- build_from_project() type_binding population (via add_types_batch)
+- FactGraph type-binding storage via add_types_batch
 """
 
 import pytest
 import yaml
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 from emend.fact_graph import (
-    CfgBlockFact,
-    CfgEdgeFact,
-    DefUseFact,
     FactGraph,
-    SymbolFact,
     TypeFact,
 )
 from emend.trace import (
@@ -29,35 +21,7 @@ from emend.trace import (
     TraceSource,
     evaluate_type_constraint,
     load_trace_config,
-    _filter_vars_by_type,
-    _has_type_constraints,
 )
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _build_linear_cfg(n_blocks: int = 4) -> FactGraph:
-    """Build a linear CFG with n_blocks blocks: 0 -> 1 -> ... -> n-1."""
-    g = FactGraph()
-    blocks = []
-    for i in range(n_blocks):
-        blocks.append(CfgBlockFact(
-            file_path="test.py", func_qn="mod.f",
-            block_id=i, is_entry=(i == 0), is_exit=(i == n_blocks - 1),
-        ))
-    g.add_cfg_blocks_batch(blocks)
-    edges = []
-    for i in range(n_blocks - 1):
-        edges.append(CfgEdgeFact(
-            file_path="test.py", func_qn="mod.f",
-            from_block=i, to_block=i + 1,
-            edge_kind="fallthrough", from_line=0, to_line=0,
-        ))
-    g.add_cfg_edges_batch(edges)
-    return g
 
 
 # ---------------------------------------------------------------------------
@@ -168,41 +132,6 @@ class TestTypeConstraintField:
 
 
 # ---------------------------------------------------------------------------
-# Test: _has_type_constraints
-# ---------------------------------------------------------------------------
-
-
-class TestHasTypeConstraints:
-
-    def test_no_constraints(self):
-        config = TraceConfig(
-            sources=[TraceSource(pattern="x", label="l")],
-            sinks=[TraceSink(pattern="y", label="l", message="m")],
-        )
-        assert _has_type_constraints(config) is False
-
-    def test_source_has_constraint(self):
-        config = TraceConfig(
-            sources=[TraceSource(pattern="x", label="l", type_constraint="!int")],
-            sinks=[TraceSink(pattern="y", label="l", message="m")],
-        )
-        assert _has_type_constraints(config) is True
-
-    def test_sink_has_constraint(self):
-        config = TraceConfig(
-            sources=[TraceSource(pattern="x", label="l")],
-            sinks=[TraceSink(pattern="y", label="l", message="m", type_constraint="!int")],
-        )
-        assert _has_type_constraints(config) is True
-
-    def test_sanitizer_has_constraint(self):
-        config = TraceConfig(
-            sanitizers=[TraceSanitizer(pattern="x", label="l", type_constraint="str")],
-        )
-        assert _has_type_constraints(config) is True
-
-
-# ---------------------------------------------------------------------------
 # Test: YAML config loading with type_constraint
 # ---------------------------------------------------------------------------
 
@@ -279,154 +208,6 @@ class TestYamlTypeConstraintLoading:
 
 
 # ---------------------------------------------------------------------------
-# Test: Datalog scalar_types parameter
-# ---------------------------------------------------------------------------
-
-
-class TestDatalogScalarTypes:
-    """Tests for the scalar_types parameter on trace_propagation_datalog()."""
-
-    def test_scalar_type_filters_source(self):
-        """Source with scalar type should not propagate taint."""
-        g = _build_linear_cfg(3)
-
-        # Add symbol
-        g.add_symbols_batch([SymbolFact(
-            file_path="test.py", name="f", qualified_name="mod.f",
-            kind="function", line=1, end_line=10, parent=None,
-        )])
-
-        # Def-use: x defined in block 0, used in block 2
-        g.add_def_uses_batch([DefUseFact(
-            file_path="test.py", func_qn="mod.f",
-            var_name="x", kind="write",
-            def_block=0, use_block=2,
-            def_line=2, def_col=0, use_line=5, use_col=0,
-        )])
-
-        # Add type binding: x is int at line 2
-        g.add_type(TypeFact(
-            symbol_qn="x", type_str="int",
-            file_path="test.py", line=2, binding_kind="definition",
-        ))
-
-        # Source at block 0, sink at block 2
-        sources = [("test.py", "mod.f", "x", 0, "lbl")]
-        sinks = [("test.py", "mod.f", "x", 2, "lbl")]
-
-        # Without scalar_types: should find violation
-        violations = g.trace_propagation_datalog(sources=sources, sinks=sinks)
-        assert len(violations) == 1
-
-        # With scalar_types including "int": should filter out the source
-        violations = g.trace_propagation_datalog(
-            sources=sources, sinks=sinks,
-            scalar_types=["int", "float", "bool", "str"],
-        )
-        assert len(violations) == 0
-
-    def test_non_scalar_type_not_filtered(self):
-        """Source with non-scalar type should still propagate taint."""
-        g = _build_linear_cfg(3)
-
-        g.add_symbols_batch([SymbolFact(
-            file_path="test.py", name="f", qualified_name="mod.f",
-            kind="function", line=1, end_line=10, parent=None,
-        )])
-
-        g.add_def_uses_batch([DefUseFact(
-            file_path="test.py", func_qn="mod.f",
-            var_name="result", kind="write",
-            def_block=0, use_block=2,
-            def_line=2, def_col=0, use_line=5, use_col=0,
-        )])
-
-        # Type binding: result is Query (not a scalar)
-        g.add_type(TypeFact(
-            symbol_qn="result", type_str="Query",
-            file_path="test.py", line=2, binding_kind="definition",
-        ))
-
-        sources = [("test.py", "mod.f", "result", 0, "lbl")]
-        sinks = [("test.py", "mod.f", "result", 2, "lbl")]
-
-        # With scalar_types: Query is NOT a scalar, should still find violation
-        violations = g.trace_propagation_datalog(
-            sources=sources, sinks=sinks,
-            scalar_types=["int", "float", "bool", "str"],
-        )
-        assert len(violations) == 1
-
-    def test_no_type_binding_not_filtered(self):
-        """Source without type binding should not be filtered (conservative)."""
-        g = _build_linear_cfg(3)
-
-        g.add_symbols_batch([SymbolFact(
-            file_path="test.py", name="f", qualified_name="mod.f",
-            kind="function", line=1, end_line=10, parent=None,
-        )])
-
-        g.add_def_uses_batch([DefUseFact(
-            file_path="test.py", func_qn="mod.f",
-            var_name="x", kind="write",
-            def_block=0, use_block=2,
-            def_line=2, def_col=0, use_line=5, use_col=0,
-        )])
-
-        # No type binding for x
-
-        sources = [("test.py", "mod.f", "x", 0, "lbl")]
-        sinks = [("test.py", "mod.f", "x", 2, "lbl")]
-
-        # With scalar_types but no type binding: should still find violation
-        violations = g.trace_propagation_datalog(
-            sources=sources, sinks=sinks,
-            scalar_types=["int", "float", "bool", "str"],
-        )
-        assert len(violations) == 1
-
-    def test_scalar_types_with_effect_sinks(self):
-        """Scalar type filtering works with effect-based sinks too."""
-        g = _build_linear_cfg(3)
-
-        g.add_symbols_batch([SymbolFact(
-            file_path="test.py", name="f", qualified_name="mod.f",
-            kind="function", line=1, end_line=10, parent=None,
-        )])
-
-        # x defined in block 0, written in block 2
-        g.add_def_uses_batch([
-            DefUseFact(
-                file_path="test.py", func_qn="mod.f",
-                var_name="x", kind="write",
-                def_block=0, use_block=2,
-                def_line=2, def_col=0, use_line=5, use_col=0,
-            ),
-            DefUseFact(
-                file_path="test.py", func_qn="mod.f",
-                var_name="x", kind="write",
-                def_block=2, use_block=2,
-                def_line=5, def_col=0, use_line=5, use_col=0,
-            ),
-        ])
-
-        g.add_type(TypeFact(
-            symbol_qn="x", type_str="int",
-            file_path="test.py", line=2, binding_kind="definition",
-        ))
-
-        sources = [("test.py", "mod.f", "x", 0, "toctou")]
-
-        # With scalar_types and effect sinks: scalar should be filtered
-        violations = g.trace_propagation_datalog(
-            sources=sources,
-            effect_sinks=[("toctou", "writes")],
-            scalar_types=["int", "float", "bool", "str"],
-        )
-        assert len(violations) == 0
-
-
-# ---------------------------------------------------------------------------
 # Test: add_types_batch
 # ---------------------------------------------------------------------------
 
@@ -453,117 +234,6 @@ class TestAddTypesBatch:
     def test_add_types_batch_empty(self):
         g = FactGraph()
         g.add_types_batch([])  # Should not raise
-
-
-# ---------------------------------------------------------------------------
-# Test: _filter_vars_by_type (Python fallback helper)
-# ---------------------------------------------------------------------------
-
-
-class TestFilterVarsByType:
-
-    def _make_mock_oracle(self, bindings):
-        """Create a mock type oracle returning the given bindings."""
-        from emend.type_oracle import FileTypes, TypeBinding, TypeDescriptor
-
-        ft = FileTypes(path="test.py")
-        for name, line, raw_type in bindings:
-            td = TypeDescriptor.named(raw_type) if raw_type != "Unknown" else TypeDescriptor.unknown()
-            ft.bindings.append(TypeBinding(
-                name=name, line=line, col_start=0, col_end=None,
-                type_descriptor=td, raw_type=raw_type,
-                binding_kind="definition",
-            ))
-
-        oracle = MagicMock()
-        oracle.infer_file.return_value = ft
-        return oracle
-
-    def test_filters_scalar_vars(self):
-        oracle = self._make_mock_oracle([
-            ("x", 2, "int"),
-            ("y", 3, "Query"),
-        ])
-        result = _filter_vars_by_type(
-            {"x", "y"}, "!int & !float & !bool & !str",
-            oracle, "test.py", 5,
-        )
-        assert result == {"y"}
-
-    def test_keeps_unknown_type(self):
-        """Variables with unknown types should be kept (conservative)."""
-        oracle = self._make_mock_oracle([])
-        result = _filter_vars_by_type(
-            {"x"}, "!int", oracle, "test.py", 5,
-        )
-        assert result == {"x"}
-
-    def test_oracle_failure_keeps_all(self):
-        """If oracle fails, all variables should be kept."""
-        oracle = MagicMock()
-        oracle.infer_file.side_effect = Exception("no type checker")
-        result = _filter_vars_by_type(
-            {"x", "y"}, "!int", oracle, "test.py", 5,
-        )
-        assert result == {"x", "y"}
-
-    def test_selects_nearest_binding(self):
-        """Should select the binding closest to (at or before) the match line."""
-        oracle = self._make_mock_oracle([
-            ("x", 2, "str"),   # Early definition
-            ("x", 8, "int"),   # Later redefinition
-        ])
-        # Match at line 5: should use the binding at line 2 (str)
-        result = _filter_vars_by_type(
-            {"x"}, "!int", oracle, "test.py", 5,
-        )
-        assert result == {"x"}  # str satisfies !int
-
-        # Match at line 10: should use the binding at line 8 (int)
-        result = _filter_vars_by_type(
-            {"x"}, "!int", oracle, "test.py", 10,
-        )
-        assert result == set()  # int does NOT satisfy !int
-
-    def test_parameterized_type_uses_top_level(self):
-        """Optional[int] should have top-level name 'Optional', not 'int'."""
-        oracle = self._make_mock_oracle([
-            ("x", 2, "Optional[int]"),
-        ])
-        # !int should pass because top-level is Optional, not int
-        result = _filter_vars_by_type(
-            {"x"}, "!int", oracle, "test.py", 5,
-        )
-        assert result == {"x"}
-
-    def test_fq_type_matches_short_name_constraint(self):
-        """Short name constraint should match fully-qualified type names.
-
-        e.g. type_constraint='Redis' should match oracle-returned 'redis.client.Redis'.
-        """
-        oracle = self._make_mock_oracle([
-            ("conn", 2, "redis.client.Redis"),
-            ("other", 3, "dict"),
-        ])
-        # 'Redis' constraint should match 'redis.client.Redis'
-        result = _filter_vars_by_type(
-            {"conn", "other"}, "Redis",
-            oracle, "test.py", 5,
-        )
-        assert result == {"conn"}  # only conn (redis.client.Redis) matches
-
-    def test_fq_type_negation_with_short_name(self):
-        """Negated short name should exclude FQ types ending with that name."""
-        oracle = self._make_mock_oracle([
-            ("conn", 2, "redis.client.Redis"),
-            ("other", 3, "dict"),
-        ])
-        # '!Redis' should exclude 'redis.client.Redis'
-        result = _filter_vars_by_type(
-            {"conn", "other"}, "!Redis",
-            oracle, "test.py", 5,
-        )
-        assert result == {"other"}  # conn excluded because it IS a Redis
 
 
 class TestEvaluateTypeConstraintFQNames:

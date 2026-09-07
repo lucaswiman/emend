@@ -8,18 +8,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from emend.checks.rule_model import CompiledRuleDocument
     from emend.checks.rules_config import DeadCodeConfig
 
 logger = logging.getLogger(__name__)
 
 from emend.checks.rules_config import (  # noqa: E402
-    load_rules_document,
-    yaml_key,
-    coerce_optional_str_list,
-    parse_deadcode_config,
-    expand_macros,
-    expand_pattern_macros,
-    normalize_flow_definition,
+    compiled_deadcode_to_config,
+    load_compiled_rules,
     path_matches_glob,
 )
 
@@ -128,61 +124,30 @@ def path_matches_rule_globs(
 
 def load_rules(
     config_path: str | None = None,
+    *,
+    compiled: "CompiledRuleDocument | None" = None,
 ) -> "tuple[list[LintRule], dict[str, str], DeadCodeConfig | None]":
-    """Parse a YAML rules file into LintRule objects."""
-    config, _path = load_rules_document(config_path)
-
-    macros = config.get("macros", {}) or {}
-    raw_rules = config.get("rules", {}) or {}
-
-    rules = []
-    deadcode_config = parse_deadcode_config(config.get("deadcode"))
-    for name, rule_def in raw_rules.items():
-        if not isinstance(rule_def, dict):
-            continue
-
-        if "deadcode" in rule_def:
-            parsed_deadcode = parse_deadcode_config(rule_def.get("deadcode"), rule_name=name)
-            if parsed_deadcode is not None and deadcode_config is None:
-                if rule_def.get("message"):
-                    parsed_deadcode.message = rule_def["message"]
-                deadcode_config = parsed_deadcode
-            continue
-
-        flow = normalize_flow_definition(rule_def, macros)
-        flows_from = flow["from"]
-        flows_to = flow["to"]
-        not_through = flow["not_through"]
-
-        if flows_from and flows_to:
-            find_pattern_str = rule_def.get("find", "")
-        else:
-            match_pattern = rule_def.get("match", rule_def.get("find"))
-            find_pattern_str = expand_macros(match_pattern, macros)
-
-        rule_files = coerce_optional_str_list(rule_def.get("files"))
-
-        raw_language = rule_def.get("language")
-        if isinstance(raw_language, str):
-            rule_language: str | list[str] | None = raw_language
-        elif isinstance(raw_language, list):
-            rule_language = [str(language) for language in raw_language]
-        else:
-            rule_language = None
-
+    """Adapt the canonical compiled document to the established lint API."""
+    document = compiled or load_compiled_rules(config_path)
+    flows = {flow.name: flow for flow in document.flow_rules}
+    rules: list[LintRule] = []
+    for rule in document.pattern_rules:
+        flow = flows.get(rule.name)
+        sanitizers = [endpoint.pattern for endpoint in flow.sanitizers] if flow else []
+        language: str | list[str] | None = None
+        if len(rule.languages) == 1:
+            language = rule.languages[0]
+        elif rule.languages:
+            language = list(rule.languages)
         rules.append(LintRule(
-            name=name,
-            find=find_pattern_str,
-            message=rule_def.get("message", ""),
-            not_inside=expand_pattern_macros(yaml_key(rule_def, "not_within", "not_inside"), macros),
-            replace=expand_pattern_macros(rule_def.get("fix", rule_def.get("replace")), macros),
-            flows_from=flows_from if flows_from else None,
-            flows_to=flows_to if flows_to else None,
-            not_through=not_through if not_through else None,
-            dsl=rule_def.get("dsl"),
-            files=rule_files,
-            language=rule_language,
-            severity=str(rule_def.get("severity", "warning")),
+            name=rule.name, find=rule.pattern, message=rule.message,
+            not_inside=rule.not_inside, replace=rule.replace,
+            flows_from=flow.sources[0].pattern if flow else None,
+            flows_to=flow.sinks[0].pattern if flow else None,
+            not_through=(sanitizers[0] if len(sanitizers) == 1 else sanitizers or None),
+            dsl=rule.dsl, files=list(rule.files) or None, language=language,
+            severity=rule.severity,
         ))
-
-    return rules, macros, deadcode_config
+    macros = {name: str(value) for name, value in document.macros.items()}
+    deadcode = compiled_deadcode_to_config(document.deadcode) if document.deadcode else None
+    return rules, macros, deadcode

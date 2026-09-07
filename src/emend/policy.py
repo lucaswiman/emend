@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,12 +17,21 @@ logger = logging.getLogger(__name__)
 from emend.errors import BUG_EXCEPTIONS
 from emend.rules_config import (
     DeadCodeConfig,
-    parse_deadcode_config,
-    load_rules_document,
-    expand_macros,
-    expand_pattern_macros,
-    normalize_flow_definition,
-    yaml_key,
+    compiled_deadcode_to_config,
+    compile_rules_document,
+    load_compiled_rules,
+)
+from emend.checks.rule_model import (
+    CompiledCustomCheck,
+    CompiledDatalogCheck,
+    CompiledDeadCodeRule,
+    CompiledFlowRule,
+    CompiledPolicy as RulePolicy,
+    CompiledPolicyCheck,
+    CompiledRuleDocument,
+    CompiledSequenceCheck,
+    CompiledStructuralCheck,
+    CompiledTypeCheck,
 )
 
 # Import check types from their canonical modules.
@@ -74,267 +82,77 @@ class Policy:
 # ---------------------------------------------------------------------------
 
 _VALID_SEVERITIES = {"error", "warning", "info"}
-_VALID_CHECK_TYPES = {"flow", "structural", "type", "deadcode", "custom", "datalog", "sequence"}
 _VALID_TYPE_KINDS = {"has_type", "returns"}
 
 
-def _build_unified_policy(
-    name: str,
-    rule_def: dict[str, Any],
-    macros: dict[str, str],
-) -> Policy | None:
-    severity = rule_def.get("severity", "warning")
-    message = rule_def.get("message", "") or rule_def.get("description", "") or name
-    checks: list[PolicyCheck] = []
-
-    if "match" in rule_def or "find" in rule_def:
-        pattern = rule_def.get("match", rule_def.get("find", ""))
-        checks.append(StructuralCheck(
-            pattern=expand_macros(pattern, macros),
-            inside=expand_pattern_macros(
-                yaml_key(rule_def, "within", "inside"), macros,
-            ),
-            not_inside=expand_pattern_macros(
-                yaml_key(rule_def, "not_within", "not_inside"), macros,
-            ),
-            where=rule_def.get("where"),
-        ))
-
-    flow_def = rule_def.get("flow")
-    if isinstance(flow_def, dict) or yaml_key(rule_def, "flows_from") is not None:
-        normalized_flow = normalize_flow_definition(rule_def, macros)
-        flow_from = normalized_flow["from"]
-        flow_to = normalized_flow["to"]
-        # Unwrap dict-form ``{pattern: ...}`` to the pattern string, mirroring
-        # the lint engine (checks/pattern_rules.py).
-        if flow_from and flow_to:
-            checks.append(FlowCheck(
-                flows_from=flow_from,
-                flows_to=flow_to,
-                not_through=normalized_flow["not_through"],
-                label=normalized_flow["label"] or name,
-            ))
-
-    deadcode_def = rule_def.get("deadcode")
-    deadcode_check = parse_deadcode_config(deadcode_def)
-    if deadcode_check is not None and deadcode_check.enabled:
-        checks.append(deadcode_check)
-
-    type_def = rule_def.get("type-check")
-    if type_def is None:
-        type_def = rule_def.get("type_check")
-    if isinstance(type_def, dict):
-        symbol_pattern = type_def.get("selector") or yaml_key(type_def, "symbol_pattern")
-        expected_type = type_def.get("expected") or yaml_key(type_def, "expected_type")
-        if symbol_pattern and expected_type:
-            checks.append(TypeCheck(
-                symbol_pattern=str(symbol_pattern),
-                expected_type=str(expected_type),
-                kind=type_def.get("kind", "has_type"),
-            ))
-
-    if "datalog" in rule_def:
-        datalog_def = rule_def["datalog"]
-        if isinstance(datalog_def, str):
-            checks.append(DatalogCheck(cozoscript=datalog_def))
-        elif isinstance(datalog_def, dict):
-            query = datalog_def.get("query") or datalog_def.get("cozoscript")
-            if query:
-                checks.append(DatalogCheck(cozoscript=str(query)))
-
-    if not checks:
-        return None
-    return Policy(
-        name=name,
-        description=message,
-        severity=severity,
-        checks=checks,
-    )
-
-
-def _as_list(val: Any) -> list[str]:
-    """Coerce a value to a list of strings."""
-    if val is None:
-        return []
-    if isinstance(val, str):
-        return [val]
-    return list(val)
-
-
-def _parse_flow_check(raw: dict[str, Any]) -> FlowCheck:
-    normalized = normalize_flow_definition(raw)
-    flows_from = normalized["from"]
-    flows_to = normalized["to"]
-    if not flows_from or not flows_to:
-        raise ValueError("FlowCheck requires 'flows_from' and 'flows_to'")
-    return FlowCheck(
-        flows_from=flows_from,
-        flows_to=flows_to,
-        not_through=normalized["not_through"],
-        label=normalized["label"] or "",
-    )
-
-
-def _parse_structural_check(raw: dict[str, Any]) -> StructuralCheck:
-    pattern = raw.get("pattern")
-    if not pattern:
-        raise ValueError("StructuralCheck requires 'pattern'")
-    return StructuralCheck(
-        pattern=pattern,
-        inside=yaml_key(raw, "inside", "within"),
-        not_inside=yaml_key(raw, "not_inside", "not_within"),
-        where=raw.get("where"),
-    )
-
-
-def _parse_type_check(raw: dict[str, Any]) -> TypeCheck:
-    kind = raw.get("kind", "has_type")
-    symbol_pattern = yaml_key(raw, "symbol_pattern")
-    expected_type = yaml_key(raw, "expected_type")
-    if not symbol_pattern or not expected_type:
-        raise ValueError(
-            "TypeCheck requires 'symbol_pattern' and 'expected_type'"
+def _adapt_compiled_check(check: CompiledPolicyCheck) -> PolicyCheck:
+    payload = check.payload
+    if isinstance(payload, CompiledFlowRule):
+        sanitizers = [endpoint.pattern for endpoint in payload.sanitizers]
+        return FlowCheck(
+            payload.sources[0].pattern,
+            payload.sinks[0].pattern,
+            sanitizers[0] if len(sanitizers) == 1 else sanitizers or None,
+            payload.label,
         )
-    return TypeCheck(
-        symbol_pattern=symbol_pattern,
-        expected_type=expected_type,
-        kind=kind,
+    if isinstance(payload, CompiledStructuralCheck):
+        return StructuralCheck(
+            payload.pattern, payload.inside, payload.not_inside, payload.where,
+        )
+    if isinstance(payload, CompiledTypeCheck):
+        return TypeCheck(payload.symbol_pattern, payload.expected_type, payload.kind)
+    if isinstance(payload, CompiledDeadCodeRule):
+        return compiled_deadcode_to_config(payload)
+    if isinstance(payload, CompiledCustomCheck):
+        return CustomCheck(payload.query_source)
+    if isinstance(payload, CompiledDatalogCheck):
+        return DatalogCheck(payload.cozoscript)
+    if isinstance(payload, CompiledSequenceCheck):
+        return SequenceCheck(
+            payload.name,
+            payload.message,
+            [SequenceStep(step.bind, step.pattern, step.effect, step.type_constraint)
+             for step in payload.sequence],
+            [SequencePathConstraint(
+                path.from_step, path.to_step,
+                list(path.not_through), list(path.not_through_scope),
+            ) for path in payload.path_constraints],
+            payload.severity,
+        )
+    raise TypeError(f"Unsupported compiled policy payload: {type(payload).__name__}")
+
+
+def _adapt_compiled_policy(policy: RulePolicy) -> Policy:
+    return Policy(
+        policy.name, policy.description, policy.severity,
+        [_adapt_compiled_check(check) for check in policy.checks],
     )
 
 
-def _parse_deadcode_check(raw: dict[str, Any]) -> DeadCodeCheck:
-    parsed = parse_deadcode_config(raw)
-    if parsed is None:
-        raise ValueError("DeadCodeCheck requires a mapping")
-    return parsed
+def _parse_check(raw: dict) -> PolicyCheck:
+    """Back-compatible single-check adapter through the canonical compiler."""
+    document = compile_rules_document({
+        "policies": [{"name": "_single", "checks": [raw]}],
+    })
+    return _adapt_compiled_check(document.policies[0].checks[0])
 
 
-def _parse_custom_check(raw: dict[str, Any]) -> CustomCheck:
-    query_source = yaml_key(raw, "query_source")
-    if not query_source:
-        raise ValueError("CustomCheck requires 'query_source'")
-    return CustomCheck(query_source=query_source)
-
-
-def _parse_datalog_check(raw: dict[str, Any]) -> DatalogCheck:
-    cozoscript = raw.get("cozoscript") or yaml_key(raw, "query")
-    if not cozoscript:
-        raise ValueError("DatalogCheck requires 'cozoscript' or 'query'")
-    return DatalogCheck(cozoscript=cozoscript)
-
-
-def _parse_sequence_check(raw: dict[str, Any]) -> SequenceCheck:
-    name = raw.get("name", "")
-    message = raw.get("message", "")
-    if not name:
-        raise ValueError("SequenceCheck requires 'name'")
-    raw_sequence = raw.get("sequence", [])
-    if not raw_sequence or len(raw_sequence) < 2:
-        raise ValueError("SequenceCheck requires at least 2 steps in 'sequence'")
-    steps = []
-    for step_raw in raw_sequence:
-        steps.append(SequenceStep(
-            bind=step_raw.get("bind", ""),
-            pattern=step_raw.get("pattern"),
-            effect=step_raw.get("effect"),
-            type_constraint=yaml_key(step_raw, "type_constraint"),
-        ))
-    path_constraints = []
-    raw_path = raw.get("path") or {}
-    for path_key, path_val in raw_path.items():
-        parts = [p.strip() for p in path_key.split("->")]
-        if len(parts) != 2:
-            raise ValueError(f"Invalid path key {path_key!r}: expected 'step1 -> step2'")
-        nt_patterns = []
-        for item in _as_list(yaml_key(path_val, "not_through") or []):
-            if isinstance(item, dict):
-                nt_patterns.append(item.get("pattern", ""))
-            else:
-                nt_patterns.append(item)
-        nts_patterns = []
-        for item in _as_list(yaml_key(path_val, "not_through_scope") or []):
-            if isinstance(item, dict):
-                nts_patterns.append(item.get("pattern", ""))
-            else:
-                nts_patterns.append(item)
-        path_constraints.append(SequencePathConstraint(
-            from_step=parts[0],
-            to_step=parts[1],
-            not_through=nt_patterns,
-            not_through_scope=nts_patterns,
-        ))
-    return SequenceCheck(
-        name=name,
-        message=message,
-        sequence=steps,
-        path_constraints=path_constraints,
-        severity=raw.get("severity", "error"),
-    )
-
-
-_CHECK_PARSERS: dict[str, Callable[[dict[str, Any]], PolicyCheck]] = {
-    "flow": _parse_flow_check,
-    "structural": _parse_structural_check,
-    "type": _parse_type_check,
-    "deadcode": _parse_deadcode_check,
-    "custom": _parse_custom_check,
-    "datalog": _parse_datalog_check,
-    "sequence": _parse_sequence_check,
-}
-
-
-def _parse_check(raw: dict[str, Any]) -> PolicyCheck:
-    """Parse a single check definition from a YAML dict."""
-    check_type = raw.get("type", "")
-    parser = _CHECK_PARSERS.get(check_type)
-    if parser is None:
-        raise ValueError(f"Unknown check type: {check_type!r}")
-    return parser(raw)
-
-
-def load_policies(config_path: str | Path | None = None) -> list[Policy]:
-    """Load policies from a YAML file."""
-    data, path = load_rules_document(config_path)
-
-    if "policies" not in data and "rules" not in data:
+def load_policies(
+    config_path: str | Path | None = None,
+    *,
+    compiled: CompiledRuleDocument | None = None,
+) -> list[Policy]:
+    """Adapt a canonical compiled document to the established policy API."""
+    document = compiled or load_compiled_rules(config_path)
+    if not document.has_policies_section and not document.has_rules_section:
         raise ValueError(
             "Policy config must be a YAML mapping with a top-level 'policies' or 'rules' key"
         )
-
-    policies: list[Policy] = []
-    if "policies" in data:
-        for raw_policy in (data["policies"] or []):
-            checks = [_parse_check(c) for c in raw_policy.get("checks", [])]
-            policies.append(Policy(
-                name=raw_policy["name"],
-                description=raw_policy.get("description", ""),
-                severity=raw_policy.get("severity", "warning"),
-                checks=checks,
-            ))
-    else:
-        macros = data.get("macros", {}) or {}
-        for name, rule_def in (data.get("rules", {}) or {}).items():
-            if not isinstance(rule_def, dict):
-                continue
-            if rule_def.get("enabled") is False:
-                continue
-            policy = _build_unified_policy(name, rule_def, macros)
-            if policy is not None:
-                policies.append(policy)
-
-        top_level_deadcode = data.get("deadcode")
-        if top_level_deadcode is not None and all(p.name != "deadcode" for p in policies):
-            deadcode_policy = _build_unified_policy(
-                "deadcode",
-                {
-                    "deadcode": top_level_deadcode,
-                    "message": "Dead code check",
-                    "severity": "warning",
-                },
-                macros,
-            )
-            if deadcode_policy is not None:
-                policies.append(deadcode_policy)
+    selected = (
+        document.policies if document.has_policies_section
+        else document.unified_policies
+    )
+    policies = [_adapt_compiled_policy(policy) for policy in selected]
     errors = validate_policies(policies)
     if errors:
         raise ValueError("\n".join(errors))
@@ -419,40 +237,6 @@ def validate_policies(policies: list[Policy]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Check runners — delegate to checks/<kind>.py
-# ---------------------------------------------------------------------------
-
-def _run_flow_check(
-    check: FlowCheck,
-    policy: Policy,
-    file_path: str,
-    source: str,
-    language: str,
-    fact_graph: Any = None,
-) -> list[PolicyViolation]:
-    """Run a flow check using the unified flow IR engine."""
-    from emend.flow_ir import from_flow_check, execute_flow_spec, format_witness
-
-    spec = from_flow_check(check, policy.name, policy.description, policy.severity)
-    flow_violations = execute_flow_spec(spec, file_path, source, language, fact_graph=fact_graph)
-
-    violations: list[PolicyViolation] = []
-    for fv in flow_violations:
-        witness = format_witness(fv.witness) if fv.witness else []
-        violations.append(PolicyViolation(
-            file_path=fv.file_path,
-            line=fv.line,
-            col=fv.col,
-            policy_name=policy.name,
-            check_name=f"flow:{check.label or 'default'}",
-            severity=policy.severity,
-            message=fv.message or policy.description,
-            witness=witness,
-        ))
-    return violations
-
-
-# ---------------------------------------------------------------------------
 # Main API
 # ---------------------------------------------------------------------------
 
@@ -462,6 +246,7 @@ def run_policy_checks(
     *,
     language: str = "python",
     project_path: str | None = None,
+    compiled_flows=None,
 ) -> list[PolicyViolation]:
     """Run all policy checks against the given file paths."""
     from emend import emend_core
@@ -471,6 +256,7 @@ def run_policy_checks(
     deadcode_policies: list[tuple[Policy, DeadCodeCheck]] = []
     datalog_policies: list[tuple[Policy, DatalogCheck]] = []
     sequence_policies: list[tuple[Policy, SequenceCheck]] = []
+    flow_policies: list[tuple[Policy, FlowCheck]] = []
     file_policies: list[tuple[Policy, PolicyCheck]] = []
 
     for policy in policies:
@@ -481,6 +267,8 @@ def run_policy_checks(
                 datalog_policies.append((policy, check))
             elif isinstance(check, SequenceCheck):
                 sequence_policies.append((policy, check))
+            elif isinstance(check, FlowCheck):
+                flow_policies.append((policy, check))
             else:
                 file_policies.append((policy, check))
 
@@ -496,6 +284,54 @@ def run_policy_checks(
         for policy, check in sequence_policies:
             violations.extend(_run_sequence_check(check, policy, project_path))
 
+    if flow_policies or compiled_flows:
+        from emend.checks.flow import (
+            CompiledFlowConfig, FlowSanitizer, FlowSink, FlowSource,
+            evaluate_compiled_flow,
+        )
+        if compiled_flows is None:
+            adapter = CompiledFlowConfig(
+                sources=[FlowSource(
+                    check.flows_from, check.label or policy.name,
+                    rule_id=f"policy:{policy.name}:{index}",
+                ) for index, (policy, check) in enumerate(flow_policies)],
+                sinks=[FlowSink(
+                    check.flows_to, check.label or policy.name, policy.description,
+                    rule_id=f"policy:{policy.name}:{index}", rule_name=policy.name,
+                    severity=policy.severity,
+                ) for index, (policy, check) in enumerate(flow_policies)],
+                sanitizers=[FlowSanitizer(
+                    pattern, check.label or policy.name,
+                    rule_id=f"policy:{policy.name}:{index}",
+                ) for index, (policy, check) in enumerate(flow_policies)
+                    for pattern in ([check.not_through] if isinstance(check.not_through, str)
+                                    else check.not_through or [])],
+            )
+            compiled_flows = adapter.compiled_rules()
+        try:
+            evaluated = evaluate_compiled_flow(
+                compiled_flows, paths, interprocedural=True,
+                language=language, project_path=project_path,
+            )
+        except BUG_EXCEPTIONS:
+            raise
+        except Exception:
+            logger.warning("Compiled policy flow evaluation failed", exc_info=True)
+            evaluated = []
+        violations.extend(PolicyViolation(
+            file_path=row.file_path,
+            line=row.line,
+            col=row.col,
+            policy_name=row.rule_name,
+            check_name=f"flow:{row.label}",
+            severity=row.severity,
+            message=row.message,
+            witness=[
+                f"{step.description.split(':', 1)[0]} L{step.line}: {step.variable}"
+                for step in row.trace
+            ],
+        ) for row in evaluated)
+
     if file_policies:
         file_contents: dict[str, str] = dict(
             emend_core.read_and_filter_files(paths, [])
@@ -504,11 +340,7 @@ def run_policy_checks(
         for file_path, source in file_contents.items():
             for policy, check in file_policies:
                 try:
-                    if isinstance(check, FlowCheck):
-                        violations.extend(
-                            _run_flow_check(check, policy, file_path, source, language)
-                        )
-                    elif isinstance(check, StructuralCheck):
+                    if isinstance(check, StructuralCheck):
                         violations.extend(
                             _run_structural_check(check, policy, file_path, source, language)
                         )

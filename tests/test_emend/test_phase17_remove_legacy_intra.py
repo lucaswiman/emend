@@ -82,13 +82,13 @@ class TestLegacyPythonEngineRemoved:
         )
 
     def test_run_trace_analysis_uses_datalog(self, tmp_path):
-        """run_trace_analysis() always uses Datalog."""
+        """run_trace_analysis() always uses the occurrence evaluator."""
         test_file = tmp_path / "app.py"
         test_file.write_text(_SIMPLE_APP)
         violations = run_trace_analysis([str(test_file)], _SQL_CONFIG)
         assert len(violations) >= 1
         for v in violations:
-            assert v.engine == "datalog"
+            assert v.engine == "occurrence"
 
     def test_shared_helpers_preserved(self):
         """Shared helpers used by Datalog engine are still available."""

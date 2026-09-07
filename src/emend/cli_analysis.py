@@ -89,7 +89,6 @@ def _trace_cmd_impl(
     json_output: bool,
     project: str | None,
     interprocedural: bool,
-    max_iterations: int,
     preset: str | None,
     exclude_path: list[str] | None = None,
     max_chain_depth: int | None = None,
@@ -135,7 +134,6 @@ def _trace_cmd_impl(
                 files, trace_config,
                 label_filter=label,
                 language=_lang,
-                max_iterations=max_iterations,
                 max_chain_depth=max_chain_depth,
                 project_path=_proj_root,
             )
@@ -179,7 +177,6 @@ def trace_cmd(
     json_output: JsonFlag = False,
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
     interprocedural: Annotated[bool, typer.Option("--interprocedural", help="Enable cross-function trace tracking")] = False,
-    max_iterations: Annotated[int, typer.Option("--max-iterations", help="Max fixed-point iterations (interprocedural only)")] = 10,
     max_chain_depth: Annotated[Optional[int], typer.Option("--max-chain-depth", help="Max call-chain depth for transitive sink propagation (default: unlimited)")] = None,
     preset: Annotated[Optional[str], typer.Option("--preset", help="Load framework-specific trace rules. Python: django, flask, sqlalchemy, fastapi. TypeScript/Node.js: express, react, nextjs, node-sql. Rust: actix-web, axum, sqlx, diesel. Special: all")] = None,
     exclude_path: Annotated[Optional[list[str]], typer.Option("--exclude-path", help="Glob patterns for paths to exclude from analysis (repeatable)")] = None,
@@ -212,7 +209,7 @@ def trace_cmd(
         emend trace src/ --exclude-path "*/migrations/*.py"
     """
     _trace_cmd_impl(path, config, label, trace, json_output, project,
-                    interprocedural, max_iterations, preset, exclude_path,
+                    interprocedural, preset, exclude_path,
                     max_chain_depth=max_chain_depth)
 
 

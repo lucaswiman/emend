@@ -13,6 +13,8 @@ from emend.analysis_snapshot import (
     DefUseFact,
     ExtractedFile,
     FileRevision,
+    FlowEdgeFact,
+    FlowEventFact,
     ImportFact,
     MethodCallFact,
     SymbolFact,
@@ -20,6 +22,88 @@ from emend.analysis_snapshot import (
 from emend.errors import BUG_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
+
+
+def _flow_int(value: Any, default: int = 0) -> int:
+    """Normalize an optional Rust integer field for the relational store."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _extract_flow_facts(
+    source: str,
+    ext: str,
+    file_path: str,
+) -> tuple[list[FlowEventFact], list[FlowEdgeFact]]:
+    """Extract and normalize the Rust occurrence/value graph, when present.
+
+    The Rust API is deliberately optional while older compiled extensions are
+    in use.  A missing API therefore yields an empty graph, whereas malformed
+    rows are ignored individually so ordinary symbol extraction remains
+    usable for a file.
+    """
+    try:
+        from emend import emend_core
+
+        builder = getattr(emend_core, "build_flow_facts", None)
+        if builder is None:
+            return [], []
+        raw = builder(source, ext=ext)
+    except BUG_EXCEPTIONS:
+        raise
+    except Exception:
+        logger.debug("flow occurrence extraction failed for %s", file_path, exc_info=True)
+        return [], []
+
+    if not isinstance(raw, dict):
+        return [], []
+    events: list[FlowEventFact] = []
+    for row in raw.get("events", ()) or ():
+        if not isinstance(row, dict) or row.get("id") is None:
+            continue
+        events.append(FlowEventFact(
+            file_path=file_path,
+            event_id=_flow_int(row.get("id")),
+            func_id=str(row.get("func_id", "")),
+            func_name=str(row.get("func_name", row.get("name", "")) or ""),
+            func_start=_flow_int(row.get("func_start")),
+            role=str(row.get("role", "") or ""),
+            var=(None if row.get("var") is None else str(row.get("var"))),
+            access_path=(None if row.get("access_path") is None
+                         else str(row.get("access_path"))),
+            block=_flow_int(row.get("block"), -1),
+            start_byte=_flow_int(row.get("start_byte")),
+            end_byte=_flow_int(row.get("end_byte")),
+            start_line=_flow_int(row.get("start_line")),
+            start_col=_flow_int(row.get("start_col", row.get("start_column"))),
+            end_line=_flow_int(row.get("end_line")),
+            end_col=_flow_int(row.get("end_col", row.get("end_column"))),
+            ordinal=_flow_int(row.get("ordinal")),
+            call_id=(None if row.get("call_id") is None
+                     else _flow_int(row.get("call_id"))),
+            arg_index=(None if row.get("arg_index") is None
+                       else _flow_int(row.get("arg_index"))),
+            arg_name=(None if row.get("arg_name") is None
+                      else str(row.get("arg_name"))),
+            text=str(row.get("text", "") or ""),
+        ))
+    edges: list[FlowEdgeFact] = []
+    for row in raw.get("edges", ()) or ():
+        if not isinstance(row, dict):
+            continue
+        if row.get("from") is None or row.get("to") is None:
+            continue
+        edges.append(FlowEdgeFact(
+            file_path=file_path,
+            from_event=_flow_int(row.get("from")),
+            to_event=_flow_int(row.get("to")),
+            edge_kind=str(row.get("kind", "") or ""),
+        ))
+    return events, edges
 
 
 def _walk_symbols(
@@ -486,7 +570,25 @@ def _extract_file_facts(
         "imports": [], "ref_by_block": [], "noncall_private_member_refs": [],
         "module_level_refs": [],
         "exported_qns": [],
+        "flow_events": [], "flow_edges": [],
     }
+
+    # Occurrence/value facts are extracted from the same exact source bytes as
+    # all other rows.  Keep them independent of CFG construction so a Rust
+    # extension that only provides the new API can still populate this graph.
+    flow_events, flow_edges = _extract_flow_facts(content, ext, rel_path)
+    result["flow_events"] = [[
+        event.file_path, event.event_id, event.func_id, event.func_name,
+        event.func_start, event.role, event.var or "", event.access_path or "",
+        event.block, event.start_byte, event.end_byte, event.start_line,
+        event.start_col, event.end_line, event.end_col, event.ordinal,
+        -1 if event.call_id is None else event.call_id,
+        -1 if event.arg_index is None else event.arg_index,
+        event.arg_name or "", event.text,
+    ] for event in flow_events]
+    result["flow_edges"] = [[
+        edge.file_path, edge.from_event, edge.to_event, edge.edge_kind,
+    ] for edge in flow_edges]
 
     # -- Extract symbols via Rust
     try:

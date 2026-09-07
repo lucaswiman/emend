@@ -11,6 +11,7 @@ from pathlib import Path
 import yaml
 
 from emend.errors import BUG_EXCEPTIONS
+from emend.checks.rule_model import CompiledRuleDocument
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +19,10 @@ from emend.transform import find_pattern, replace_pattern, extract_pattern_liter
 from emend.trace import _extract_identifiers
 from emend.rules_config import (
     DeadCodeConfig,
+    compiled_duplicate_to_config,
     deadcode_engine_kwargs,
-    load_rules_document,
-    yaml_key,
-    as_list,
+    load_compiled_rules,
     expand_macros,
-    expand_not_through,
 )
 
 # Import shared types from checks/ submodules.
@@ -38,12 +37,9 @@ from emend.checks.pattern_rules import (  # noqa: F401
     rule_matches_language as _rule_matches_language,
     detect_file_language as _detect_file_language,
     path_matches_rule_globs as _path_matches_rule_globs,
-    coerce_optional_str_list as _coerce_optional_str_list,
-    parse_deadcode_config as _parse_deadcode_config,
 )
 from emend.checks.duplicates import (  # noqa: F401
     DuplicateCodeConfig,
-    parse_duplicate_code_config as _parse_duplicate_code_config,
     run_duplicate_code_check as _check_duplicate_code_impl,
     run_duplicate_code_check as _check_duplicate_code,  # back-compat alias
 )
@@ -63,6 +59,8 @@ class LintViolation:
 
 def load_duplicate_code_config(
     config_path: str | None = None,
+    *,
+    compiled: "CompiledRuleDocument | None" = None,
 ) -> DuplicateCodeConfig | None:
     """Load the ``duplicate-code`` section from a YAML rules document.
 
@@ -74,15 +72,11 @@ def load_duplicate_code_config(
     otherwise ``None``.
     """
     try:
-        config, _path = load_rules_document(config_path)
+        document = compiled or load_compiled_rules(config_path)
     except (OSError, yaml.YAMLError, ValueError):
         return None
-    raw = config.get("duplicate-code", config.get("duplicate"))
-    return _parse_duplicate_code_config(raw)
+    return compiled_duplicate_to_config(document.duplicate) if document.duplicate else None
 
-
-# Private helper retained for callers of the pre-modularization lint API.
-from emend.checks.flow import _assignments_from_cfgs
 
 # Reuse shared helpers from taint module
 _extract_names_from_text = _extract_identifiers
@@ -107,6 +101,7 @@ def run_lint(
     project_path: str | None = None,
     language: str = "python",
     duplicate_code_config: DuplicateCodeConfig | None = None,
+    compiled_flows=None,
 ) -> list[LintViolation]:
     """Run lint rules against files and return violations.
 
@@ -397,77 +392,81 @@ def run_lint(
                     match_text=f"{count} replacement(s) applied",
                 ))
 
-    # --- Flow rules: intraprocedural taint analysis ---
-    if flow_rules:
-        from emend.flow_ir import from_lint_rule, execute_flow_spec
+    # --- Flow rules: one occurrence evaluator over the whole snapshot ---
+    if flow_rules or compiled_flows:
+        from emend.checks.flow import (
+            CompiledFlowConfig, FlowSanitizer, FlowSink, FlowSource,
+            evaluate_compiled_flow,
+        )
 
-        for file_path in paths:
-            source = all_file_contents.get(file_path)
-            if source is None:
-                continue
-            file_lang = file_languages.get(file_path, language)
+        if compiled_flows is None:
+            adapter = CompiledFlowConfig(
+                sources=[FlowSource(
+                    rule.flows_from or "", rule.name, rule_id=f"rule:{rule.name}:flow",
+                ) for rule in flow_rules],
+                sinks=[FlowSink(
+                    rule.flows_to or "", rule.name, rule.message,
+                    rule_id=f"rule:{rule.name}:flow", rule_name=rule.name,
+                    severity=rule.severity, files=rule.files,
+                    languages=([rule.language] if isinstance(rule.language, str)
+                               else rule.language),
+                ) for rule in flow_rules],
+                sanitizers=[FlowSanitizer(
+                    pattern, rule.name, rule_id=f"rule:{rule.name}:flow",
+                ) for rule in flow_rules for pattern in (
+                    [rule.not_through] if isinstance(rule.not_through, str)
+                    else rule.not_through or []
+                )],
+            )
+            compiled_flows = adapter.compiled_rules()
 
-            # Build noqa ranges for this file (reuse cache if available)
-            if file_path not in noqa_ranges_cache:
-                noqa_ranges_cache[file_path] = _build_noqa_ranges(source, file_lang, file_path)
+        try:
+            flow_results = evaluate_compiled_flow(
+                compiled_flows, paths, interprocedural=True,
+                language=language, project_path=project_path,
+            )
+        except BUG_EXCEPTIONS:
+            raise
+        except Exception:
+            logger.debug("Compiled flow evaluation failed", exc_info=True)
+            flow_results = []
 
-            for rule in flow_rules:
-                if not _path_matches_rule_globs(file_path, rule.files, project_root=project_path):
-                    continue
-                if not _rule_matches_language(rule, file_lang):
-                    continue
-                # Pre-filter: check if source and sink literals exist in file
-                from_literals = extract_pattern_literals(rule.flows_from or "")
-                to_literals = extract_pattern_literals(rule.flows_to or "")
-                if not all(lit in source for lit in from_literals):
-                    continue
-                if not all(lit in source for lit in to_literals):
-                    continue
-
-                try:
-                    spec = from_lint_rule(rule)
-                    flow_results = execute_flow_spec(
-                        spec, file_path, source, file_lang, fact_graph=None
-                    )
-                except BUG_EXCEPTIONS:
-                    raise
-                except Exception:
-                    logger.debug(
-                        "Flow rule %s failed on %s",
-                        rule.name, file_path, exc_info=True,
-                    )
-                    continue
-
-                for fv in flow_results:
-                    # Convert FlowViolation back to LintViolation for compat
-                    witness = None
-                    if fv.source_text or fv.sink_text:
-                        witness = FlowWitness(
-                            source_line=fv.source_line,
-                            source_text=fv.source_text,
-                            sink_line=fv.line,
-                            sink_text=fv.sink_text,
-                            taint_chain=[
-                                (s.line, s.var_name)
-                                for s in fv.witness
-                                if s.kind in ("source", "propagation")
-                            ],
-                        )
-                    v = LintViolation(
-                        rule_name=spec.name,
-                        message=fv.message,
-                        file_path=fv.file_path,
-                        line=fv.line,
-                        col=fv.col,
-                        match_text=f"flow: {fv.source_text} -> {fv.sink_text}",
-                        witness=witness,
-                    )
-                    if is_noqa_suppressed(
-                        v.line, v.rule_name,
-                        noqa_ranges_cache.get(file_path, []),
-                    ):
-                        continue
-                    violations.append(v)
+        for result in flow_results:
+            source_step = next((step for step in result.trace
+                                if step.description.startswith("source:")), None)
+            sink_step = next((step for step in reversed(result.trace)
+                              if step.description.startswith("sink:")), None)
+            witness = FlowWitness(
+                source_line=source_step.line if source_step else 0,
+                source_text=source_step.description.removeprefix("source:").strip()
+                if source_step else "",
+                sink_line=result.line,
+                sink_text=sink_step.description.removeprefix("sink:").strip()
+                if sink_step else result.sink_pattern,
+                taint_chain=[
+                    (step.line, step.variable) for step in result.trace
+                    if step.description.startswith("propagation:")
+                ],
+            )
+            violation = LintViolation(
+                rule_name=result.rule_name,
+                message=result.message,
+                file_path=result.file_path,
+                line=result.line,
+                col=result.col,
+                match_text=f"flow: {witness.source_text} -> {witness.sink_text}",
+                witness=witness,
+            )
+            source = all_file_contents.get(result.file_path)
+            if source is not None and result.file_path not in noqa_ranges_cache:
+                noqa_ranges_cache[result.file_path] = _build_noqa_ranges(
+                    source, file_languages.get(result.file_path, language), result.file_path,
+                )
+            if not is_noqa_suppressed(
+                violation.line, violation.rule_name,
+                noqa_ranges_cache.get(result.file_path, []),
+            ):
+                violations.append(violation)
 
     # --- DSL-aware lint rules ---
     if dsl_rules:

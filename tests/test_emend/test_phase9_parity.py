@@ -244,14 +244,14 @@ class TestEngineFieldInJsonOutput:
         violations = run_trace_analysis([str(test_file)], config)
         assert len(violations) >= 1
 
-        # After Phase 16 cutover, run_trace_analysis uses Datalog by default
-        assert all(v.engine == "datalog" for v in violations)
+        # The canonical occurrence evaluator is used by default.
+        assert all(v.engine == "occurrence" for v in violations)
 
         output = format_violations(violations, json_output=True)
         data = json.loads(output)
         assert len(data) >= 1
         assert "engine" in data[0], f"'engine' key missing from JSON output: {data[0]}"
-        assert data[0]["engine"] == "datalog"
+        assert data[0]["engine"] == "occurrence"
 
     def test_cli_json_output_includes_engine(self, tmp_path, run_emend_cmd):
         """CLI `emend analyze trace --json` output includes 'engine' field."""
@@ -268,7 +268,7 @@ class TestEngineFieldInJsonOutput:
         data = json.loads(result.stdout)
         assert len(data) >= 1
         assert "engine" in data[0], f"'engine' key missing from CLI JSON output: {data[0]}"
-        assert data[0]["engine"] == "datalog"
+        assert data[0]["engine"] == "occurrence"
 
     def test_cli_interprocedural_json_output_includes_engine(self, tmp_path, run_emend_cmd):
         """CLI interprocedural trace JSON keeps the canonical engine visible."""
@@ -289,4 +289,4 @@ class TestEngineFieldInJsonOutput:
 
         data = json.loads(result.stdout)
         assert len(data) >= 1
-        assert all(item["engine"] == "datalog" for item in data)
+        assert all(item["engine"] == "occurrence" for item in data)

@@ -1,6 +1,6 @@
-"""Phase 16: Cut Over Intraprocedural Trace to Datalog.
+"""Phase 16: Cut Over Intraprocedural Trace to the occurrence evaluator.
 
-Verifies that ``run_trace_analysis()`` routes through the Datalog engine
+Verifies that ``run_trace_analysis()`` routes through the occurrence evaluator
 and that ``TraceViolation`` output shape is preserved.
 """
 
@@ -48,22 +48,22 @@ _SIMPLE_APP = (
 # ---------------------------------------------------------------------------
 
 class TestDefaultEngineIsDatalog:
-    """After Phase 16 cutover, run_trace_analysis uses Datalog by default."""
+    """run_trace_analysis uses the canonical occurrence evaluator."""
 
     def test_violations_tagged_datalog(self, tmp_path):
-        """All violations from run_trace_analysis have engine='datalog'."""
+        """All violations from run_trace_analysis have engine='occurrence'."""
         test_file = tmp_path / "app.py"
         test_file.write_text(_SIMPLE_APP)
 
         violations = run_trace_analysis([str(test_file)], _SQL_CONFIG)
         assert len(violations) >= 1
         for v in violations:
-            assert v.engine == "datalog", (
-                f"Expected engine='datalog', got {v.engine!r}"
+            assert v.engine == "occurrence", (
+                f"Expected engine='occurrence', got {v.engine!r}"
             )
 
-    def test_format_violations_json_engine_datalog(self, tmp_path):
-        """JSON output includes engine='datalog'."""
+    def test_format_violations_json_engine_occurrence(self, tmp_path):
+        """JSON output includes engine='occurrence'."""
         test_file = tmp_path / "app.py"
         test_file.write_text(_SIMPLE_APP)
 
@@ -73,7 +73,7 @@ class TestDefaultEngineIsDatalog:
         json_str = format_violations(violations, json_output=True)
         data = json.loads(json_str)
         for entry in data:
-            assert entry.get("engine") == "datalog"
+            assert entry.get("engine") == "occurrence"
 
     def test_violation_output_shape(self, tmp_path):
         """Violations preserve file_path, line, label, sink_pattern, message."""

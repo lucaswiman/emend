@@ -11,8 +11,6 @@ from emend.trace import (
     TraceSanitizer,
     TraceSink,
     TraceSource,
-    _collect_function_params,
-    _compute_function_summary,
     run_interprocedural_trace,
 )
 
@@ -37,79 +35,6 @@ def _make_rust_interproc_config() -> TraceConfig:
             TraceSanitizer(pattern="escape($X)", label="user_input"),
         ],
     )
-
-
-# ---------------------------------------------------------------------------
-# Parameter extraction tests
-# ---------------------------------------------------------------------------
-
-class TestCollectFunctionParamsRust:
-    def test_basic_params_with_types(self):
-        source = "fn handler(req: Request, db: &Database) {\n    ()\n}\n"
-        params = _collect_function_params(source, 1, 3)
-        assert params == ["req", "db"]
-
-    def test_self_filtered_immutable(self):
-        source = "fn process(&self, x: String) -> String {\n    x\n}\n"
-        params = _collect_function_params(source, 1, 3)
-        assert params == ["x"]
-
-    def test_self_filtered_mutable(self):
-        source = "fn process(&mut self, x: String) -> String {\n    x\n}\n"
-        params = _collect_function_params(source, 1, 3)
-        assert params == ["x"]
-
-    def test_pub_fn(self):
-        source = "pub fn handler(x: i32, y: i32) -> i32 {\n    x + y\n}\n"
-        params = _collect_function_params(source, 1, 3)
-        assert params == ["x", "y"]
-
-    def test_pub_async_fn(self):
-        source = "pub async fn handler(req: Request) -> Response {\n    ()\n}\n"
-        params = _collect_function_params(source, 1, 3)
-        assert params == ["req"]
-
-    def test_no_params(self):
-        source = "fn empty() -> i32 {\n    0\n}\n"
-        params = _collect_function_params(source, 1, 3)
-        assert params == []
-
-
-# ---------------------------------------------------------------------------
-# Function summary test
-# ---------------------------------------------------------------------------
-
-class TestComputeFunctionSummaryRust:
-    def test_param_to_sink(self, tmp_path):
-        """Parameter that flows directly to a sink in a Rust function.
-
-        ``_compute_function_summary`` correctly populates ``param_to_sink``
-        for Rust — this is the primary mechanism used by the interprocedural
-        engine to detect cross-function violations.
-        """
-        test_file = tmp_path / "lib.rs"
-        source = (
-            "fn run_query(x: String) {\n"
-            "    execute_query(x);\n"
-            "}\n"
-        )
-        test_file.write_text(source)
-        config = _make_rust_interproc_config()
-        params = _collect_function_params(source, 1, 3)
-        assert "x" in params, f"Expected 'x' in params, got {params}"
-        summary = _compute_function_summary(
-            str(test_file), source, 1, 3, config, "run_query", params,
-            language="rust",
-        )
-        assert "x" in summary.param_to_sink, (
-            f"Expected 'x' in param_to_sink, got {summary.param_to_sink}"
-        )
-        # Verify the sink entry has the expected structure
-        sink_entries = summary.param_to_sink["x"]
-        assert len(sink_entries) >= 1
-        label, pattern, line = sink_entries[0]
-        assert label == "user_input"
-        assert "execute_query" in pattern
 
 
 # ---------------------------------------------------------------------------

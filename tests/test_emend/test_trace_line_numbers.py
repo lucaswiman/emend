@@ -1,9 +1,9 @@
 """Regression tests for trace line-number correctness.
 
-Covers two verified bugs in ``emend.trace._run_trace_datalog``:
+Covers two verified bugs in the public occurrence evaluator:
 
 BUG 1: Effect-sink violations reported 0-indexed line numbers.
-       ``_resolve_effect_sink_line`` returned ``DefUseFact``/``MethodCallFact``
+       The old resolver returned ``DefUseFact``/``MethodCallFact``
        line fields raw, but those are 0-indexed (see fact_graph.py where the
        method-call populator emits ``line - 1`` and def-use facts use 0-based
        lines).  The violation therefore pointed one line above the real sink.

@@ -1,16 +1,11 @@
 """Tests for interprocedural taint analysis."""
 
-import pytest
-
 from emend.trace import (
-    FunctionSummary,
     InterproceduralResult,
     TraceConfig,
     TraceSanitizer,
     TraceSink,
     TraceSource,
-    _collect_function_params,
-    _compute_function_summary,
     run_interprocedural_trace,
 )
 
@@ -33,128 +28,6 @@ def _make_sql_config():
             TraceSanitizer(pattern="escape($X)", label="user_input"),
         ],
     )
-
-
-class TestCollectFunctionParams:
-    def test_simple_params(self, tmp_path):
-        source = "def foo(a, b, c):\n    pass\n"
-        params = _collect_function_params(source, 1, 2)
-        assert params == ["a", "b", "c"]
-
-    def test_params_with_defaults(self, tmp_path):
-        source = "def foo(a, b=1, c='x'):\n    pass\n"
-        params = _collect_function_params(source, 1, 2)
-        assert params == ["a", "b", "c"]
-
-    def test_params_with_annotations(self, tmp_path):
-        source = "def foo(a: int, b: str = 'x'):\n    pass\n"
-        params = _collect_function_params(source, 1, 2)
-        assert params == ["a", "b"]
-
-    def test_skip_self_cls(self, tmp_path):
-        source = "def method(self, a, b):\n    pass\n"
-        params = _collect_function_params(source, 1, 2)
-        assert params == ["a", "b"]
-
-    def test_star_args(self, tmp_path):
-        source = "def foo(a, *args, **kwargs):\n    pass\n"
-        params = _collect_function_params(source, 1, 2)
-        assert "a" in params
-        assert "args" in params
-        assert "kwargs" in params
-
-    def test_no_params(self, tmp_path):
-        source = "def foo():\n    pass\n"
-        params = _collect_function_params(source, 1, 2)
-        assert params == []
-
-    def test_async_def(self, tmp_path):
-        source = "async def foo(a, b):\n    pass\n"
-        params = _collect_function_params(source, 1, 2)
-        assert params == ["a", "b"]
-
-
-class TestComputeFunctionSummary:
-    def test_param_to_return(self, tmp_path):
-        """Parameter that flows to return value via assignment."""
-        test_file = tmp_path / "test.py"
-        source = "def identity(x):\n    result = x\n    return result\n"
-        test_file.write_text(source)
-
-        config = _make_sql_config()
-        summary = _compute_function_summary(
-            file_path=str(test_file),
-            source=source,
-            func_start=1,
-            func_end=3,
-            config=config,
-            func_qn="test::identity",
-            param_names=["x"],
-        )
-        assert "x" in summary.param_to_return
-        assert "user_input" in summary.param_to_return["x"]
-
-    def test_param_to_sink(self, tmp_path):
-        """Parameter that flows to a sink."""
-        test_file = tmp_path / "test.py"
-        source = (
-            "def run_query(cursor, query):\n"
-            "    cursor.execute(query)\n"
-        )
-        test_file.write_text(source)
-
-        config = _make_sql_config()
-        summary = _compute_function_summary(
-            file_path=str(test_file),
-            source=source,
-            func_start=1,
-            func_end=2,
-            config=config,
-            func_qn="test::run_query",
-            param_names=["cursor", "query"],
-        )
-        assert "query" in summary.param_to_sink
-        assert any(s[0] == "user_input" for s in summary.param_to_sink["query"])
-
-    def test_no_flow(self, tmp_path):
-        """Parameter that doesn't flow to return or sink."""
-        test_file = tmp_path / "test.py"
-        source = "def foo(x):\n    return 42\n"
-        test_file.write_text(source)
-
-        config = _make_sql_config()
-        summary = _compute_function_summary(
-            file_path=str(test_file),
-            source=source,
-            func_start=1,
-            func_end=2,
-            config=config,
-            func_qn="test::foo",
-            param_names=["x"],
-        )
-        assert "x" not in summary.param_to_return
-
-    def test_param_to_sink_respects_statement_order(self, tmp_path):
-        """A later assignment must not taint an earlier sink in the summary."""
-        test_file = tmp_path / "test.py"
-        source = (
-            "def run_query(cursor, query):\n"
-            "    cursor.execute(sql)\n"
-            "    sql = query\n"
-        )
-        test_file.write_text(source)
-
-        config = _make_sql_config()
-        summary = _compute_function_summary(
-            file_path=str(test_file),
-            source=source,
-            func_start=1,
-            func_end=3,
-            config=config,
-            func_qn="test::run_query",
-            param_names=["cursor", "query"],
-        )
-        assert "query" not in summary.param_to_sink
 
 
 class TestInterproceduralAnalysis:
@@ -252,7 +125,7 @@ class TestInterproceduralAnalysis:
         assert len(result.violations) >= 1
         messages = [v.message for v in result.violations]
         assert any("SQL injection" in m or "cursor.execute" in m.lower() for m in messages)
-        assert all(v.engine == "datalog" for v in result.violations)
+        assert all(v.engine == "occurrence" for v in result.violations)
 
     def test_intraprocedural_still_found(self, tmp_path):
         """Interprocedural mode still finds direct (intraprocedural) violations."""
@@ -343,7 +216,7 @@ class TestInterproceduralAnalysis:
             [str(test_file)], config, label_filter="user_input",
         )
         assert len(result.violations) >= 1
-        assert all(v.engine == "datalog" for v in result.violations)
+        assert all(v.engine == "occurrence" for v in result.violations)
 
         result_no_match = run_interprocedural_trace(
             [str(test_file)], config, label_filter="nonexistent",
@@ -554,7 +427,6 @@ class TestMultiHopChainPropagation:
         )
 
     def test_max_chain_depth_limits_propagation(self, tmp_path):
-        """max_chain_depth=1 should only detect direct callee sinks, not transitive."""
         test_file = tmp_path / "app.py"
         test_file.write_text(
             "def step2(query):\n"
@@ -569,19 +441,9 @@ class TestMultiHopChainPropagation:
         )
 
         config = _make_sql_config()
-        # With depth=1, step1's transitive sink through step2 should NOT
-        # be propagated, so handler -> step1 should not produce a violation
-        # (but handler directly calling step2 would still work).
-        result = run_interprocedural_trace(
-            [str(test_file)], config, max_chain_depth=1,
-        )
-        assert isinstance(result, InterproceduralResult)
-        # Only violations through direct callee sinks (depth 1) should appear.
-        # handler -> step1 is depth 2 (step1 -> step2 -> sink), so no violation.
-        chain_violations = [
-            v for v in result.violations
-            if "step1" in (v.message or "") or "step2" in (v.message or "")
-        ]
-        assert len(chain_violations) == 0, (
-            f"Expected no chain violations at depth 1, got: {chain_violations}"
-        )
+        assert [
+            bool(run_interprocedural_trace(
+                [str(test_file)], config, max_chain_depth=depth,
+            ).violations)
+            for depth in (1, 2)
+        ] == [False, True]
