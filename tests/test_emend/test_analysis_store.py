@@ -733,6 +733,34 @@ def test_fact_consumers_reuse_one_generation_without_ad_hoc_graphs(tmp_path, mon
     assert len(seen) >= 2 and len(set(seen)) == 1
 
 
+def test_build_from_project_adapts_owned_facts_without_owning_the_owner(
+    tmp_path, monkeypatch
+):
+    """The legacy builder delegates collection/typing and returns a safe copy."""
+    from emend.analysis_store import AnalysisStore
+    from emend.fact_graph import FactGraph
+
+    source = tmp_path / "app.py"
+    source.write_text("def live():\n    return 1\n")
+    store = AnalysisStore.open(tmp_path)
+    owner_graph = store.query_facts()
+    calls = []
+    original = store.query_facts
+
+    def tracked(*, include_types=False, type_engine="auto"):
+        calls.append((include_types, type_engine))
+        return original(include_types=include_types, type_engine=type_engine)
+
+    monkeypatch.setattr(store, "query_facts", tracked)
+    legacy_graph = FactGraph.build_from_project(str(tmp_path), include_types=True)
+    assert calls[0] == (True, "auto")
+    assert [symbol.name for symbol in legacy_graph.symbols()] == ["live"]
+
+    # Closing a compatibility result must not close the shared owner view.
+    legacy_graph.close()
+    assert [symbol.name for symbol in owner_graph.symbols()] == ["live"]
+
+
 def test_type_batch_uses_one_snapshot_and_reuses_linked_worktree_payload(
     tmp_path, monkeypatch
 ):

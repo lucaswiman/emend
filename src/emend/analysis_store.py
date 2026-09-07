@@ -692,6 +692,84 @@ class AnalysisStore:
             raise
         return graph, path
 
+    def detached_facts(
+        self,
+        graph=None,
+        *,
+        db_path: str | None = None,
+        file_paths: Iterable[str | Path] | None = None,
+    ):
+        """Return an independently closable copy of an owned fact view.
+
+        Compatibility APIs historically returned a graph whose lifecycle was
+        owned by the caller. Keep that boundary without making those APIs
+        collect or infer facts themselves: copy the owner's coherent SQLite
+        generation and give the caller the resulting graph.
+        """
+        from emend.fact_graph import FactGraph
+
+        with self._refresh_lock:
+            graph = graph or self.query_facts()
+            source_path = getattr(graph, "_db_path", None)
+            if source_path is None:
+                # Owned project generations are always backed by SQLite. This
+                # fallback is useful for injected in-memory test graphs.
+                clone = FactGraph.from_json(graph.to_json())
+                clone.bind_snapshot(graph.snapshot)
+                return clone
+
+            source = Path(source_path).resolve()
+            requested = Path(db_path).resolve() if db_path is not None else None
+            owns_path = requested is None
+            if requested is None:
+                self.ensure_cache_directory()
+                fd, name = tempfile.mkstemp(
+                    prefix="facts-detached-", suffix=".db", dir=self.cache_dir
+                )
+                os.close(fd)
+                target = Path(name)
+            else:
+                target = requested
+                target.parent.mkdir(parents=True, exist_ok=True)
+
+            # Never let a legacy caller open the owner's live database.
+            if target == source:
+                fd, name = tempfile.mkstemp(
+                    prefix="facts-detached-", suffix=".db", dir=self.cache_dir
+                )
+                os.close(fd)
+                target = Path(name)
+                owns_path = True
+            try:
+                self._copy_sqlite(source, target)
+                detached = FactGraph(db_path=str(target))
+                revisions = graph.snapshot.files
+                if file_paths is not None:
+                    allowed = {str(Path(path).resolve()) for path in file_paths}
+                    revisions = tuple(
+                        revision for revision in revisions
+                        if str(Path(revision.file_path).resolve()) in allowed
+                    )
+                    omitted = [
+                        graph.stored_path(revision.file_path)
+                        for revision in graph.snapshot.files
+                        if revision not in revisions
+                    ]
+                    detached.remove_files(omitted)
+                snapshot = self._make_snapshot(
+                    revisions, base_snapshot_id=graph.snapshot.base_snapshot_id
+                )
+                detached.bind_snapshot(
+                    snapshot,
+                    source_overrides=getattr(graph, "_source_overrides", None),
+                    source_loader=self._revision_source,
+                )
+                detached._close_unlinks_db = owns_path
+                return detached
+            except BaseException:
+                target.unlink(missing_ok=True)
+                raise
+
     def _overlay_snapshot(self, disk: AnalysisSnapshot) -> AnalysisSnapshot:
         revisions = {revision.file_path: revision for revision in disk.files}
         from emend.language_registry import detect_language

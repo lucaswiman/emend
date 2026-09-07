@@ -362,6 +362,9 @@ class FactGraph:
         self._snapshot = snapshot
         self._source_overrides = dict(source_overrides or {})
         self._source_loader = source_loader
+        # Detached compatibility graphs may own a private snapshot copy. The
+        # analysis owner, by contrast, keeps its generation files alive.
+        self._close_unlinks_db = False
         self._revisions_by_path = {
             revision.file_path: revision for revision in snapshot.files
         } if snapshot is not None else {}
@@ -516,11 +519,20 @@ class FactGraph:
 
     def close(self) -> None:
         """Close the underlying database connection."""
+        db_path = self._db_path if self._close_unlinks_db else None
         try:
-            self._client.close()
+            if self._client is not None:
+                self._client.close()
             self._client = None
         except Exception:
             logger.debug("Failed to close CozoDB client", exc_info=True)
+        finally:
+            if db_path is not None:
+                try:
+                    Path(db_path).unlink(missing_ok=True)
+                except OSError:
+                    logger.debug("Failed to remove detached graph %s", db_path,
+                                 exc_info=True)
 
     # -- Mutation ---------------------------------------------------------
 
@@ -3084,99 +3096,11 @@ class FactGraph:
         This full-rebuild API and the persisted index share the same
         per-file extractor.
         """
-        from emend.project_config import find_project_root
-        from emend.file_collection import (
-            collect_all_source_files,
-            detect_project_languages,
+        from emend.fact_graph_compat import build_from_project
+
+        return build_from_project(
+            cls, project_path, language, db_path, languages, include_types
         )
-
-        graph = cls(db_path=db_path)
-        project_root = str(find_project_root(project_path))
-
-        # Resolve which languages to collect.
-        # Priority: explicit ``languages`` list > singular ``language`` > auto-detect.
-        if languages is not None:
-            effective_languages = list(languages)
-        elif language is not None:
-            effective_languages = [language]
-        else:
-            effective_languages = detect_project_languages(project_root)
-
-        source_files = collect_all_source_files(
-            project_root, languages=effective_languages
-        )
-
-        # The scope resolver may fail if pointed at a repo root with
-        # incompatible config.  Use the user-supplied project_path as
-        # the resolver root (typically ``src/pkg``), falling back to
-        # the detected project_root.
-        resolver_root = str(Path(project_path).resolve())
-
-        file_list: list[tuple[str, str]] = []
-        for abs_file_path in source_files:
-            try:
-                file_list.append((
-                    abs_file_path,
-                    Path(abs_file_path).read_text(encoding="utf-8"),
-                ))
-            except (OSError, UnicodeDecodeError):
-                logger.debug("Could not read %s", abs_file_path, exc_info=True)
-
-        graph.update_files(
-            file_list,
-            project_root=project_root,
-            resolver_root=resolver_root,
-        )
-
-        # -- Resolve builtins.* references using import facts -----------
-        # When a scope resolver can't resolve a cross-file import (common
-        # for TypeScript/Rust), references end up as "builtins.X".  We
-        # resolve these using the import facts to find the real callee QN.
-        graph._resolve_builtin_refs()
-
-        # -- Type binding facts (via type oracle) ----------------------
-        # Populate after all files are processed so the type oracle can
-        # see the full project. Fact-only consumers (notably deadcode) keep
-        # this lazy because type inference is much slower than syntax/facts.
-        # Gracefully skips when no type checker is available.
-        if include_types:
-            try:
-                from emend.type_oracle import create_type_oracle, parse_type_string
-
-                oracle = create_type_oracle(
-                    engine="auto", project_root=Path(project_root)
-                )
-                if oracle.is_available():
-                    project_root_path = Path(project_root).resolve()
-                    type_results = oracle.infer_batch(
-                        [Path(path) for path in source_files],
-                        project_root=project_root_path,
-                    )
-                    for abs_file_path in source_files:
-                        try:
-                            rel_path = str(Path(abs_file_path).relative_to(project_root_path))
-                        except ValueError:
-                            rel_path = abs_file_path
-                        file_types = type_results.get(str(Path(abs_file_path).resolve()))
-                        if file_types is None:
-                            continue
-                        type_facts: list[TypeFact] = []
-                        for binding in file_types.bindings:
-                            td = parse_type_string(binding.raw_type)
-                            type_facts.append(TypeFact(
-                                symbol_qn=binding.name,
-                                type_str=td.name,  # top-level constructor
-                                file_path=rel_path,
-                                line=binding.line,
-                                binding_kind=binding.binding_kind,
-                            ))
-                        graph.add_types_batch(type_facts)
-            except BUG_EXCEPTIONS:
-                raise
-            except Exception:
-                logger.debug("Could not populate type bindings", exc_info=True)
-
-        return graph
 
 
 # ---------------------------------------------------------------------------
