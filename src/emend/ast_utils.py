@@ -148,24 +148,6 @@ def resolve_through_reexports(
     return None
 
 
-def _rust_dict_to_nested_symbol(d: dict) -> NestedSymbol:
-    """Convert a Rust symbol dict to a NestedSymbol."""
-    children = [_rust_dict_to_nested_symbol(c) for c in d.get("children", [])
-                if c.get("kind") not in ("variable", "reference")]
-    return NestedSymbol(
-        name=d["name"],
-        kind=d["kind"],
-        line_start=d["line"],
-        line_end=d["end_line"],
-        col_offset=d.get("col_offset", 0),
-        path=list(d.get("path", [])),
-        decorators=list(d.get("decorators", [])),
-        decorator_line_start=d.get("decorator_line_start"),
-        parameters=list(d.get("param_names", [])),
-        children=children,
-    )
-
-
 def find_nested_definitions(
     filepath: str,
     max_depth: int | None = None,
@@ -184,15 +166,11 @@ def find_nested_definitions(
         source = source_override
 
     ext = ext or Path(filepath).suffix.lstrip('.') or 'py'
-    rust_syms = emend_core.collect_symbols_from_str(
-        source,
-        max_depth=max_depth + 1 if max_depth is not None else None,
-        ext=ext,
-    )
-    # Filter out variables and references at the top level
-    # to return only function/class definitions.
-    return [_rust_dict_to_nested_symbol(d) for d in rust_syms
-            if d.get("kind") not in ("variable", "reference")]
+    from emend.analysis_store import AnalysisStore
+
+    store = AnalysisStore.existing_for_path(filepath) or AnalysisStore.open(Path(filepath).parent)
+    return [symbol.nested(max_depth) for symbol in store.symbols(source, ext)
+            if symbol.kind not in ("variable", "reference")]
 
 
 def find_symbol_by_path(symbols: list[NestedSymbol], path: list[str]) -> NestedSymbol | None:
