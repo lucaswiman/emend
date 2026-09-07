@@ -60,9 +60,7 @@ fn datavalue_to_json(val: &DataValue) -> JsonValue {
             }
         },
         DataValue::Str(s) => JsonValue::String(s.to_string()),
-        DataValue::List(arr) => {
-            JsonValue::Array(arr.iter().map(datavalue_to_json).collect())
-        }
+        DataValue::List(arr) => JsonValue::Array(arr.iter().map(datavalue_to_json).collect()),
         _ => JsonValue::String(format!("{:?}", val)),
     }
 }
@@ -79,13 +77,102 @@ fn py_to_datavalue(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<DataValue> {
     } else if let Ok(s) = obj.extract::<String>() {
         Ok(DataValue::Str(s.into()))
     } else if let Ok(list) = obj.downcast::<PyList>() {
-        let items: PyResult<Vec<DataValue>> = list.iter().map(|item| py_to_datavalue(&item)).collect();
+        let items: PyResult<Vec<DataValue>> =
+            list.iter().map(|item| py_to_datavalue(&item)).collect();
         Ok(DataValue::List(items?))
     } else {
         Err(pyo3::exceptions::PyTypeError::new_err(format!(
             "Cannot convert {} to CozoDB DataValue",
             obj.get_type().name()?
         )))
+    }
+}
+
+fn py_params(params: Option<&Bound<'_, PyDict>>) -> PyResult<BTreeMap<String, DataValue>> {
+    let mut result = BTreeMap::new();
+    if let Some(params) = params {
+        for (key, value) in params.iter() {
+            result.insert(key.extract()?, py_to_datavalue(&value)?);
+        }
+    }
+    Ok(result)
+}
+
+fn named_rows_to_py(py: Python<'_>, result: NamedRows) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    let headers: Vec<String> = result.headers.iter().map(|h| h.to_string()).collect();
+    dict.set_item("headers", headers)?;
+    let rows: Vec<PyObject> = result
+        .rows
+        .iter()
+        .map(|row| {
+            let py_row: Vec<PyObject> = row
+                .iter()
+                .map(|value| json_value_to_py(py, &datavalue_to_json(value)))
+                .collect();
+            PyList::new(py, &py_row).unwrap().into_any().unbind()
+        })
+        .collect();
+    dict.set_item("rows", rows)?;
+    dict.set_item("next", py.None())?;
+    Ok(dict.into_any().unbind())
+}
+
+#[pyclass]
+pub struct PyCozoTransaction {
+    transaction: Option<MultiTransaction>,
+}
+
+#[pymethods]
+impl PyCozoTransaction {
+    #[pyo3(signature = (query, params=None))]
+    fn run(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        params: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyObject> {
+        let transaction = self.transaction.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("CozoDB transaction is closed")
+        })?;
+        let result = transaction
+            .run_script(query, py_params(params)?)
+            .map_err(|error| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "CozoDB transaction error: {error}"
+                ))
+            })?;
+        named_rows_to_py(py, result)
+    }
+
+    fn commit(&mut self) -> PyResult<()> {
+        let transaction = self.transaction.take().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("CozoDB transaction is closed")
+        })?;
+        transaction.commit().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "CozoDB transaction commit error: {error}"
+            ))
+        })
+    }
+
+    fn abort(&mut self) -> PyResult<()> {
+        let transaction = self.transaction.take().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("CozoDB transaction is closed")
+        })?;
+        transaction.abort().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "CozoDB transaction abort error: {error}"
+            ))
+        })
+    }
+}
+
+impl Drop for PyCozoTransaction {
+    fn drop(&mut self) {
+        if let Some(transaction) = self.transaction.take() {
+            let _ = transaction.abort();
+        }
     }
 }
 
@@ -108,40 +195,25 @@ impl PyCozoDb {
     ///
     /// Returns a dict with "headers" (list[str]) and "rows" (list[list]).
     #[pyo3(signature = (query, params=None))]
-    fn run(&self, py: Python<'_>, query: &str, params: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject> {
-        let mut param_map = BTreeMap::new();
-        if let Some(p) = params {
-            for (key, val) in p.iter() {
-                let k: String = key.extract()?;
-                let v = py_to_datavalue(&val)?;
-                param_map.insert(k, v);
-            }
-        }
-
-        let result = self.db.run_script(query, param_map, ScriptMutability::Mutable)
+    fn run(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        params: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyObject> {
+        let result = self
+            .db
+            .run_script(query, py_params(params)?, ScriptMutability::Mutable)
             .map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("CozoDB query error: {}", e))
             })?;
+        named_rows_to_py(py, result)
+    }
 
-        let dict = PyDict::new(py);
-
-        // Headers
-        let headers: Vec<String> = result.headers.iter().map(|h| h.to_string()).collect();
-        dict.set_item("headers", headers)?;
-
-        // Rows
-        let rows: Vec<PyObject> = result.rows.iter().map(|row| {
-            let py_row: Vec<PyObject> = row.iter().map(|val| {
-                let jv = datavalue_to_json(val);
-                json_value_to_py(py, &jv)
-            }).collect();
-            PyList::new(py, &py_row).unwrap().into_any().unbind()
-        }).collect();
-        dict.set_item("rows", rows)?;
-
-        dict.set_item("next", py.None())?;
-
-        Ok(dict.into_any().unbind())
+    fn write_transaction(&self) -> PyCozoTransaction {
+        PyCozoTransaction {
+            transaction: Some(self.db.multi_transaction(true)),
+        }
     }
 
     /// Close the database (no-op for in-memory).

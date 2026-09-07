@@ -504,36 +504,6 @@ class TestFindSourceRootLanguageThreading:
             "find_dead_code() is missing a 'project_path' parameter"
         )
 
-    def test_query_symbol_index_passes_language_to_ensure_index_fresh(self, tmp_path):
-        """query_symbol_index() should forward its language parameter to
-        _ensure_index_fresh()."""
-        from unittest.mock import patch
-        from emend.transform import query_symbol_index
-
-        with patch("emend.transform.index._ensure_index_fresh", return_value=False) as mock_eif:
-            query_symbol_index(str(tmp_path), language="rust")
-            assert mock_eif.called
-            call_kwargs = mock_eif.call_args.kwargs
-            assert call_kwargs.get("language") == "rust", (
-                f"_ensure_index_fresh() was called with language={call_kwargs.get('language')!r}, "
-                f"expected 'rust'"
-            )
-
-    def test_query_reference_index_passes_language_to_ensure_index_fresh(self, tmp_path):
-        """query_reference_index() should forward its language parameter to
-        _ensure_index_fresh()."""
-        from unittest.mock import patch
-        from emend.transform import query_reference_index
-
-        with patch("emend.transform.index._ensure_index_fresh", return_value=False) as mock_eif:
-            query_reference_index(str(tmp_path), "some.symbol", language="typescript")
-            assert mock_eif.called
-            call_kwargs = mock_eif.call_args.kwargs
-            assert call_kwargs.get("language") == "typescript", (
-                f"_ensure_index_fresh() was called with language={call_kwargs.get('language')!r}, "
-                f"expected 'typescript'"
-            )
-
     def test_find_dead_code_uses_datalog_backend(self, tmp_path):
         """find_dead_code() should delegate to FactGraph.dead_code_unified()."""
         from unittest.mock import patch, MagicMock

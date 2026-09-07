@@ -34,6 +34,24 @@ from emend.fact_graph import (
 )
 
 
+def test_batched_fact_mutations_abort_as_one_transaction(request):
+    graph = FactGraph()
+    request.addfinalizer(graph.close)
+    graph.add_symbol(SymbolFact("a.py", "before", "a.before", "function", 1, 1))
+    put = (
+        "?[qualified_name, file_path, name, kind, line, end_line, parent] <- $rows "
+        ":put symbol {qualified_name => file_path, name, kind, line, end_line, parent}"
+    )
+
+    with pytest.raises(RuntimeError, match="transaction"):
+        graph._run_mutations([
+            (put, {"rows": [["a.after", "a.py", "after", "function", 2, 2, ""]]}),
+            ("this is not CozoScript", {}),
+        ])
+
+    assert [symbol.name for symbol in graph.symbols()] == ["before"]
+
+
 def _make_graph() -> FactGraph:
     """Build a small graph for testing."""
     g = FactGraph()
@@ -1256,7 +1274,7 @@ class TestBuildFromProjectMethodCallFacts:
 
     def test_persisted_builder_matches_project_method_calls(self, tmp_path):
         """Persisted and project builders emit identical method-call facts."""
-        from emend.transform.cache import _build_facts_db, _cache_db_dir
+        from emend.analysis_store import AnalysisStore
 
         src = tmp_path / "app.py"
         src.write_text(
@@ -1267,8 +1285,7 @@ class TestBuildFromProjectMethodCallFacts:
             "client.fetch()\n"
         )
 
-        _build_facts_db(str(tmp_path))
-        persisted = FactGraph(db_path=str(_cache_db_dir(tmp_path) / "facts.db"))
+        persisted = AnalysisStore.open(tmp_path).query_facts()
         project = FactGraph.build_from_project(str(tmp_path))
 
         def method_calls(graph):

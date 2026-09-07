@@ -264,6 +264,13 @@ fn collect_string_literals(source: &str, ext: &str) -> PyResult<Vec<(u32, u32, u
     Ok(pattern::collect_string_literals(source, ext))
 }
 
+/// Direct string elements of module-level Python ``__all__`` list/tuple assignments.
+#[pyfunction]
+fn python_all_names(source: &str) -> Vec<String> {
+    pattern::python_all_names(source)
+}
+
+
 /// Collect all comment nodes from source code.
 ///
 /// Returns a list of (start_line, start_col, text) tuples where text is the
@@ -429,6 +436,7 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(symbols::get_statement_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(collect_identifier_positions, m)?)?;
     m.add_function(wrap_pyfunction!(collect_string_literals, m)?)?;
+    m.add_function(wrap_pyfunction!(python_all_names, m)?)?;
     m.add_function(wrap_pyfunction!(collect_comments, m)?)?;
     m.add_function(wrap_pyfunction!(parse_string_literal, m)?)?;
     m.add_function(wrap_pyfunction!(validate_syntax, m)?)?;
@@ -439,6 +447,7 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scope_py::PyScopeResolver>()?;
     m.add_class::<transform_py::PyFileTransform>()?;
     m.add_class::<cozo_db::PyCozoDb>()?;
+    m.add_class::<cozo_db::PyCozoTransaction>()?;
     m.add_class::<cfg_py::PyCfg>()?;
     m.add_function(wrap_pyfunction!(cfg_py::build_cfgs, m)?)?;
     m.add_class::<tree_py::PyTree>()?;

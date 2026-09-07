@@ -68,7 +68,8 @@ def refs(
 
 def _graph_symbol(symbol: str, direction: str, transitive: bool, depth: int | None, format: str, project: str | None) -> str:
     """Symbol-level call graph query."""
-    from emend.transform import _find_project_root, _file_to_module, _normalize_module_qn, _get_or_build_fact_graph
+    from emend.transform import _find_project_root, _file_to_module, _normalize_module_qn
+    from emend.analysis_store import AnalysisStore
 
     sel = parse_extended_selector(symbol)
     sym_name = sel.symbol_path[-1] if sel.symbol_path else None
@@ -77,7 +78,7 @@ def _graph_symbol(symbol: str, direction: str, transitive: bool, depth: int | No
 
     module_root = _find_project_root(sel.file_path) if sel.file_path else (project or ".")
     scan_root = project or module_root
-    fg = _get_or_build_fact_graph(scan_root)
+    fg = AnalysisStore.open(scan_root).query_facts()
 
     if sel.file_path:
         target_module = _normalize_module_qn(_file_to_module(sel.file_path, module_root))

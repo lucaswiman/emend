@@ -18,10 +18,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-def _get_cached_qnames(content_hash: bytes) -> set[str] | None:
-    """Look up cached qualified-name set for a file by content hash."""
+def _get_cached_qnames(
+    content_hash: bytes,
+    *,
+    file_path: str,
+    project_root: str | Path = ".",
+) -> set[str] | None:
+    """Look up names for one file revision, never content in another module."""
     from .cache import _get_disk_cache
-    conn = _get_disk_cache()
+    conn = _get_disk_cache(project_root)
     if conn is None:
         return None
     import pickle
@@ -29,7 +34,8 @@ def _get_cached_qnames(content_hash: bytes) -> set[str] | None:
     import zlib
     try:
         row = conn.execute(
-            "SELECT qnames FROM qn_index WHERE hash = ?", (content_hash,)
+            "SELECT qnames FROM qn_index WHERE file_path = ? AND hash = ?",
+            (str(Path(file_path).resolve()), content_hash),
         ).fetchone()
     except sqlite3.Error:
         logger.debug("qn_index cache lookup failed", exc_info=True)
@@ -43,34 +49,11 @@ def _get_cached_qnames(content_hash: bytes) -> set[str] | None:
         return None
 
 
-def _extract_all_exports_text(source: str, file_path: str = "__temp__.py") -> set[str]:
-    """Extract names from ``__all__`` using tree-sitter pattern matching.
+def _extract_all_exports_text(source: str) -> set[str]:
+    """Backward-compatible wrapper for canonical Python export detection."""
+    from emend.language_registry import detect_exported_names
 
-    Uses ``find_pattern`` so that the match is tree-sitter-based and respects
-    syntactic boundaries (won't match ``__all__`` inside string literals or
-    comments).  The small inner regex that pulls quoted names out of the
-    already-parsed ``$NAMES`` captured text is acceptable because it operates
-    on a structurally extracted sub-tree, not raw source.
-    """
-    from .patterns import find_pattern
-    names: set[str] = set()
-    try:
-        matches = find_pattern(
-            "__all__ = $NAMES",
-            file_path,
-            source_override=source,
-            language="python",
-        )
-    except BUG_EXCEPTIONS:
-        raise
-    except Exception:
-        logger.debug("__all__ pattern match failed in %s", file_path, exc_info=True)
-        return names
-    for m in matches:
-        raw = m.captures.get("NAMES", "")
-        for n in re.findall(r"""['"](\w+)['"]""", raw):
-            names.add(n)
-    return names
+    return detect_exported_names(source, "python")
 
 
 # Build from the canonical pattern so the noqa fragment is not duplicated.
@@ -94,10 +77,13 @@ def _extract_noqa_lines(source: str) -> set[int]:
     return result
 
 
-def _check_cache_hits(db_path: str, all_hashes: list[bytes]) -> set[bytes]:
-    """Pre-check which content hashes already have a QN cache entry.
+def _check_cache_hits(
+    db_path: str, file_revisions: list[tuple[str, bytes]]
+) -> set[tuple[str, bytes]]:
+    """Pre-check which exact file revisions have a QN cache entry.
 
-    Returns the set of hashes present in ``qn_index``. The derived tables
+    Returns the set of ``(resolved path, hash)`` revisions in ``qn_index``.
+    The derived tables
     (``symbol_index``, ``import_graph``, ``reference_index``) are written in
     lockstep with ``qn_index``, so a QN-cache hit implies their rows are
     current and a QN-cache miss means all of them must be re-derived — only
@@ -106,22 +92,22 @@ def _check_cache_hits(db_path: str, all_hashes: list[bytes]) -> set[bytes]:
     """
     import sqlite3
 
-    cached_qn: set[bytes] = set()
-    if not all_hashes:
+    cached_qn: set[tuple[str, bytes]] = set()
+    if not file_revisions:
         return cached_qn
     try:
         conn_check = sqlite3.connect(db_path, timeout=30)
         conn_check.execute("PRAGMA journal_mode=WAL")
         conn_check.execute("PRAGMA synchronous=NORMAL")
-        placeholders = ",".join("?" * len(all_hashes))
         try:
-            cached_qn.update(
-                row[0]
-                for row in conn_check.execute(
-                    f"SELECT hash FROM qn_index WHERE hash IN ({placeholders})",
-                    all_hashes,
-                ).fetchall()
-            )
+            for file_path, content_hash in file_revisions:
+                resolved = str(Path(file_path).resolve())
+                row = conn_check.execute(
+                    "SELECT 1 FROM qn_index WHERE file_path = ? AND hash = ?",
+                    (resolved, content_hash),
+                ).fetchone()
+                if row is not None:
+                    cached_qn.add((resolved, content_hash))
         except sqlite3.Error:
             logger.debug("qn_index cache pre-check query failed", exc_info=True)
         conn_check.close()
@@ -133,7 +119,7 @@ def _check_cache_hits(db_path: str, all_hashes: list[bytes]) -> set[bytes]:
 
 def _write_index_rows(
     db_path: str,
-    qn_rows: list[tuple[bytes, bytes]],
+    qn_rows: list[tuple[str, bytes, bytes]],
     sym_rows: list[tuple],
     import_rows: list[tuple[bytes, str, str]],
     ref_rows: list[tuple],
@@ -157,17 +143,23 @@ def _write_index_rows(
         # warm_caches, but needed when _index_batch is called directly).
         _init_cache_schema(conn)
         if qn_rows:
+            revised_paths = list({row[0] for row in qn_rows})
+            for table, column in (
+                ("symbol_index", "file_path"),
+                ("import_graph", "file_path"),
+                ("reference_index", "file_path"),
+                ("dsl_symbols", "host_file"),
+            ):
+                conn.executemany(
+                    f"DELETE FROM {table} WHERE {column} = ?",
+                    ((path,) for path in revised_paths),
+                )
             conn.executemany(
-                "INSERT OR REPLACE INTO qn_index VALUES (?, ?)", qn_rows
+                "INSERT OR REPLACE INTO qn_index(file_path, hash, qnames) "
+                "VALUES (?, ?, ?)",
+                qn_rows,
             )
         if sym_rows:
-            # Bulk-delete old entries before inserting
-            hashes_with_syms = list({r[0] for r in sym_rows})
-            placeholders = ",".join("?" * len(hashes_with_syms))
-            conn.execute(
-                f"DELETE FROM symbol_index WHERE content_hash IN ({placeholders})",
-                hashes_with_syms,
-            )
             conn.executemany(
                 "INSERT INTO symbol_index "
                 "(content_hash, file_path, name, qualified_name, module_qn, kind, "
@@ -177,12 +169,6 @@ def _write_index_rows(
                 sym_rows,
             )
         if import_rows:
-            hashes_with_imports = list({r[0] for r in import_rows})
-            placeholders = ",".join("?" * len(hashes_with_imports))
-            conn.execute(
-                f"DELETE FROM import_graph WHERE content_hash IN ({placeholders})",
-                hashes_with_imports,
-            )
             conn.executemany(
                 "INSERT OR IGNORE INTO import_graph "
                 "(content_hash, file_path, imported_module) "
@@ -190,12 +176,6 @@ def _write_index_rows(
                 import_rows,
             )
         if ref_rows:
-            hashes_with_refs = list({r[0] for r in ref_rows})
-            placeholders = ",".join("?" * len(hashes_with_refs))
-            conn.execute(
-                f"DELETE FROM reference_index WHERE content_hash IN ({placeholders})",
-                hashes_with_refs,
-            )
             conn.executemany(
                 "INSERT INTO reference_index "
                 "(content_hash, target_qn, file_path, line, col, ref_kind) "
@@ -203,12 +183,6 @@ def _write_index_rows(
                 ref_rows,
             )
         if dsl_rows:
-            hashes_with_dsl = list({r[-1] for r in dsl_rows})
-            placeholders = ",".join("?" * len(hashes_with_dsl))
-            conn.execute(
-                f"DELETE FROM dsl_symbols WHERE content_hash IN ({placeholders})",
-                hashes_with_dsl,
-            )
             conn.executemany(
                 "INSERT INTO dsl_symbols "
                 "(name, kind, dsl, host_file, host_start_line, host_start_col, "
@@ -249,7 +223,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
     from .deadcode import _is_likely_entry_point
     db_path, source_root, project_root, file_batch = args
-    qn_rows: list[tuple[bytes, bytes]] = []
+    qn_rows: list[tuple[str, bytes, bytes]] = []
     sym_rows: list[tuple] = []
     import_rows: list[tuple[bytes, str, str]] = []
     ref_rows: list[tuple] = []
@@ -266,14 +240,14 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         (hashlib.md5(content.encode(), usedforsecurity=False).digest(), py_file, content)
         for py_file, content in file_batch
     ]
-    all_hashes = [h for h, _, _ in file_hashes]
-
-    cached_qn = _check_cache_hits(db_path, all_hashes)
+    cached_qn = _check_cache_hits(
+        db_path, [(path, digest) for digest, path, _ in file_hashes]
+    )
 
     skipped = 0
     processed = 0
     for content_hash, py_file, content in file_hashes:
-        need_qn = content_hash not in cached_qn
+        need_qn = (str(Path(py_file).resolve()), content_hash) not in cached_qn
         # The QN cache is the core index. The derived tables (symbol_index,
         # import_graph, reference_index) may legitimately have zero rows for a
         # given file (e.g. a file with only assignments has no symbols) and are
@@ -306,7 +280,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                     pickle.dumps(all_qnames, protocol=pickle.HIGHEST_PROTOCOL),
                     level=1,
                 )
-                qn_rows.append((content_hash, qn_blob))
+                qn_rows.append((str(Path(py_file).resolve()), content_hash, qn_blob))
 
         if need_sym:
             try:
@@ -335,7 +309,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                 )
 
                 # __all__ membership and noqa for dead-code pre-filtering.
-                exported_names = _extract_all_exports_text(content, py_file)
+                exported_names = _extract_all_exports_text(content)
                 noqa_lines = _extract_noqa_lines(content)
 
                 for sym in syms_for_file:
@@ -421,9 +395,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     # WAL mode allows concurrent readers/writers across processes.
     _write_index_rows(db_path, qn_rows, sym_rows, import_rows, ref_rows, dsl_rows)
 
-    # NOTE: CozoDB facts.db is NOT written here — it's built by the caller
-    # (_build_facts_db) after all workers complete, extracting directly
-    # from source files to avoid dual-write through parse.db.
+    # Cozo facts are materialized separately by AnalysisStore.query_facts().
 
     return (processed, len(qn_rows), skipped,
             len(sym_rows), len(import_rows), len(ref_rows), len(dsl_rows))
@@ -448,18 +420,11 @@ def _scan_manifest(
     project_path: str,
     conn: sqlite3.Connection | None = None,
 ) -> ManifestScanResult:
-    """Three-tier staleness check against the file manifest.
-
-    Tier 1: Git HEAD check (~1ms).
-    Tier 2: File stat scan (mtime_ns + size, no I/O).
-    Tier 3: Content hash verification (only for stat-mismatched files).
-
-    Returns a ManifestScanResult with categorized files.
-    """
-    import os as _os
+    """Compare the derived index generation with the owner's disk snapshot."""
     import sqlite3 as _sql3
     from .cache import _get_worktree_id, _cache_db_dir
-    from .project_iter import _find_project_root, _collect_source_files_scandir
+    from .project_iter import _find_project_root
+    from emend.analysis_store import AnalysisStore
 
     result = ManifestScanResult(
         unchanged=[], changed=[], new_files=[], deleted=[],
@@ -468,9 +433,18 @@ def _scan_manifest(
 
     project_root = _find_project_root(project_path)
     worktree_id = _get_worktree_id(project_root)
-    scan_root = str(Path(project_path).resolve())
-    source_files = _collect_source_files_scandir(scan_root)
-    source_files_resolved = {str(Path(f).resolve()): f for f in source_files}
+    scan_root = Path(project_path).resolve()
+    revisions = AnalysisStore.open(project_root).disk_snapshot().files
+
+    def in_scope(file_path: str) -> bool:
+        path = Path(file_path)
+        return path == scan_root if scan_root.is_file() else path.is_relative_to(scan_root)
+
+    current = {
+        revision.file_path: bytes.fromhex(revision.content_hash)
+        for revision in revisions
+        if in_scope(revision.file_path)
+    }
 
     # Open DB (use provided conn or open fresh)
     close_conn = False
@@ -479,7 +453,7 @@ def _scan_manifest(
         db_path = cache_dir / "parse.db"
         if not db_path.exists():
             # No index at all — everything is new
-            result.new_files = source_files
+            result.new_files = list(current)
             return result
         try:
             conn = _sql3.connect(str(db_path), timeout=10)
@@ -487,7 +461,7 @@ def _scan_manifest(
             close_conn = True
         except _sql3.Error:
             logger.debug("could not open parse.db for manifest scan", exc_info=True)
-            result.new_files = source_files
+            result.new_files = list(current)
             return result
 
     try:
@@ -513,74 +487,30 @@ def _scan_manifest(
 
         # Tier 2 + 3: Stat scan + hash verification
         # Load manifest into memory for fast lookup (filtered by worktree)
-        manifest: dict[str, tuple[int, int, bytes]] = {}
+        manifest: dict[str, bytes] = {}
         try:
             for row in conn.execute(
-                "SELECT path, mtime_ns, size, content_hash FROM file_manifest "
+                "SELECT path, content_hash FROM file_manifest "
                 "WHERE worktree_id = ?",
                 (worktree_id,),
             ).fetchall():
-                manifest[row[0]] = (row[1], row[2], row[3])
+                if in_scope(row[0]):
+                    manifest[row[0]] = row[1]
         except _sql3.Error:
             # Table might not exist yet
             logger.debug("file_manifest read failed; treating all files as new", exc_info=True)
-            result.new_files = source_files
+            result.new_files = list(current)
             return result
 
-        manifest_paths = set(manifest.keys())
-        current_paths = set(source_files_resolved.keys())
-
-        # Deleted files
-        result.deleted = list(manifest_paths - current_paths)
-
-        mtime_updates: list[tuple] = []
-        for resolved_path, original_path in source_files_resolved.items():
-            if resolved_path not in manifest:
-                result.new_files.append(original_path)
-                continue
-
-            stored_mtime, stored_size, stored_hash = manifest[resolved_path]
-
-            # Tier 2: stat check
-            try:
-                st = _os.stat(resolved_path)
-            except OSError:
-                result.deleted.append(resolved_path)
-                continue
-
-            if st.st_mtime_ns == stored_mtime and st.st_size == stored_size:
-                result.unchanged.append(original_path)
-                continue
-
-            # Tier 3: content hash verification
-            try:
-                content = Path(resolved_path).read_text()
-            except (OSError, UnicodeDecodeError):
-                result.new_files.append(original_path)
-                continue
-            actual_hash = hashlib.md5(
-                content.encode(), usedforsecurity=False
-            ).digest()
-            if actual_hash == stored_hash:
-                # Content identical — just mtime changed (e.g. git checkout)
-                mtime_updates.append(
-                    (st.st_mtime_ns, st.st_size, worktree_id, resolved_path)
-                )
-                result.unchanged.append(original_path)
+        result.deleted = list(set(manifest) - set(current))
+        for path, content_hash in current.items():
+            stored_hash = manifest.get(path)
+            if stored_hash is None:
+                result.new_files.append(path)
+            elif stored_hash == content_hash:
+                result.unchanged.append(path)
             else:
-                result.changed.append((original_path, stored_hash, actual_hash))
-
-        # Batch-commit all mtime updates (avoids per-file fsync)
-        if mtime_updates:
-            try:
-                conn.executemany(
-                    "UPDATE file_manifest SET mtime_ns = ?, size = ? "
-                    "WHERE worktree_id = ? AND path = ?",
-                    mtime_updates,
-                )
-                conn.commit()
-            except _sql3.Error:
-                logger.debug("manifest mtime batch update failed", exc_info=True)
+                result.changed.append((path, stored_hash, content_hash))
     finally:
         if close_conn and conn:
             conn.close()
@@ -588,7 +518,7 @@ def _scan_manifest(
     return result
 
 
-def _ensure_index_fresh(
+def _ensure_index_fresh_impl(
     project_path: str,
     *,
     max_inline_reindex: int = 50,
@@ -603,7 +533,7 @@ def _ensure_index_fresh(
     """
     import sqlite3 as _sql3
     import time
-    from .cache import _get_worktree_id, _cache_db_dir, _get_facts_db, _build_facts_db, _SCHEMA_VERSION, _delete_facts_for_file
+    from .cache import _get_worktree_id, _cache_db_dir, _SCHEMA_VERSION
     from .project_iter import _find_project_root, _find_source_root
 
     project_root = _find_project_root(project_path)
@@ -667,13 +597,19 @@ def _ensure_index_fresh(
                 files_to_index.append((path, content))
             except (OSError, UnicodeDecodeError):
                 continue
-            # Remove stale derived-table entries for the old content hash
-            # so they don't linger after re-indexing with the new hash.
-            for table in ("symbol_index", "import_graph", "reference_index"):
+            # File path is the owning identity.  Content hashes are revisions,
+            # and may intentionally be shared by multiple modules.
+            for table, column in (
+                ("qn_index", "file_path"),
+                ("symbol_index", "file_path"),
+                ("import_graph", "file_path"),
+                ("reference_index", "file_path"),
+                ("dsl_symbols", "host_file"),
+            ):
                 try:
                     conn.execute(
-                        f"DELETE FROM {table} WHERE content_hash = ?",
-                        (old_hash,),
+                        f"DELETE FROM {table} WHERE {column} = ?",
+                        (str(Path(path).resolve()),),
                     )
                 except _sql3.Error:
                     logger.debug("stale %s cleanup failed", table, exc_info=True)
@@ -683,34 +619,11 @@ def _ensure_index_fresh(
         if files_to_index:
             _src_root = _find_source_root(project_root, language=language)
             _index_batch((str(db_path), _src_root, project_root, files_to_index))
-            # Incrementally update CozoDB facts for changed files only.
-            try:
-                fdb = _get_facts_db(project_root)
-                if fdb is not None:
-                    from emend.fact_graph import FactGraph
-                    fg = FactGraph(db_path=str(cache_dir / "facts.db"))
-                    fg.update_files(files_to_index)
-                    fg.close()
-                else:
-                    # No existing facts.db — fall back to full build.
-                    _build_facts_db(project_root)
-            except BUG_EXCEPTIONS:
-                raise
-            except BaseException:
-                logger.debug("incremental facts update failed, falling back to full rebuild", exc_info=True)
-                try:
-                    _build_facts_db(project_root)
-                except BUG_EXCEPTIONS:
-                    raise
-                except BaseException:
-                    logger.debug("full facts rebuild also failed", exc_info=True)
             # Update manifest for re-indexed files
             import os as _os
             now = time.time()
             for py_file, content in files_to_index:
-                content_hash = hashlib.md5(
-                    content.encode(), usedforsecurity=False
-                ).digest()
+                content_hash = hashlib.sha256(content.encode()).digest()
                 resolved = str(Path(py_file).resolve())
                 try:
                     st = _os.stat(resolved)
@@ -727,22 +640,16 @@ def _ensure_index_fresh(
         # Clean up deleted files
         for deleted_path in scan.deleted:
             try:
-                # Get the content_hash for this path to clean derived tables
-                row = conn.execute(
-                    "SELECT content_hash FROM file_manifest "
-                    "WHERE worktree_id = ? AND path = ?",
-                    (worktree_id, deleted_path),
-                ).fetchone()
-                if row:
-                    old_hash = row[0]
+                for table, column in (
+                    ("qn_index", "file_path"),
+                    ("symbol_index", "file_path"),
+                    ("import_graph", "file_path"),
+                    ("reference_index", "file_path"),
+                    ("dsl_symbols", "host_file"),
+                ):
                     conn.execute(
-                        "DELETE FROM symbol_index WHERE content_hash = ?", (old_hash,)
-                    )
-                    conn.execute(
-                        "DELETE FROM import_graph WHERE content_hash = ?", (old_hash,)
-                    )
-                    conn.execute(
-                        "DELETE FROM reference_index WHERE content_hash = ?", (old_hash,)
+                        f"DELETE FROM {table} WHERE {column} = ?",
+                        (str(Path(deleted_path).resolve()),),
                     )
                 conn.execute(
                     "DELETE FROM file_manifest WHERE worktree_id = ? AND path = ?",
@@ -752,32 +659,6 @@ def _ensure_index_fresh(
                 logger.debug("deleted-file cleanup failed for %s", deleted_path, exc_info=True)
         if scan.deleted:
             conn.commit()
-            # Also clean CozoDB facts db for deleted files
-            try:
-                fdb = _get_facts_db(project_root)
-                if fdb is not None:
-                    for dp in scan.deleted:
-                        _delete_facts_for_file(fdb, dp)
-                # Also clean FactGraph-style relations
-                from emend.fact_graph import FactGraph
-                fg = FactGraph(db_path=str(cache_dir / "facts.db"))
-                # _delete_facts_for_file uses short column names from
-                # _FACTS_SCHEMA; FactGraph.remove_files handles the
-                # full-column-name schema.
-                rel_deleted = []
-                for dp in scan.deleted:
-                    try:
-                        rel_deleted.append(
-                            str(Path(dp).relative_to(Path(project_root).resolve()))
-                        )
-                    except ValueError:
-                        rel_deleted.append(dp)
-                fg.remove_files(rel_deleted)
-                fg.close()
-            except BUG_EXCEPTIONS:
-                raise
-            except BaseException:
-                logger.debug("facts cleanup for deleted files failed", exc_info=True)
 
         conn.close()
         return True
@@ -790,6 +671,19 @@ def _ensure_index_fresh(
         except _sql3.Error:
             pass
         return False
+
+
+def _ensure_index_fresh(
+    project_path: str = ".",
+    *,
+    language: str = "python",
+    max_inline_reindex: int = 10,
+) -> bool:
+    """Refresh the legacy parse/search index when needed."""
+    return _ensure_index_fresh_impl(
+        project_path, language=language,
+        max_inline_reindex=max_inline_reindex,
+    )
 
 
 def query_symbol_index(
@@ -808,9 +702,6 @@ def query_symbol_index(
     Returns a list of dicts with symbol info, or None if the index
     is not available or not fresh.
     """
-    if not _ensure_index_fresh(project_path, language=language):
-        return None
-
     from .project_iter import _find_project_root
     project_root = _find_project_root(project_path)
 
@@ -861,16 +752,14 @@ def _query_symbol_index_cozo(
     qualified_name: str | None = None,
     limit: int = 0,
 ) -> list[dict] | None:
-    """Query fact_symbol via CozoDB Datalog."""
-    from .cache import _get_facts_db
-    fdb = _get_facts_db(project_root)
-    if fdb is None:
-        return None
+    """Query owner-managed completion metadata via CozoDB Datalog."""
+    from emend.analysis_store import AnalysisStore
+    fdb = AnalysisStore.open(project_root).query_facts().client
 
     try:
         clauses = [
-            "*fact_symbol[fp, mqn, name, qn, kind, line, end_line, depth, "
-            "parent, bases, sig, returns, decs, is_entry, is_exported, has_noqa]"
+            "*search_symbol[fp, mqn, name, qn, kind, line, end_line, depth, "
+            "parent, sig, returns, decs]"
         ]
         params: dict = {}
 
@@ -907,7 +796,8 @@ def _query_symbol_index_cozo(
         if qualified_name:
             # Match qn, mqn, or mqn prefix
             clauses.append(
-                "(qn == $qname or mqn == $qname or starts_with(mqn, $qname_prefix))"
+                "(qn == $qname or mqn == $qname or "
+                "starts_with(mqn, $qname_prefix))"
             )
             params["qname"] = qualified_name
             params["qname_prefix"] = qualified_name + "."
@@ -1059,37 +949,24 @@ def query_reference_index(
     Returns a list of dicts with reference info, or None if the index
     is not available or not fresh.
     """
-    if not _ensure_index_fresh(project_path, language=language):
-        return None
-
     from .project_iter import _find_project_root
-    from .cache import _get_facts_db
     project_root = _find_project_root(project_path)
-
-    fdb = _get_facts_db(project_root)
-    if fdb is None:
-        return None
+    from emend.analysis_store import AnalysisStore
+    graph = AnalysisStore.open(project_root).query_facts()
 
     try:
-        clauses = ["*fact_reference[tqn, fp, line, col, kind]", "tqn == $qn"]
-        params: dict = {"qn": target_qn}
+        refs = graph.refs_datalog(target_qn)
         if ref_kind:
-            clauses.append("kind == $ref_kind")
-            params["ref_kind"] = ref_kind
-        query = (
-            "?[fp, line, col, kind] := " + ", ".join(clauses)
-            + "\n:order fp, line"
-        )
-        result = fdb.run(query, params)
+            refs = [ref for ref in refs if ref.ref_kind == ref_kind]
         abs_root = str(Path(project_root).resolve())
         return [
             {
-                "file_path": str(Path(abs_root) / r[0]) if not Path(r[0]).is_absolute() else r[0],
-                "line": r[1],
-                "col": r[2],
-                "ref_kind": r[3],
+                "file_path": str(Path(abs_root) / ref.file_path) if not Path(ref.file_path).is_absolute() else ref.file_path,
+                "line": ref.line,
+                "col": ref.col,
+                "ref_kind": ref.ref_kind,
             }
-            for r in result["rows"]
+            for ref in sorted(refs, key=lambda item: (item.file_path, item.line))
         ]
     except BUG_EXCEPTIONS:
         raise
@@ -1107,16 +984,13 @@ def query_import_graph(
     Returns file paths, or None if index not available.
     """
     from .project_iter import _find_project_root
-    from .cache import _get_facts_db
     project_root = _find_project_root(project_path)
-
-    fdb = _get_facts_db(project_root)
-    if fdb is None:
-        return None
+    from emend.analysis_store import AnalysisStore
+    graph = AnalysisStore.open(project_root).query_facts()
 
     try:
-        result = fdb.run(
-            "?[fp] := *fact_import[fp, mod], mod == $mod",
+        result = graph.client.run(
+            "?[fp] := *import[fp, mod, _, _, _], mod == $mod",
             {"mod": imported_module},
         )
         abs_root = str(Path(project_root).resolve())
@@ -1197,7 +1071,7 @@ def get_index_status(project_path: str) -> dict | None:
         return None
 
 
-def warm_caches(
+def _warm_caches_impl(
     project_path: str = ".",
     *,
     jobs: int | None = None,
@@ -1206,14 +1080,13 @@ def warm_caches(
     language: str = "python",
     build_fts: bool = True,
     build_duplicates: bool = True,
-    force_facts: bool = False,
 ) -> dict[str, int | str]:
     """Pre-populate the parse, QN-index, and type caches for all project files.
 
     Designed to be called from the ``emend index`` CLI command or lazily by
     an analysis operation. Each file is parsed, then QualifiedNameProvider is
     resolved to build the QN index, and finally type inference results are
-    stored in the ``type_cache`` table.
+    stored in the shared analysis-artifact ``type_cache`` table.
 
     Uses a ``ProcessPoolExecutor`` so that file parsing (CPU-bound)
     runs across multiple cores without GIL contention.  Files are split
@@ -1235,7 +1108,6 @@ def warm_caches(
             disable this to return as soon as their analysis data is ready.
         build_duplicates: Populate duplicate-code caches. Fact-only consumers
             can disable this independent analysis phase.
-        force_facts: Rebuild ``facts.db`` even when the parse manifest is warm.
             Use this after detecting that the persisted fact graph is empty or
             invalid while parse/reference caches are still current.
 
@@ -1249,9 +1121,7 @@ def warm_caches(
     from emend import emend_core as _rust
     from .cache import (
         _SCHEMA_VERSION,
-        _build_facts_db,
         _cache_db_dir,
-        _facts_schema_is_current,
         _get_worktree_id,
         _init_cache_schema,
     )
@@ -1367,9 +1237,7 @@ def warm_caches(
         now = time.time()
         manifest_rows = []
         for py_file, content in file_contents:
-            content_hash = hashlib.md5(
-                content.encode(), usedforsecurity=False
-            ).digest()
+            content_hash = hashlib.sha256(content.encode()).digest()
             try:
                 st = _os.stat(py_file)
                 manifest_rows.append((
@@ -1421,7 +1289,7 @@ def warm_caches(
     except Exception:
         logger.debug("warm_caches: file_manifest update failed", exc_info=True)
 
-    # Phase 3: type indexing — populate the type_cache table.
+    # Phase 3: type indexing — populate the shared type_cache table.
     # Runs in the main process.  Pyrefly handles its own parallelism
     # internally; LSP adapters (pyright, ty) are inherently sequential.
     if type_engine and type_engine.lower() != "none":
@@ -1481,72 +1349,12 @@ def warm_caches(
             logger.debug("warm_caches: FTS rebuild skipped: %s", exc, exc_info=True)
             stats["fts_indexed"] = 0
 
-    # Phase 5: build CozoDB facts.db directly from source files.
-    # Read pre-computed references from parse.db (written by _index_batch
-    # in Phase 2) so _build_facts_db can skip the expensive scope resolver
-    # indexing entirely (~34s saved on Django-sized projects).
-    facts_path = cache_dir / "facts.db"
-    facts_are_current = (
-        not force_facts
-        and bool(file_contents)
-        and stats["skipped"] == len(file_contents)
-        and _facts_schema_is_current(facts_path, project_root)
+    # Phase 5: the analysis owner is the sole facts refresh path.
+    announce_phase("Facts database")
+    from emend.analysis_store import AnalysisStore
+    stats["snapshot_id"] = (
+        AnalysisStore.open(project_root).query_facts().snapshot.snapshot_id
     )
-    if facts_are_current:
-        logger.info("warm_caches: facts db unchanged; skipping rebuild")
-    else:
-        announce_phase("Facts database")
-        try:
-            t_facts = time.monotonic()
-            precomputed_refs: dict[str, list[tuple]] | None = {}
-            try:
-                with closing(_sqlite3.connect(db_path, timeout=30)) as _ref_conn:
-                    _ref_conn.execute("PRAGMA journal_mode=WAL")
-                    for row in _ref_conn.execute(
-                        "SELECT file_path, target_qn, line, col, ref_kind "
-                        "FROM reference_index"
-                    ):
-                        fp, tqn, line, col, kind = row
-                        normalized = str(Path(fp).resolve())
-                        precomputed_refs.setdefault(normalized, []).append(
-                            (tqn, line, col, kind)
-                        )
-                # An indexed file with zero references is still covered.  Empty
-                # lists distinguish it from files outside a partial scan root.
-                for file_path, _content in file_contents:
-                    precomputed_refs.setdefault(str(Path(file_path).resolve()), [])
-                logger.info(
-                    "warm_caches: loaded %d pre-computed refs for %d files",
-                    sum(len(v) for v in precomputed_refs.values()),
-                    len(precomputed_refs),
-                )
-            except _sqlite3.Error:
-                logger.debug("warm_caches: pre-computed ref load failed", exc_info=True)
-                precomputed_refs = None
-
-            if precomputed_refs is not None:
-                _build_facts_db(
-                    project_root, precomputed_refs=precomputed_refs,
-                )
-            else:
-                # Fallback: build scope resolver from scratch
-                scope_resolver = _rust.PyScopeResolver(
-                    str(Path(project_root).resolve()),
-                )
-                for py_file, content in file_contents:
-                    try:
-                        scope_resolver.index_file(py_file, content)
-                    except Exception:
-                        logger.debug("scope indexing failed for %s", py_file, exc_info=True)
-                _build_facts_db(project_root, scope_resolver=scope_resolver)
-            logger.info(
-                "warm_caches: facts db built in %.3fs",
-                time.monotonic() - t_facts,
-            )
-        except BUG_EXCEPTIONS:
-            raise
-        except BaseException:
-            logger.debug("warm_caches: facts db build failed", exc_info=True)
 
     # Phase 6: duplicate analysis — compute and cache per-file duplicate payloads,
     # then materialize queryable facts into facts.db.
@@ -1571,18 +1379,34 @@ def warm_caches(
     return stats
 
 
+def warm_caches(
+    project_path: str = ".",
+    *,
+    jobs: int | None = None,
+    callback: Callable[[str, str], None] | None = None,
+    type_engine: str | None = "pyrefly",
+    language: str = "python",
+    build_fts: bool = True,
+    build_duplicates: bool = True,
+) -> dict[str, int | str]:
+    """Compatibility entry point for eager derived-cache warming."""
+    stats = _warm_caches_impl(
+        project_path,
+        jobs=jobs,
+        callback=callback,
+        type_engine=type_engine,
+        language=language,
+        build_fts=build_fts,
+        build_duplicates=build_duplicates,
+    )
+    return stats
+
+
 def _ensure_cache_ignore_files(project_root: str) -> None:
-    """Create .gitignore and .dockerignore in the cache directory."""
-    from .cache import _cache_db_dir
-    cache_dir = _cache_db_dir(project_root)
-    if not cache_dir.is_dir():
-        return
-    gitignore = cache_dir / ".gitignore"
-    if not gitignore.exists():
-        gitignore.write_text("# Auto-generated by emend index\n*\n")
-    dockerignore = cache_dir / ".dockerignore"
-    if not dockerignore.exists():
-        dockerignore.write_text("# Auto-generated by emend index\n*\n")
+    """Compatibility delegate for cache-directory ownership."""
+    from emend.analysis_store import AnalysisStore
+
+    AnalysisStore.open(project_root).ensure_cache_directory()
 
 
 def _compute_duplicate_payloads(

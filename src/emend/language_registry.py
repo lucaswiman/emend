@@ -306,6 +306,13 @@ _TS_TYPE_KEYWORDS: tuple[str, ...] = (
 )
 
 
+def _detect_exported_names_python(content: str) -> set[str]:
+    """Detect Python's explicit module API from a parsed ``__all__`` value."""
+    from emend import emend_core
+
+    return set(emend_core.python_all_names(content))
+
+
 def _extract_name_after_keywords(rest: str) -> str:
     """Strip leading declaration/type keywords and return the bare symbol name."""
     for kw in _TS_DECL_KEYWORDS:
@@ -423,13 +430,13 @@ def _detect_exported_names_rust(content: str) -> set[str]:
 def detect_exported_names(content: str, language: str) -> set[str]:
     """Detect exported/public symbol names using tree-sitter analysis.
 
-    For Python, returns empty (Python uses ``__all__`` which is handled
-    separately).  For TypeScript/JavaScript, walks ``export_statement`` nodes
-    via ``emend_core.get_statement_ranges()``.  For Rust, uses
+    For Python, reads ``__all__`` from a structurally matched assignment.  For
+    TypeScript/JavaScript, walks ``export_statement`` nodes via
+    ``emend_core.get_statement_ranges()``.  For Rust, uses
     ``emend_core.collect_symbols_from_str()`` with ``pub`` visibility checks.
     """
     if language == "python":
-        return set()
+        return _detect_exported_names_python(content)
     if language in ("typescript", "javascript"):
         return _detect_exported_names_typescript(content)
     if language == "rust":

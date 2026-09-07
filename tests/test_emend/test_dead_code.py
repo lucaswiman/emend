@@ -1,7 +1,6 @@
 """Tests for the dead-code detection command."""
 import json
 from pathlib import Path
-from unittest.mock import Mock
 
 import pytest
 import yaml
@@ -28,29 +27,6 @@ def make_project(tmp_path, files: dict[str, str]) -> Path:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content)
     return project
-
-
-@pytest.fixture
-def seed_fact_cache():
-    from emend.fact_graph import FactGraph, SymbolFact
-    from emend.transform.cache import _cache_db_dir, _FACTS_SCHEMA_VERSION
-
-    def seed(path, **_kwargs):
-        cache_dir = _cache_db_dir(path)
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        graph = FactGraph(db_path=str(cache_dir / "facts.db"))
-        graph.add_symbol(SymbolFact("mod.py", "unused", "mod.unused", "function", 1, 2))
-        graph.client.run(
-            '?[key, value] <- $rows :put facts_meta {key => value}',
-            {"rows": [
-                ["schema_version", _FACTS_SCHEMA_VERSION],
-                ["project_root", str(Path(path).resolve())],
-            ]},
-        )
-        graph.close()
-        return {}
-
-    return seed
 
 
 def dead_names(tmp_path, files: dict[str, str], **kwargs) -> set[str]:
@@ -242,23 +218,6 @@ class TestDeadCodeWarmPath:
         dead_names = {d.name for d in dead}
         assert "Client" not in dead_names, "Client is referenced in Service type annotation"
 
-    def test_fact_graph_bootstrap_persists_facts_db(self, tmp_path, monkeypatch):
-        """Fact-dependent commands should materialize ``facts.db`` on first use."""
-        from emend.transform import _cache_db_dir, _get_or_build_fact_graph
-
-        project = make_project_dir(tmp_path)
-        (project / "mod.py").write_text("def unused():\n    return 1\n")
-
-        cache_dir = _cache_db_dir(str(project))
-        facts_db = cache_dir / "facts.db"
-        assert not facts_db.exists()
-
-        monkeypatch.setattr("emend.transform.warm_caches", lambda *args, **kwargs: {})
-        graph = _get_or_build_fact_graph(str(project))
-
-        assert facts_db.exists()
-        graph.close()
-
     def test_partial_scan_keeps_references_from_project_root(self, tmp_path):
         """Scanning src/ must still count references from root entry scripts."""
         from emend.transform import find_dead_code
@@ -278,21 +237,17 @@ class TestDeadCodeWarmPath:
         }
         assert "used_from_root" not in names
 
-    def test_forced_rebuild_clears_removed_decorators(self, tmp_path):
-        """A full fact replacement must not preserve deleted decorators."""
-        from emend.fact_graph import FactGraph
-        from emend.transform import _cache_db_dir, warm_caches
+    def test_refresh_clears_removed_decorators(self, tmp_path):
+        from emend.analysis_store import AnalysisStore
+        from emend.transform import warm_caches
 
         project = make_project(tmp_path, {
             "api.py": "@custom.route\ndef handler():\n    return 1\n",
         })
         warm_caches(str(project), type_engine="none")
         (project / "api.py").write_text("def handler():\n    return 1\n")
-        warm_caches(str(project), type_engine="none", force_facts=True)
-
-        graph = FactGraph(db_path=str(_cache_db_dir(project) / "facts.db"))
+        graph = AnalysisStore.open(project).query_facts()
         rows = graph._client.run("?[qn, dec] := *decorator_on[qn, dec]")["rows"]
-        graph.close()
         assert rows == []
 
     def test_warm_path_intra_file_function_call(self, tmp_path):
@@ -312,77 +267,6 @@ class TestDeadCodeWarmPath:
         dead = list(find_dead_code(str(project), show_last_reference=False))
         dead_names = {d.name for d in dead}
         assert "normalize" not in dead_names, "normalize is called by Processor.process"
-
-    def test_cold_path_builds_only_deadcode_dependencies(self, tmp_path, monkeypatch, seed_fact_cache):
-        """Cold deadcode startup skips type, FTS, and duplicate indexing."""
-        from emend.transform import _get_or_build_fact_graph
-
-        project = make_project_dir(tmp_path)
-        (project / "mod.py").write_text("def unused():\n    return 1\n")
-        calls = []
-
-        def fake_warm_caches(path, **kwargs):
-            calls.append((path, kwargs))
-            return seed_fact_cache(path)
-
-        monkeypatch.setattr("emend.transform.index.warm_caches", fake_warm_caches)
-        graph = _get_or_build_fact_graph(str(project))
-
-        assert calls == [(str(project), {
-            "type_engine": "none",
-            "build_fts": False,
-            "build_duplicates": False,
-            "force_facts": True,
-        })]
-        graph.close()
-
-    def test_cold_path_keeps_facts_in_the_current_worktree(
-        self, tmp_path, monkeypatch, seed_fact_cache,
-    ):
-        """Mutable analysis facts must not be shared by divergent worktrees."""
-        from emend.fact_graph import FactGraph
-        from emend.transform import _cache_db_dir, _get_or_build_fact_graph
-
-        main = tmp_path / "main"
-        git_dir = main / ".git"
-        worktree_git_dir = git_dir / "worktrees" / "feature"
-        worktree_git_dir.mkdir(parents=True)
-        (worktree_git_dir / "commondir").write_text("../..\n")
-        project = tmp_path / "feature"
-        project.mkdir()
-        (project / ".git").write_text(f"gitdir: {worktree_git_dir}\n")
-        (project / "mod.py").write_text("def unused():\n    return 1\n")
-
-        monkeypatch.setattr("emend.transform.index.warm_caches", seed_fact_cache)
-        monkeypatch.setattr(
-            FactGraph,
-            "build_from_project",
-            Mock(side_effect=AssertionError("worktree facts.db was not loaded")),
-        )
-
-        graph = _get_or_build_fact_graph(str(project))
-
-        assert graph._client.run("?[count(qn)] := *symbol[qn, _, _, _, _, _, _]")["rows"] == [[1]]
-        assert (_cache_db_dir(project) / "facts.db").is_file()
-        assert not (main / ".emend" / "cache" / "facts.db").exists()
-        graph.close()
-
-    def test_cached_fact_graph_refreshes_after_source_changes(self, tmp_path):
-        """Long-lived clients must not keep serving a stale project snapshot."""
-        from emend.transform import _get_or_build_fact_graph
-
-        project = make_project_dir(tmp_path)
-        module = project / "mod.py"
-        module.write_text("def before():\n    return 1\n")
-
-        first = _get_or_build_fact_graph(str(project))
-        assert {symbol.name for symbol in first.symbols()} == {"before"}
-
-        module.write_text("def after_change():\n    return 2\n")
-        refreshed = _get_or_build_fact_graph(str(project))
-
-        assert {symbol.name for symbol in refreshed.symbols()} == {"after_change"}
-        refreshed.close()
 
     def test_index_materializes_noncall_private_member_references(self, tmp_path):
         """Dead-code joins should use an indexed member-name fact."""
@@ -698,13 +582,13 @@ class TestFindDeadCode:
 
     def test_cached_type_identifies_decorator_receiver_without_inference(self, tmp_path):
         from emend.transform import find_dead_code, warm_caches
-        from emend.transform.cache import _cache_db_dir
         from emend.type_oracle import (
             FileTypes,
             TypeBinding,
             TypeDescriptor,
             _TypeOracleDiskCache,
             _file_cache_key,
+            _type_cache_db_path,
         )
 
         project = make_project_dir(tmp_path)
@@ -728,8 +612,10 @@ class TestFindDeadCode:
             binding_kind="definition",
         )])
         file_types.build_index()
-        cache = _TypeOracleDiskCache(str(_cache_db_dir(project) / "parse.db"))
-        cache.put(_file_cache_key(module), file_types)
+        cache_path = _type_cache_db_path(project)
+        assert cache_path is not None
+        cache = _TypeOracleDiskCache(cache_path)
+        cache.put(_file_cache_key(module, project_root=project), file_types)
 
         names = {
             result.name

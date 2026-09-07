@@ -277,17 +277,13 @@ def test_run_trace_datalog_uses_exact_sink_metadata(monkeypatch, tmp_path):
         "emend.trace._resolve_match_to_location",
         lambda graph, file_path, line: ("app.handle", 7),
     )
-    monkeypatch.setattr(
-        "emend.trace._build_trace_fact_graph",
-        lambda paths, language, project_path: _FakeGraph(),
-    )
-
     result = _run_trace_datalog(
         paths=[str(src_file)],
         config=config,
         label_filter=None,
         language="python",
         project_path=str(tmp_path),
+        graph=_FakeGraph(),
     )
 
     assert len(result) == 1
@@ -365,17 +361,13 @@ def test_run_trace_datalog_supports_effect_only_sinks(monkeypatch, tmp_path):
         "emend.trace._resolve_match_to_location",
         lambda graph, file_path, line: ("app.handle", 4),
     )
-    monkeypatch.setattr(
-        "emend.trace._build_trace_fact_graph",
-        lambda paths, language, project_path: _FakeGraph(),
-    )
-
     result = _run_trace_datalog(
         paths=[str(src_file)],
         config=config,
         label_filter=None,
         language="python",
         project_path=str(tmp_path),
+        graph=_FakeGraph(),
     )
 
     assert len(result) == 1
@@ -445,17 +437,13 @@ def test_run_trace_datalog_type_constrained_sink_does_not_filter_other_sinks(
         "emend.trace._resolve_match_to_location",
         lambda graph, file_path, line: ("app.handle", line),
     )
-    monkeypatch.setattr(
-        "emend.trace._build_trace_fact_graph",
-        lambda paths, language, project_path: _FakeGraph(),
-    )
-
     result = _run_trace_datalog(
         paths=[str(src_file)],
         config=config,
         label_filter=None,
         language="python",
         project_path=str(tmp_path),
+        graph=_FakeGraph(),
     )
 
     assert seen_sinks == [
@@ -587,10 +575,6 @@ def test_run_trace_datalog_sanitizer_quantifier_is_scoped_per_label(
         }
         return matches_by_pattern.get(pattern, [])
 
-    monkeypatch.setattr(
-        "emend.trace._build_trace_fact_graph",
-        lambda paths, language, project_path: fake_graph,
-    )
     monkeypatch.setattr("emend.trace.find_pattern", _fake_find_pattern)
 
     result = _run_trace_datalog(
@@ -599,6 +583,7 @@ def test_run_trace_datalog_sanitizer_quantifier_is_scoped_per_label(
         label_filter=None,
         language="python",
         project_path=str(tmp_path),
+        graph=fake_graph,
     )
 
     assert [v.label for v in result] == ["b"]

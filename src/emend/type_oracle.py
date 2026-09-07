@@ -193,6 +193,32 @@ class LSPClient:
             }
         })
 
+    def did_change(self, path: Path, text: str, version: int):
+        """Replace the contents of an already-open document."""
+        self.send_notification("textDocument/didChange", {
+            "textDocument": {"uri": path.as_uri(), "version": version},
+            "contentChanges": [{"text": text}],
+        })
+
+    def did_close(self, path: Path):
+        """Remove a document that is absent from the current input snapshot."""
+        self.send_notification("textDocument/didClose", {
+            "textDocument": {"uri": path.as_uri()},
+        })
+
+    def did_change_watched_files(
+        self, *, created: set[str], deleted: set[str]
+    ):
+        """Notify the analyzer of project membership changes in one batch."""
+        self.send_notification("workspace/didChangeWatchedFiles", {
+            "changes": [
+                *({"uri": Path(path).as_uri(), "type": 1}
+                  for path in sorted(created)),
+                *({"uri": Path(path).as_uri(), "type": 3}
+                  for path in sorted(deleted)),
+            ],
+        })
+
     def hover(self, path: Path, line: int, col: int) -> str | None:
         """Send textDocument/hover and return the type string."""
         res = self.send_request("textDocument/hover", {
@@ -421,6 +447,23 @@ class TypeOracle(ABC):
     backends by changing a single constructor call.
     """
 
+    # Type checkers which read files themselves (Pyrefly and the TypeScript
+    # compiler) must be keyed by the bytes on disk: an editor overlay is not
+    # visible to their subprocess.  LSP adapters set this to True because
+    # they receive the overlay through didOpen below.
+    _uses_overlay_source = False
+
+    @property
+    def supports_source_overrides(self) -> bool:
+        """Whether inference consumes the owner's editor-buffer snapshot."""
+        return self._uses_overlay_source
+
+    @property
+    def cache_context_id(self) -> str:
+        """Stable analyzer/config namespace used by the shared type cache."""
+        cache = getattr(self, "_cache", None)
+        return str(getattr(cache, "namespace", "legacy"))
+
     @abstractmethod
     def infer_file(self, path: Path, project_root: Path | None = None) -> FileTypes:
         """Return inferred types for all symbols/expressions in a file."""
@@ -429,6 +472,50 @@ class TypeOracle(ABC):
                 project_root: Path | None = None) -> TypeBinding | None:
         """Return the inferred type at a specific source position."""
         return self.infer_file(path, project_root).type_at(line, col)
+
+    def _file_key(self, path: Path, project_root: Path | None = None) -> str:
+        resolved = str(path.resolve())
+        prepared = getattr(self, "_prepared_file_keys", None)
+        if prepared is not None and resolved in prepared:
+            return prepared[resolved]
+        return self._current_file_key(path, project_root)
+
+    def _current_file_key(
+        self, path: Path, project_root: Path | None = None
+    ) -> str:
+        """Return a fresh identity, bypassing any pinned batch inputs."""
+        return _file_cache_key(
+            path, project_root=project_root,
+            include_overlays=self._uses_overlay_source,
+        )
+
+    def _prepare_file_keys(
+        self, paths: list[Path], project_root: Path | None
+    ) -> dict[str, str]:
+        from emend.analysis_store import AnalysisStore
+
+        root = project_root or (paths[0].parent if paths else Path.cwd())
+        store = AnalysisStore.open(root)
+        # Pin both cache identities and source bytes to the same immutable
+        # owner graph.  This matters for LSP overlays: a second query after an
+        # edit could otherwise pair a new key with the old document contents.
+        graph = store.query_facts()
+        known = {revision.file_path for revision in graph.snapshot.files}
+        existing = [
+            path.resolve() for path in paths
+            if path.exists() or (
+                self._uses_overlay_source and str(path.resolve()) in known
+            )
+        ]
+        identities, sources, project_paths = store.type_file_inputs(
+            existing,
+            include_overlays=self._uses_overlay_source,
+            graph=graph,
+        ) if existing else ({}, {}, set())
+        if self._uses_overlay_source:
+            self._prepared_source_texts = sources
+            self._prepared_project_paths = project_paths
+        return identities
 
     @abstractmethod
     def clear_cache(self) -> None:
@@ -451,16 +538,22 @@ class TypeOracle(ABC):
         :class:`FileTypes`.
         """
         results: dict[str, FileTypes] = {}
-        for path in paths:
-            resolved = path.resolve()
-            if resolved.exists():
-                try:
-                    results[str(resolved)] = self.infer_file(resolved, project_root)
-                except BUG_EXCEPTIONS:
-                    raise
-                except Exception:
-                    logger.debug("infer_file failed for %s", resolved, exc_info=True)
-                    results[str(resolved)] = FileTypes(path=str(resolved))
+        self._prepared_file_keys = self._prepare_file_keys(paths, project_root)
+        try:
+            for path in paths:
+                resolved = path.resolve()
+                if resolved.exists():
+                    try:
+                        results[str(resolved)] = self.infer_file(resolved, project_root)
+                    except BUG_EXCEPTIONS:
+                        raise
+                    except Exception:
+                        logger.debug("infer_file failed for %s", resolved, exc_info=True)
+                        results[str(resolved)] = FileTypes(path=str(resolved))
+        finally:
+            del self._prepared_file_keys
+            self.__dict__.pop("_prepared_source_texts", None)
+            self.__dict__.pop("_prepared_project_paths", None)
         return results
 
 
@@ -872,24 +965,38 @@ class _FileTypeCache:
     The in-memory cache is bounded by *max_entries*; eviction is FIFO.
     """
 
-    def __init__(self, max_entries: int = 256, db_path: str | None = None):
+    def __init__(
+        self,
+        max_entries: int = 256,
+        db_path: str | None = None,
+        namespace: str = "legacy",
+    ):
         self._cache: dict[str, FileTypes] = {}  # content_hash -> FileTypes
         self._lock = threading.Lock()
         self._max_entries = max_entries
         self._db: _TypeOracleDiskCache | None = None
         if db_path is not None:
             self._db = _TypeOracleDiskCache(db_path)
+        self.namespace = namespace
 
-    def get(self, content_hash: str) -> FileTypes | None:
+    def _key(self, file_key: str) -> str:
+        return f"{self.namespace}|{file_key}"
+
+    def get(self, content_hash: str, path: Path | None = None) -> FileTypes | None:
+        content_hash = self._key(content_hash)
         # Tier 1: memory
         with self._lock:
             cached = self._cache.get(content_hash)
         if cached is not None:
+            if path is not None:
+                cached.path = str(path.resolve())
             return cached
         # Tier 2: disk
         if self._db is not None:
             ft = self._db.get(content_hash)
             if ft is not None:
+                if path is not None:
+                    ft.path = str(path.resolve())
                 self._put_memory(content_hash, ft)
                 return ft
         return None
@@ -901,6 +1008,7 @@ class _FileTypeCache:
                 del self._cache[next(iter(self._cache))]
 
     def put(self, content_hash: str, ft: FileTypes) -> None:
+        content_hash = self._key(content_hash)
         self._put_memory(content_hash, ft)
         # Persist to disk
         if self._db is not None:
@@ -910,7 +1018,7 @@ class _FileTypeCache:
         with self._lock:
             self._cache.clear()
         if self._db is not None:
-            self._db.clear()
+            self._db.clear(self.namespace)
 
     def __len__(self) -> int:
         with self._lock:
@@ -923,8 +1031,24 @@ class _TypeOracleDiskCache:
     def __init__(self, db_path: str):
         import sqlite3
         self._lock = threading.Lock()
+        path = Path(db_path).resolve()
+        self._project_root = (
+            path.parent.parent.parent
+            if path.parent.name == "cache" and path.parent.parent.name == ".emend"
+            else None
+        )
         try:
-            self._conn = sqlite3.connect(db_path, check_same_thread=False)
+            if self._project_root is not None:
+                from emend.analysis_store import AnalysisStore
+
+                self._store = AnalysisStore.open(self._project_root)
+                if path.name == "parse.db":
+                    self._conn = self._store.connection()
+                else:
+                    self._conn = self._store.artifact_connection()
+            else:
+                self._store = None
+                self._conn = sqlite3.connect(db_path, check_same_thread=False)
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute(
@@ -963,6 +1087,11 @@ class _TypeOracleDiskCache:
         try:
             import pickle
             import zlib
+            if "|" not in content_hash and self._project_root is not None:
+                content_hash = (
+                    f"{_type_shared_context(self._project_root)}|manual|"
+                    f"{content_hash}"
+                )
             data = zlib.compress(
                 pickle.dumps(ft, protocol=pickle.HIGHEST_PROTOCOL), level=1
             )
@@ -975,21 +1104,97 @@ class _TypeOracleDiskCache:
         except sqlite3.Error:
             logger.debug("type cache write failed for %s", content_hash, exc_info=True)
 
-    def clear(self) -> None:
+    def clear(self, namespace: str | None = None) -> None:
         if self._conn is None:
             return
         try:
             with self._lock:
-                self._conn.execute("DELETE FROM type_cache")
+                if namespace is None:
+                    self._conn.execute("DELETE FROM type_cache")
+                else:
+                    self._conn.execute(
+                        "DELETE FROM type_cache WHERE hash LIKE ?",
+                        (f"{namespace}|%",),
+                    )
                 self._conn.commit()
         except sqlite3.Error:
             logger.debug("type cache clear failed", exc_info=True)
 
 
-def _file_cache_key(path: Path, content_hash: str | None = None) -> str:
-    """Key file-specific type results by resolved path and content digest."""
-    digest = content_hash or hashlib.md5(path.read_bytes(), usedforsecurity=False).hexdigest()
-    return f"{path.resolve()}:{digest}"
+def _file_cache_key(
+    path: Path,
+    content_hash: str | None = None,
+    project_root: Path | None = None,
+    *,
+    include_overlays: bool = False,
+) -> str:
+    """Key type results by logical path, content, and local dependencies."""
+    from emend.analysis_store import AnalysisStore
+
+    # Translate the historical MD5 argument to the owner's canonical file
+    # revision without making normal batch inference reread every file.
+    if content_hash is not None and len(content_hash) == 32:
+        current_md5 = hashlib.md5(
+            path.read_bytes(), usedforsecurity=False
+        ).hexdigest()
+        if content_hash == current_md5:
+            content_hash = None
+    store = AnalysisStore.open(project_root or path)
+    return store.type_file_identity(
+        path, content_hash, include_overlays=include_overlays
+    )
+
+
+CURRENT_ANY_ENGINE = "current-any-engine"
+
+
+def _type_shared_context(project_root: Path | None) -> str:
+    """Return the analysis owner's current type-cache context."""
+    from emend.analysis_store import AnalysisStore
+
+    return AnalysisStore.open(project_root or ".").type_context_id()
+
+
+def _type_engine_context(engine: str, options: dict[str, Any]) -> str:
+    """Hash analyzer identity, executable version, and invocation arguments."""
+    executable_options = {
+        "pyrefly": ("pyrefly_path", "pyrefly"),
+        "pyright": ("pyright_path", "pyright-langserver"),
+        "ty": ("ty_path", "ty"),
+        "typescript": ("node_path", "node"),
+        "rust-analyzer": ("rust_analyzer_path", "rust-analyzer"),
+    }
+    option_name, default_name = executable_options[engine]
+    configured = options.get(option_name)
+    executable = str(configured or shutil.which(default_name) or default_name)
+    try:
+        stat = Path(executable).resolve().stat()
+        executable_identity: object = (
+            str(Path(executable).resolve()), stat.st_mtime_ns, stat.st_size
+        )
+    except OSError:
+        executable_identity = executable
+    try:
+        version_result = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        executable_version = (
+            version_result.returncode,
+            version_result.stdout.strip(),
+            version_result.stderr.strip(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        executable_version = None
+    stable_options = {
+        key: repr(value)
+        for key, value in sorted(options.items())
+        if key != "db_path"
+    }
+    payload = (engine, executable_identity, executable_version, stable_options)
+    return hashlib.sha256(repr(payload).encode()).hexdigest()
 
 
 def _type_cache_db_path(
@@ -997,26 +1202,14 @@ def _type_cache_db_path(
     *,
     create: bool = True,
 ) -> str | None:
-    """Return the path to the type-oracle disk cache (parse.db), or None.
-
-    Type inference results are stored in the same SQLite database as the parse
-    and QN-index caches (``.emend/cache/parse.db``) in a ``type_cache`` table,
-    so a single ``emend index`` run can populate all caches together.
-
-    In a git worktree, the cache is shared with the main repo.
-    """
+    """Return the checkout-family type-artifact database, or ``None``."""
     try:
-        if project_root is None:
-            from emend.transform import _find_project_root
-            root = Path(_find_project_root("."))
-        else:
-            root = project_root
-        from emend.transform import _cache_db_dir, _ensure_cache_ignore_files
-        cache_dir = _cache_db_dir(root)
+        from emend.analysis_store import AnalysisStore
+
+        store = AnalysisStore.open(project_root or ".")
         if create:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            _ensure_cache_ignore_files(str(root))
-        return str(cache_dir / "parse.db")
+            store.ensure_cache_directory()
+        return str(store.artifact_path)
     except OSError:
         logger.debug("type cache db path unavailable", exc_info=True)
         return None
@@ -1027,6 +1220,10 @@ def load_cached_file_types(
     *,
     project_root: Path | None = None,
     content_hash: str | None = None,
+    engine: str = CURRENT_ANY_ENGINE,
+    engine_options: dict[str, Any] | None = None,
+    shared_context: str | None = None,
+    include_overlays: bool = False,
 ) -> FileTypes | None:
     """Return cached type information without starting a type engine.
 
@@ -1044,9 +1241,26 @@ def load_cached_file_types(
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
+            file_key = _file_cache_key(
+                path, content_hash, project_root,
+                include_overlays=include_overlays,
+            )
+            shared_context = shared_context or _type_shared_context(project_root)
+            engine_context = (
+                "%"
+                if engine == CURRENT_ANY_ENGINE
+                else _type_engine_context(engine, engine_options or {})
+            )
+            escaped = (
+                file_key.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
             row = conn.execute(
-                "SELECT data FROM type_cache WHERE hash = ?",
-                (_file_cache_key(path, content_hash),),
+                "SELECT data FROM type_cache "
+                "WHERE hash LIKE ? ESCAPE '\\' "
+                "ORDER BY rowid DESC LIMIT 1",
+                (f"{shared_context}|{engine_context}|{escaped}",),
             ).fetchone()
         finally:
             conn.close()
@@ -1055,6 +1269,7 @@ def load_cached_file_types(
         file_types = pickle.loads(zlib.decompress(row[0]))
         if not isinstance(file_types, FileTypes):
             return None
+        file_types.path = str(path.resolve())
         file_types.build_index()
         return file_types
     except BUG_EXCEPTIONS:
@@ -1075,6 +1290,8 @@ class PyreflyAdapter(TypeOracle):
     to extract type bindings.  Results are cached per-file (keyed on content
     hash) to avoid re-running the type checker for unchanged files.
     """
+
+    _uses_overlay_source = False
 
     def __init__(
         self,
@@ -1103,8 +1320,8 @@ class PyreflyAdapter(TypeOracle):
             return FileTypes(path=str(path))
 
         # Check cache first
-        content_hash = _file_cache_key(path)
-        cached = self._cache.get(content_hash)
+        content_hash = self._file_key(path, project_root)
+        cached = self._cache.get(content_hash, path)
         if cached is not None:
             return cached
 
@@ -1116,7 +1333,11 @@ class PyreflyAdapter(TypeOracle):
         else:
             ft = _parse_pyrefly_debug(debug_json, str(path))
 
-        self._cache.put(content_hash, ft)
+        # The checker reads the workspace itself.  If an edit raced the
+        # subprocess, return its answer but never persist it under the older
+        # source identity.
+        if self._current_file_key(path, project_root) == content_hash:
+            self._cache.put(content_hash, ft)
         return ft
 
     def clear_cache(self) -> None:
@@ -1177,12 +1398,13 @@ class PyreflyAdapter(TypeOracle):
         # Resolve all paths up front for consistent dict keys.
         resolved = [p.resolve() for p in paths]
 
+        prepared_file_keys = self._prepare_file_keys(resolved, project_root)
         for rp in resolved:
             if not rp.exists():
                 results[str(rp)] = FileTypes(path=str(rp))
                 continue
-            content_hash = _file_cache_key(rp)
-            cached = self._cache.get(content_hash)
+            content_hash = prepared_file_keys[str(rp)]
+            cached = self._cache.get(content_hash, rp)
             if cached is not None:
                 results[str(rp)] = cached
             else:
@@ -1231,8 +1453,6 @@ class PyreflyAdapter(TypeOracle):
                     except Exception:
                         logger.debug("pyrefly parse failed for %s", path_obj, exc_info=True)
                         ft = FileTypes(path=str(path_obj))
-                    content_hash = hashes[str(path_obj)]
-                    self._cache.put(content_hash, ft)
                     results[str(path_obj)] = ft
         except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
             pass
@@ -1248,8 +1468,17 @@ class PyreflyAdapter(TypeOracle):
             key = str(rp)
             if key not in results:
                 ft = FileTypes(path=key)
-                self._cache.put(hashes[key], ft)
                 results[key] = ft
+
+        from emend.analysis_store import AnalysisStore
+
+        current = AnalysisStore.open(
+            project_root or to_check[0].parent
+        ).type_file_identities(to_check, include_overlays=False)
+        for path_obj in to_check:
+            key = str(path_obj)
+            if current.get(key) == hashes[key]:
+                self._cache.put(hashes[key], results[key])
 
         return results
 
@@ -1268,6 +1497,7 @@ class _LSPTypeOracle(TypeOracle):
 
     _tool_name: str = ""  # For logging and error messages
     _language_id: str = "python"  # LSP languageId for textDocument/didOpen
+    _uses_overlay_source = True
 
     def __init__(
         self,
@@ -1281,6 +1511,8 @@ class _LSPTypeOracle(TypeOracle):
         self._extra_args = extra_args or []
         self._lsp: LSPClient | None = None
         self._lsp_lock = threading.Lock()
+        self._open_documents: dict[str, tuple[str, int]] = {}
+        self._known_project_paths: set[str] | None = None
 
     def is_available(self) -> bool:
         return shutil.which(self._tool) is not None
@@ -1297,13 +1529,61 @@ class _LSPTypeOracle(TypeOracle):
                     self._lsp = None
             return self._lsp
 
+    def _sync_documents(
+        self, lsp: LSPClient, sources: dict[str, str], project_paths: set[str]
+    ) -> None:
+        """Bring the persistent LSP to one exact source snapshot."""
+        if self._known_project_paths is not None:
+            created = project_paths - self._known_project_paths
+            deleted = self._known_project_paths - project_paths
+            for path in self._open_documents.keys() & deleted:
+                lsp.did_close(Path(path))
+                del self._open_documents[path]
+            if created or deleted:
+                lsp.did_change_watched_files(created=created, deleted=deleted)
+        self._known_project_paths = project_paths
+        for path, source in sources.items():
+            digest = hashlib.sha256(source.encode()).hexdigest()
+            current = self._open_documents.get(path)
+            if current is None:
+                lsp.did_open(Path(path), source, language_id=self._language_id)
+                self._open_documents[path] = (digest, 1)
+            elif current[0] != digest:
+                version = current[1] + 1
+                lsp.did_change(Path(path), source, version)
+                self._open_documents[path] = (digest, version)
+
     def infer_file(self, path: Path, project_root: Path | None = None) -> FileTypes:
         path = path.resolve()
-        if not path.exists():
-            return FileTypes(path=str(path))
+        prepared_sources = getattr(self, "_prepared_source_texts", {})
+        project_paths = getattr(self, "_prepared_project_paths", set())
+        source = prepared_sources.get(str(path))
+        if source is None:
+            if not path.exists():
+                return FileTypes(path=str(path))
+            from emend.analysis_store import AnalysisStore
 
-        content_hash = _file_cache_key(path)
-        cached = self._cache.get(content_hash)
+            identities, sources, project_paths = AnalysisStore.open(
+                project_root or path.parent
+            ).type_file_inputs(
+                [path], include_overlays=True
+            )
+            if str(path) not in identities:
+                content_hash = self._file_key(path, project_root)
+                try:
+                    source = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    ft = FileTypes(path=str(path))
+                    if path.exists() and self._file_key(path, project_root) == content_hash:
+                        self._cache.put(content_hash, ft)
+                    return ft
+            else:
+                content_hash = identities[str(path)]
+                source = sources[str(path)]
+                prepared_sources = sources
+        else:
+            content_hash = self._file_key(path, project_root)
+        cached = self._cache.get(content_hash, path)
         if cached is not None:
             return cached
 
@@ -1316,8 +1596,9 @@ class _LSPTypeOracle(TypeOracle):
 
         try:
             logger.info("Building type index for %s via %s", path, self._tool_name)
-            source = path.read_text(encoding="utf-8")
-            lsp.did_open(path, source, language_id=self._language_id)
+            self._sync_documents(
+                lsp, prepared_sources or {str(path): source}, project_paths
+            )
 
             symbols = _collect_symbols(source)
             ft = FileTypes(path=str(path))
@@ -1358,6 +1639,51 @@ class _LSPTypeOracle(TypeOracle):
         self._cache.put(content_hash, ft)
         return ft
 
+    def infer_batch(
+        self, paths: list[Path], project_root: Path | None = None
+    ) -> dict[str, FileTypes]:
+        """Open one pinned snapshot in the LSP before querying any hover."""
+        resolved = [path.resolve() for path in paths]
+        self._prepared_file_keys = self._prepare_file_keys(resolved, project_root)
+        results: dict[str, FileTypes] = {}
+        try:
+            missing = []
+            for path in resolved:
+                key = str(path)
+                content_hash = self._prepared_file_keys.get(key)
+                if content_hash is None:
+                    results[key] = FileTypes(path=key)
+                    continue
+                cached = self._cache.get(content_hash, path)
+                if cached is None:
+                    missing.append(path)
+                else:
+                    results[key] = cached
+            if not missing:
+                return results
+            root = project_root or (resolved[0].parent if resolved else Path.cwd())
+            lsp = self._get_lsp(root)
+            if lsp is None:
+                return results | {
+                    str(path): FileTypes(path=str(path)) for path in missing
+                }
+            self._sync_documents(
+                lsp, self._prepared_source_texts, self._prepared_project_paths
+            )
+            for path in missing:
+                try:
+                    results[str(path)] = self.infer_file(path, project_root)
+                except BUG_EXCEPTIONS:
+                    raise
+                except Exception:
+                    logger.debug("infer_file failed for %s", path, exc_info=True)
+                    results[str(path)] = FileTypes(path=str(path))
+        finally:
+            self.__dict__.pop("_prepared_file_keys", None)
+            self.__dict__.pop("_prepared_source_texts", None)
+            self.__dict__.pop("_prepared_project_paths", None)
+        return results
+
     def _parse_hover_type(self, hover_text: str) -> str | None:  # pragma: no cover
         raise NotImplementedError
 
@@ -1366,7 +1692,9 @@ class _LSPTypeOracle(TypeOracle):
         with self._lsp_lock:
             if self._lsp:
                 self._lsp.stop()
-                self._lsp = None
+            self._lsp = None
+            self._open_documents.clear()
+            self._known_project_paths = None
 
     def __del__(self):
         with self._lsp_lock:
@@ -1542,6 +1870,8 @@ class TypeScriptAdapter(TypeOracle):
     ``node_modules`` or globally.
     """
 
+    _uses_overlay_source = False
+
     def __init__(
         self,
         node_path: str | None = None,
@@ -1572,14 +1902,15 @@ class TypeScriptAdapter(TypeOracle):
         if not path.exists():
             return FileTypes(path=str(path))
 
-        content_hash = _file_cache_key(path)
-        cached = self._cache.get(content_hash)
+        content_hash = self._file_key(path, project_root)
+        cached = self._cache.get(content_hash, path)
         if cached is not None:
             return cached
 
         logger.info("Building type index for %s via TypeScript", path)
         ft = self._run_tsc(path, project_root)
-        self._cache.put(content_hash, ft)
+        if self._current_file_key(path, project_root) == content_hash:
+            self._cache.put(content_hash, ft)
         return ft
 
     def _run_tsc(self, path: Path, project_root: Path | None) -> FileTypes:
@@ -1811,10 +2142,6 @@ def create_type_oracle(
     if engine == "auto":
         engine = detect_type_engine(project_root, file_path=file_path)
 
-    # Inject disk cache path when not explicitly provided
-    if "db_path" not in kwargs:
-        kwargs["db_path"] = _type_cache_db_path(project_root)
-
     try:
         adapter = _ENGINE_ADAPTERS[engine]
     except KeyError:
@@ -1822,4 +2149,18 @@ def create_type_oracle(
             f"Unknown type inference engine: {engine!r}. "
             f"Supported engines: {', '.join(_ENGINE_NAMES)}"
         ) from None
-    return adapter(**kwargs)
+
+    cache_context = (
+        f"{_type_shared_context(project_root)}|"
+        f"{_type_engine_context(engine, kwargs)}"
+    )
+
+    # Inject disk cache path when not explicitly provided
+    if "db_path" not in kwargs:
+        kwargs["db_path"] = _type_cache_db_path(project_root)
+
+    oracle = adapter(**kwargs)
+    cache = getattr(oracle, "_cache", None)
+    if isinstance(cache, _FileTypeCache):
+        cache.namespace = cache_context
+    return oracle

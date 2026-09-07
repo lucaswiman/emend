@@ -774,9 +774,11 @@ def facts_cmd(
     import dataclasses
 
     try:
-        from emend.fact_graph import FactGraph
+        from emend.analysis_store import AnalysisStore
 
-        graph = FactGraph.build_from_project(project)
+        graph = AnalysisStore.open(project).query_facts(
+            include_types=fact_type == "types"
+        )
 
         results: list = []
         extra: dict | None = None
@@ -926,8 +928,8 @@ def cfg_cmd(
             # Try Datalog path first via FactGraph
             datalog_used = False
             try:
-                from emend.transform import _get_or_build_fact_graph
-                graph = _get_or_build_fact_graph(str(project_root))
+                from emend.analysis_store import AnalysisStore
+                graph = AnalysisStore.open(project_root).query_facts()
                 func_filter = function if function else None
                 unr_blocks = graph.unreachable_blocks_datalog(func_qn=func_filter)
                 datalog_used = True

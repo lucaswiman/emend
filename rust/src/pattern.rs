@@ -554,6 +554,78 @@ pub fn collect_identifier_positions(source: &str) -> Vec<(String, usize, usize, 
 }
 
 
+/// Direct string elements of module-level Python ``__all__`` list/tuple assignments.
+pub fn python_all_names(source: &str) -> Vec<String> {
+    let Some(tree) = parse_by_extension(source, "py") else {
+        return vec![];
+    };
+    let mut names = Vec::new();
+    for statement in tree.root_node().named_children(&mut tree.root_node().walk()) {
+        if statement.kind() != "expression_statement" {
+            continue;
+        }
+        let Some(assignment) = statement.named_child(0) else {
+            continue;
+        };
+        let supported = assignment.kind() == "assignment"
+            || (assignment.kind() == "augmented_assignment"
+                && assignment
+                    .child_by_field_name("operator")
+                    .and_then(|operator| operator.utf8_text(source.as_bytes()).ok())
+                    == Some("+="));
+        if !supported || assignment.has_error() {
+            continue;
+        }
+        let Some(left) = assignment.child_by_field_name("left") else {
+            continue;
+        };
+        if left.kind() != "identifier" || left.utf8_text(source.as_bytes()).ok() != Some("__all__") {
+            continue;
+        }
+        let Some(value) = assignment.child_by_field_name("right") else {
+            continue;
+        };
+        if !matches!(value.kind(), "list" | "tuple") {
+            continue;
+        }
+        for element in value.named_children(&mut value.walk()) {
+            if element.kind() != "string" {
+                continue;
+            }
+            let prefix = element
+                .child(0)
+                .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if prefix.contains('f') || prefix.contains('b') {
+                continue;
+            }
+            names.push(extract_string_content(element, source.as_bytes()));
+        }
+    }
+    names
+}
+
+fn extract_string_content(node: Node, source: &[u8]) -> String {
+    let parts: Vec<_> = node
+        .children(&mut node.walk())
+        .filter(|child| {
+            !matches!(
+                child.kind(),
+                "string_start" | "string_end" | "\"\"\"" | "'''" | "\"" | "'"
+            )
+        })
+        .map(|child| &source[child.byte_range()])
+        .collect();
+    if parts.is_empty() {
+        strip_string_quotes(std::str::from_utf8(&source[node.byte_range()]).unwrap_or(""))
+            .to_owned()
+    } else {
+        String::from_utf8_lossy(&parts.concat()).into_owned()
+    }
+}
+
+
 /// Collect all string literal nodes from source code.
 ///
 /// Returns a list of `(start_byte, end_byte, start_line, start_col, end_line, end_col, content)`
@@ -572,40 +644,6 @@ pub fn collect_string_literals(source: &str, ext: &str) -> Vec<(u32, u32, u32, u
     let source_bytes = source.as_bytes();
     let root = tree.root_node();
     let mut results: Vec<(u32, u32, u32, u32, u32, u32, String)> = Vec::new();
-
-    fn extract_string_content(node: Node, source: &[u8]) -> String {
-        // Try to find string_content children (Python grammar).
-        // For each child, collect the text of nodes that are NOT the quote nodes
-        // (i.e. not string_start / string_end).
-        let mut content_parts: Vec<&[u8]> = Vec::new();
-        let mut cursor = node.walk();
-        let mut has_content_children = false;
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                let kind = child.kind();
-                // Skip opening/closing quote tokens
-                if kind != "string_start" && kind != "string_end"
-                    && kind != "\"\"\"" && kind != "'''"
-                    && kind != "\"" && kind != "'"
-                {
-                    has_content_children = true;
-                    content_parts.push(&source[child.start_byte()..child.end_byte()]);
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-
-        if has_content_children {
-            String::from_utf8_lossy(&content_parts.concat()).into_owned()
-        } else {
-            // Fallback: strip quotes from the full node text
-            let full = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).unwrap_or("");
-            strip_string_quotes(full).to_string()
-        }
-    }
 
     fn collect_strings(node: Node, source: &[u8], results: &mut Vec<(u32, u32, u32, u32, u32, u32, String)>) {
         let kind = node.kind();

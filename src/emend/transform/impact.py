@@ -199,20 +199,10 @@ def _find_impact_via_fact_graph(
     proj_root: str,
     max_depth: int = 10,
 ) -> ImpactResult | None:
-    """Compute impact using a Datalog query on the persisted ``facts.db``.
-
-    Uses the CozoDB ``facts.db`` that is populated by ``emend index``.
-    The query constructs a call graph from ``fact_reference`` (kind == "call")
-    joined with ``fact_symbol`` (to find the enclosing function), then
-    computes the transitive reverse-caller closure via recursive Datalog.
-
-    Returns None if facts.db is unavailable (caller falls back to BFS).
-    """
-    from .cache import _get_facts_db
+    """Compute impact using the owner's current project fact generation."""
+    from emend.analysis_store import AnalysisStore
     from emend.component_selector import parse_extended_selector
-    fdb = _get_facts_db(proj_root)
-    if fdb is None:
-        return None
+    fdb = AnalysisStore.open(proj_root).query_facts().client
 
     # Resolve selectors to module-qualified names (mqn) in facts.db.
     changed_mqns: set[str] = set()
@@ -237,13 +227,13 @@ def _find_impact_via_fact_graph(
                 continue
             try:
                 result = fdb.run(
-                    "?[mqn] := *fact_symbol[fp, mqn, name, _, _, _, _, _, _, _, _, _, _, _, _, _], "
+                    "?[mqn] := *symbol[mqn, fp, name, _, _, _, _], "
                     "fp == $fp, name == $name",
                     {"fp": fp, "name": name},
                 )
             except Exception:
                 logger.debug(
-                    "fact_symbol lookup failed for %s", fp, exc_info=True,
+                    "symbol lookup failed for %s", fp, exc_info=True,
                 )
                 continue
             if result["rows"]:
@@ -261,36 +251,14 @@ def _find_impact_via_fact_graph(
             edges=[],
         )
 
-    # Build a Datalog query against the persisted facts.db schema:
-    #
-    #   fact_symbol: (fp, mqn) => (name, qn, kind, line, end_line, ...)
-    #   fact_reference: (tqn, fp, line, col) => (kind)
-    #
-    # A "call" is a fact_reference where kind == "call".  To find the
-    # caller, we join with fact_symbol to find which function encloses
-    # the reference line.
+    # Build a depth-bounded reverse closure over the canonical call relation.
     seed_rows = ", ".join(f'["{mqn}"]' for mqn in changed_mqns)
 
     rules = [f"changed[x] <- [{seed_rows}]\n"]
 
-    # call_edge: derive (caller_mqn, callee_mqn) from references + enclosing symbols
     rules.append(
         'call_edge[caller_mqn, callee_mqn] := '
-        '*fact_reference[callee_mqn, fp, ref_line, _, kind], kind == "call", '
-        '*fact_symbol[fp, caller_mqn, _, _, caller_kind, caller_line, caller_end, _, _, _, _, _, _, _, _, _], '
-        'caller_kind in ["function", "async_function", "method", "async_method"], '
-        'caller_line <= ref_line, ref_line <= caller_end\n'
-    )
-
-    # Also match references by qn (short qualified name)
-    rules.append(
-        'call_edge[caller_mqn, callee_mqn] := '
-        '*fact_symbol[_, callee_mqn, _, callee_qn, _, _, _, _, _, _, _, _, _, _, _, _], '
-        'callee_qn != "", '
-        '*fact_reference[callee_qn, fp, ref_line, _, kind], kind == "call", '
-        '*fact_symbol[fp, caller_mqn, _, _, caller_kind, caller_line, caller_end, _, _, _, _, _, _, _, _, _], '
-        'caller_kind in ["function", "async_function", "method", "async_method"], '
-        'caller_line <= ref_line, ref_line <= caller_end\n'
+        '*call[caller_mqn, callee_mqn, _, _, _, _, _]\n'
     )
 
     # Depth-bounded transitive reverse-caller closure
@@ -318,7 +286,7 @@ def _find_impact_via_fact_graph(
     rules.append(
         "?[caller_mqn, caller_fp, caller_name, callee_mqn] := "
         "edge[caller_mqn, callee_mqn], not changed[caller_mqn], "
-        "*fact_symbol[caller_fp, caller_mqn, caller_name, _, _, _, _, _, _, _, _, _, _, _, _, _]"
+        "*symbol[caller_mqn, caller_fp, caller_name, _, _, _, _]"
     )
 
     try:
@@ -431,7 +399,6 @@ def find_impact(
         ValueError: If neither selectors nor diff_spec is provided, or on git errors.
     """
     from .project_iter import _find_project_root
-    from .index import warm_caches
     if not selectors and not diff_spec:
         raise ValueError("Either selectors or diff_spec must be provided")
 
@@ -472,23 +439,9 @@ def find_impact(
     if dl_result is not None:
         return dl_result
 
-    # facts.db unavailable — warm the index and retry once.
-    try:
-        warm_caches(proj_root, type_engine="none")
-    except BUG_EXCEPTIONS:
-        raise
-    except Exception:
-        logger.debug("warm_caches failed before impact retry", exc_info=True)
-    dl_result = _find_impact_via_fact_graph(
-        changed_selectors, proj_root, max_depth=max_depth,
-    )
-    if dl_result is not None:
-        return dl_result
-
     return ImpactResult(
         changed_symbols=changed_selectors,
         impacted_symbols=[],
         impacted_tests=[],
         edges=[],
     )
-

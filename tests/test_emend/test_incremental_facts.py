@@ -81,39 +81,59 @@ def _modified_source_a():
 
 def test_warm_caches_rebuilds_old_export_relation(tmp_path):
     """A stale relation shape is replaced by a project-owned current snapshot."""
-    from emend.fact_graph import _create_cozo_client
-    from emend.transform import _cache_db_dir, warm_caches
-    from emend.transform.cache import _facts_schema_is_current
+    from emend.analysis_store import AnalysisStore
+    from emend.fact_graph import FACT_GRAPH_SCHEMA_VERSION, _create_cozo_client
+    from emend.transform import _cache_db_dir
 
     (tmp_path / "pyproject.toml").touch()
     (tmp_path / "mod.py").write_text("def live():\n    return 1\n")
     cache_dir = _cache_db_dir(tmp_path)
     cache_dir.mkdir(parents=True)
     db_path = cache_dir / "facts.db"
+    store = AnalysisStore.open(tmp_path)
+    snapshot = store.disk_snapshot()
     client = _create_cozo_client(str(db_path))
     client.run("{:create exported_symbol { qualified_name: String }}")
     client.run("{:create facts_meta { key: String => value: String }}")
     client.run(
-        '?[key, value] <- [["schema_version", "6"]] '
-        ":put facts_meta {key => value}"
+        '?[key, value] <- $rows '
+        ":put facts_meta {key => value}",
+        {"rows": [
+            ["schema_version", "6"],
+            ["snapshot_id", snapshot.snapshot_id],
+        ]}
+    )
+    client.run(
+        "{:create file_revision {file_path: String => content_hash: String, "
+        "language: String, module_name: String, origin: String, version: Int}}"
+    )
+    client.run(
+        "?[file_path, content_hash, language, module_name, origin, version] <- $rows "
+        ":put file_revision {file_path => content_hash, language, module_name, "
+        "origin, version}",
+        {"rows": [[
+            revision.file_path, revision.content_hash, revision.language,
+            revision.module_name, revision.origin, -1,
+        ] for revision in snapshot.files]},
     )
     client.close()
 
-    assert not _facts_schema_is_current(db_path, tmp_path)
-
-    warm_caches(str(tmp_path), type_engine="none")
-
-    assert _facts_schema_is_current(db_path, tmp_path)
-    assert not _facts_schema_is_current(db_path, tmp_path / "other")
+    graph = store.query_facts()
+    assert graph.published_snapshot_id() == graph.snapshot.snapshot_id
+    assert graph.run_query(
+        '?[value] := *facts_meta["schema_version", value]'
+    )["rows"] == [[FACT_GRAPH_SCHEMA_VERSION]]
 
 
 def test_facts_schema_rejects_corrupt_database(tmp_path):
-    from emend.transform.cache import _facts_schema_is_current
+    from emend.analysis_store import AnalysisStore
 
     db_path = tmp_path / "facts.db"
     db_path.write_bytes(b"not a sqlite database")
-
-    assert not _facts_schema_is_current(db_path)
+    (tmp_path / "live.py").write_text("def live():\n    return 1\n")
+    store = AnalysisStore.open(tmp_path)
+    store.facts_path = db_path
+    assert [fact.name for fact in store.query_facts().symbols()] == ["live"]
 
 
 # -- Test: update_files exists and populates facts --------------------------

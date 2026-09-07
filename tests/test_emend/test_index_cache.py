@@ -245,26 +245,19 @@ class TestWarmCachesSkipped:
         # Even for 2 files, warm run should be well under 5 seconds.
         assert warm_elapsed < 5.0
 
-    def test_warm_run_does_not_rebuild_facts(self, tmp_path, monkeypatch):
+    def test_warm_run_does_not_rebuild_facts(self, tmp_path):
         """An unchanged parse index implies the persisted facts are current."""
+        from emend.analysis_store import AnalysisStore
         from emend.transform import warm_caches
-        from emend.transform import cache as cache_module
 
         proj = self._make_project(tmp_path)
-        calls = 0
-        real_build = cache_module._build_facts_db
-
-        def counting_build(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            return real_build(*args, **kwargs)
-
-        monkeypatch.setattr(cache_module, "_build_facts_db", counting_build)
+        store = AnalysisStore.open(proj)
         warm_caches(str(proj), type_engine=None)
-        assert calls == 1
+        first = store.query_facts()
 
         warm_caches(str(proj), type_engine=None)
-        assert calls == 1
+        second = store.query_facts()
+        assert second is first
 
 
 def test_duplicate_cache_hit_does_not_build_scope_resolver(tmp_path, monkeypatch):
@@ -312,6 +305,7 @@ class TestTypeCacheWarming:
     @pytest.mark.skipif(not _HAS_TYPE_ENGINE, reason="no type engine on PATH")
     def test_type_cache_populated(self, tmp_path):
         """warm_caches with auto engine writes rows to the type_cache table."""
+        from emend.analysis_store import AnalysisStore
         from emend.transform import warm_caches
 
         proj = self._make_project(tmp_path)
@@ -320,19 +314,19 @@ class TestTypeCacheWarming:
         assert stats["type_cached"] >= 2
         assert stats["type_engine"] != ""
 
-        db_path = proj / ".emend" / "cache" / "parse.db"
-        assert db_path.exists()
+        db_path = AnalysisStore.open(proj).artifact_path
         assert _db_row_count(db_path, "type_cache") >= 2
 
     @pytest.mark.skipif(not _HAS_TYPE_ENGINE, reason="no type engine on PATH")
     def test_type_cache_warm_run_uses_disk_cache(self, tmp_path):
         """Second warm_caches call reads types from disk, not the engine."""
+        from emend.analysis_store import AnalysisStore
         from emend.transform import warm_caches
 
         proj = self._make_project(tmp_path)
         warm_caches(str(proj), type_engine="auto")
 
-        db_path = proj / ".emend" / "cache" / "parse.db"
+        db_path = AnalysisStore.open(proj).artifact_path
         rows_after_cold = _db_row_count(db_path, "type_cache")
         assert rows_after_cold >= 2
 
@@ -484,6 +478,39 @@ class TestSymbolIndex:
         assert "name" in row[0]
         assert row[1] == "str"
 
+    def test_completion_query_preserves_symbol_metadata(self, tmp_path):
+        from emend.transform import query_symbol_index
+
+        project = make_project_dir(tmp_path)
+        source = project / "mod.py"
+        source.write_text(
+            "@decorator\n"
+            "def greet(name: str) -> str:\n    return name\n\n"
+            "class Greeter:\n"
+            "    def greet(self, name: str) -> str:\n        return name\n"
+        )
+
+        results = query_symbol_index(str(project), name_pattern="greet")
+        assert results is not None
+        assert [
+            (
+                result["qualified_name"], result["depth"],
+                result["signature"], result["returns"], result["decorators"],
+            )
+            for result in results
+        ] == [
+            ("greet", 1, "def greet(name: str) -> str", "str", ["decorator"]),
+            (
+                "Greeter.greet", 2,
+                "def greet(self, name: str) -> str", "str", [],
+            ),
+        ]
+        source.write_text("def welcome(name: str) -> str:\n    return name\n")
+        assert query_symbol_index(str(project), name_pattern="greet") == []
+        assert query_symbol_index(str(project), name_pattern="welcome")[0][
+            "signature"
+        ] == "def welcome(name: str) -> str"
+
     def test_symbol_index_kind_query(self, tmp_path):
         """Can query symbol_index by kind."""
         from emend.transform import _index_batch
@@ -625,9 +652,7 @@ class TestFileManifest:
 
         warm_caches(str(proj), type_engine=None)
 
-        expected_hash = hashlib.md5(
-            SOURCE.encode(), usedforsecurity=False
-        ).digest()
+        expected_hash = hashlib.sha256(SOURCE.encode()).digest()
 
         db_path = proj / ".emend" / "cache" / "parse.db"
         conn = sqlite3.connect(str(db_path))
@@ -707,7 +732,7 @@ class TestIndexStatus:
         assert info is not None
         assert info["file_manifest_count"] == 2
         assert info["symbol_index_count"] >= 2  # hello + Foo
-        assert info["schema_version"] == "5"
+        assert info["schema_version"] == "6"
 
     def test_status_returns_none_without_index(self, tmp_path):
         """get_index_status returns None when no index exists."""

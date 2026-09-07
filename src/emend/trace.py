@@ -735,13 +735,20 @@ def run_trace_analysis(
         if not paths:
             return []
 
+    paths = [path for path in paths if Path(path).is_file()]
+    if not paths:
+        return []
+
     _proj = (project_path or str(Path(paths[0]).resolve().parent)) if paths else ""
+    from emend.analysis_store import AnalysisStore
+    graph = AnalysisStore.open(_proj).query_facts()
     logger.debug("Using Datalog intraprocedural trace engine for %d files", len(paths))
     result = _run_trace_datalog(
         paths, config,
         label_filter=label_filter,
         language=language,
         project_path=_proj,
+        graph=graph,
     )
     return result if result is not None else []
 
@@ -763,7 +770,7 @@ def _resolve_match_to_location(
     from emend.location_resolver import MODULE_LEVEL_BLOCK, MODULE_LEVEL_FUNC
 
     try:
-        return graph.resolve_location(file_path, line)
+        return graph.resolve_location(_fact_path(graph, file_path), line)
     except BUG_EXCEPTIONS:
         raise
     except Exception:
@@ -772,6 +779,16 @@ def _resolve_match_to_location(
             file_path, line, exc_info=True,
         )
     return MODULE_LEVEL_FUNC, MODULE_LEVEL_BLOCK
+
+
+def _fact_path(graph: "FactGraph", file_path: str) -> str:
+    """Return the path identity used by *graph*'s stored relations."""
+    if not Path(file_path).is_absolute():
+        return file_path
+    try:
+        return graph.stored_path(file_path)
+    except AttributeError:
+        return file_path
 
 
 def _write_targets_on_line(
@@ -791,7 +808,7 @@ def _write_targets_on_line(
     """
     try:
         facts = _cached_facts if _cached_facts is not None else graph.def_uses(
-            file_path=str(Path(file_path).resolve()),
+            file_path=_fact_path(graph, file_path),
         )
         # DefUseFact.def_line is 0-indexed; *line* is 1-indexed.
         zero_indexed = line - 1
@@ -880,7 +897,9 @@ def _assignments_from_graph(
 ) -> dict[int, list[tuple[str, str]]]:
     """Build ``{abs_line: [(target, rhs_text), ...]}`` from DefUseFact writes.
     """
-    facts = graph.def_uses(file_path=file_path, func_qn=func_qn)
+    facts = graph.def_uses(
+        file_path=_fact_path(graph, file_path), func_qn=func_qn,
+    )
     result: dict[int, list[tuple[str, str]]] = {}
     seen: set[tuple[int, str]] = set()
 
@@ -940,32 +959,6 @@ def _get_assignments_by_line(
     return result
 
 
-def _build_trace_fact_graph(
-    paths: list[str],
-    language: str,
-    project_path: str,
-) -> "FactGraph":  # type: ignore[name-defined]
-    """Build a FactGraph for trace analysis from the given file list.
-
-    Prefers ``build_from_files`` so small file sets (e.g. single-file test
-    fixtures) get fully populated CFG/def-use facts.  Falls back to the
-    project-wide ``_get_or_build_fact_graph`` when the direct build fails.
-    """
-    from emend.fact_graph import FactGraph
-    from emend.transform import _get_or_build_fact_graph
-
-    try:
-        return FactGraph.build_from_files(paths, language=language)
-    except BUG_EXCEPTIONS:
-        raise
-    except Exception:
-        logger.debug(
-            "FactGraph.build_from_files failed; falling back to project-wide graph",
-            exc_info=True,
-        )
-        return _get_or_build_fact_graph(project_path)
-
-
 def _cached_find_pattern(
     cache: dict[tuple[str, str], list] | None,
     pattern: str,
@@ -1010,17 +1003,13 @@ def _run_trace_datalog(
     second full parse+build.
     """
     if graph is None:
-        graph = _build_trace_fact_graph(paths, language, project_path)
+        from emend.analysis_store import AnalysisStore
+        graph = AnalysisStore.open(project_path).query_facts()
 
-    # FactGraph.update_files() keys every fact by the *resolved* (absolute)
-    # path (``str(Path(fp).resolve())``).  Normalise the analysis paths to the
-    # same identity so the Datalog joins that reference stored facts
-    # (``trace_source.fp == def_use.fp`` / ``cfg_block.fp``) line up.  Without
-    # this, a relative path from the CLI (e.g. ``emend trace app.py``) would
-    # silently propagate no taint across variables/blocks and report zero
-    # violations.  Direct same-variable/same-block flows happen to survive
-    # because they only touch the raw-path inline relations.
+    # Pattern matching and presentation use resolved filesystem paths, while
+    # relation joins use the graph's project-relative path identity.
     paths = [str(Path(p).resolve()) for p in paths]
+    display_paths = {_fact_path(graph, path): path for path in paths}
 
     # Create type oracle for Python-side type constraint filtering
     type_oracle = _maybe_create_type_oracle(config)
@@ -1040,21 +1029,22 @@ def _run_trace_datalog(
     sanitizer_lines: list[tuple[str, str, str, str, int, int]] = []
     sink_lines: list[tuple[str, str, str, int, int]] = []
 
-    for file_path in paths:
-        path_obj = Path(file_path)
-        if not path_obj.exists():
-            continue
+    for display_path in paths:
+        path_obj = Path(display_path)
+        file_path = _fact_path(graph, display_path)
         try:
-            source_text = path_obj.read_text()
+            try:
+                source_text = graph.source_text(path_obj)
+            except AttributeError:
+                source_text = path_obj.read_text()
         except (OSError, UnicodeDecodeError):
             logger.debug("Could not read %s", file_path, exc_info=True)
             continue
 
         source_lines = source_text.split("\n")
         # Cache def-use facts for this file to avoid repeated CozoSQL queries.
-        resolved_path = str(path_obj.resolve())
         try:
-            _file_def_uses = graph.def_uses(file_path=resolved_path)
+            _file_def_uses = graph.def_uses(file_path=file_path)
         except AttributeError:
             _file_def_uses = None
 
@@ -1062,7 +1052,7 @@ def _run_trace_datalog(
             if label_filter and src_def.label != label_filter:
                 continue
             matched_sources: list[tuple[str, str, str, int, str]] = []
-            matches = find_pattern(src_def.pattern, file_path, source_override=source_text, language=language)
+            matches = find_pattern(src_def.pattern, display_path, source_override=source_text, language=language)
             for m in matches:
                 if m.line is not None:
                     # Extract variable names from captures
@@ -1079,7 +1069,7 @@ def _run_trace_datalog(
                     if src_def.type_constraint and type_oracle and var_names:
                         var_names = _filter_vars_by_type(
                             var_names, src_def.type_constraint,
-                            type_oracle, file_path, m.line or 1,
+                            type_oracle, display_path, m.line or 1,
                         )
                     fq, bid = _resolve_match_to_location(graph, file_path, m.line)
                     for var in var_names:
@@ -1101,7 +1091,7 @@ def _run_trace_datalog(
             matched_sinks: list[tuple[str, str, str, int, str]] = []
             matched_sink_lines: list[tuple[str, str, str, int, int]] = []
             matched_sink_metadata: dict[tuple[str, str, str, str, int], tuple[int, str, str]] = {}
-            matches = find_pattern(sink_def.pattern, file_path, source_override=source_text, language=language)
+            matches = find_pattern(sink_def.pattern, display_path, source_override=source_text, language=language)
             for m in matches:
                 if m.line is not None:
                     var_names = set()
@@ -1138,7 +1128,7 @@ def _run_trace_datalog(
         for san_def in config.sanitizers:
             if label_filter and san_def.label != label_filter:
                 continue
-            matches = find_pattern(san_def.pattern, file_path, source_override=source_text, language=language)
+            matches = find_pattern(san_def.pattern, display_path, source_override=source_text, language=language)
             for m in matches:
                 if m.line is not None:
                     var_names = set()
@@ -1158,7 +1148,7 @@ def _run_trace_datalog(
         for scope_san in config.scope_sanitizers:
             if label_filter and scope_san.label != label_filter:
                 continue
-            matches = find_pattern(scope_san.pattern, file_path, source_override=source_text, language=language)
+            matches = find_pattern(scope_san.pattern, display_path, source_override=source_text, language=language)
             for m in matches:
                 if m.line is not None:
                     fq, bid = _resolve_match_to_location(graph, file_path, m.line)
@@ -1319,6 +1309,7 @@ def _run_trace_datalog(
     # Convert TraceFlowFact -> TraceViolation
     violations: list[TraceViolation] = []
     for tf in taint_facts:
+        display_path = display_paths.get(tf.file_path, tf.file_path)
         sink_block = tf.sink_line
         line = 0
         sink_pattern = tf.sink_var
@@ -1355,7 +1346,7 @@ def _run_trace_datalog(
         )
         if src_line:
             trace_steps.append(TraceStep(
-                file_path=tf.file_path,
+                file_path=display_path,
                 line=src_line,
                 col=0,
                 description=f"source: {tf.label} via {tf.source_var}",
@@ -1363,7 +1354,7 @@ def _run_trace_datalog(
             ))
         if line:
             trace_steps.append(TraceStep(
-                file_path=tf.file_path,
+                file_path=display_path,
                 line=line,
                 col=0,
                 description=f"sink: {tf.label} via {sink_pattern}",
@@ -1371,7 +1362,7 @@ def _run_trace_datalog(
             ))
 
         violations.append(TraceViolation(
-            file_path=tf.file_path,
+            file_path=display_path,
             line=line,
             col=0,
             label=tf.label,
@@ -2104,12 +2095,14 @@ def _run_interprocedural_trace_datalog(
     func_kinds: dict[str, str] = {}
     file_sources: dict[str, str] = {}
 
+    _proj = (project_path or str(Path(paths[0]).resolve().parent)) if paths else ""
+    from emend.analysis_store import AnalysisStore
+    graph = AnalysisStore.open(_proj).query_facts()
+
     for file_path in paths:
         path_obj = Path(file_path)
-        if not path_obj.exists():
-            continue
         try:
-            source = path_obj.read_text()
+            source = graph.source_text(path_obj)
         except (OSError, UnicodeDecodeError):
             logger.debug("Could not read %s", file_path, exc_info=True)
             continue
@@ -2117,7 +2110,7 @@ def _run_interprocedural_trace_datalog(
         file_sources[file_path] = source
 
         try:
-            symbols = find_nested_definitions(file_path)
+            symbols = find_nested_definitions(file_path, source_override=source)
         except BUG_EXCEPTIONS:
             raise
         except Exception:
@@ -2136,9 +2129,6 @@ def _run_interprocedural_trace_datalog(
 
     # Build a fact graph so interprocedural helpers can use tree-sitter
     # backed def-use facts instead of regex-based assignment parsing.
-    _proj = (project_path or str(Path(paths[0]).resolve().parent)) if paths else ""
-    graph = _build_trace_fact_graph(paths, language, _proj)
-
     direct_summaries: dict[str, FunctionSummary] = {}
     for qn, (fp, src, fs, fe, params) in func_info.items():
         direct_summaries[qn] = _compute_function_summary(

@@ -14,9 +14,6 @@ from emend.errors import BUG_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
-_fact_graph_cache: dict[str, "FactGraph"] = {}
-
-
 @dataclass
 class Reference:
     """A reference to a symbol."""
@@ -36,105 +33,10 @@ def _rename_in_docstrings(content: str, old_name: str, new_name: str, language: 
 
 
 def _get_or_build_fact_graph(project_path: str) -> "FactGraph":
-    """Get or build a FactGraph for the project.
+    """Compatibility delegate to the project-scoped analysis owner."""
+    from emend.analysis_store import AnalysisStore
 
-    Two paths:
-    1. Load existing facts.db if it has data.
-    2. Build the fact-only warm-cache profile, then load.
-
-    The result is cached in-process by project root to avoid re-opening the
-    CozoDB connection on every call (which is expensive).
-    """
-    from emend.fact_graph import FactGraph
-    from .project_iter import _find_project_root
-    from .cache import _cache_db_dir, _facts_schema_is_current
-    from .index import (
-        _ensure_cache_ignore_files,
-        _ensure_index_fresh,
-        _scan_manifest,
-        warm_caches,
-    )
-
-    project_root = _find_project_root(project_path)
-    emend_dir = _cache_db_dir(project_root)
-    emend_dir.mkdir(parents=True, exist_ok=True)
-    _ensure_cache_ignore_files(project_root)
-    facts_db = emend_dir / "facts.db"
-
-    cached = _fact_graph_cache.get(project_root)
-    if cached is not None:
-        scan = _scan_manifest(project_root)
-        if scan.changed or scan.new_files or scan.deleted:
-            _fact_graph_cache.pop(project_root).close()
-            cached = None
-
-    index_is_fresh = _ensure_index_fresh(project_root)
-    if cached is not None and index_is_fresh and _facts_schema_is_current(
-        facts_db, project_root,
-    ):
-        return cached
-    if cached is not None:
-        _fact_graph_cache.pop(project_root).close()
-
-    # Path 1: load existing facts.db
-    if index_is_fresh and _facts_schema_is_current(facts_db, project_root):
-        try:
-            graph = FactGraph(db_path=str(facts_db))
-            count = graph._client.run(
-                "?[count(qn)] := *symbol[qn, _, _, _, _, _, _]"
-            )["rows"][0][0]
-            if count > 0:
-                _fact_graph_cache[project_root] = graph
-                return graph
-            logger.debug("facts.db has no symbol data, rebuilding")
-            graph.close()
-        except BUG_EXCEPTIONS:
-            raise
-        except Exception:
-            logger.debug("Failed to load facts.db, rebuilding", exc_info=True)
-
-    # Path 2: build via warm_caches, then load
-    logger.info("Building index for %s (first run may be slow)", project_path)
-    try:
-        warm_caches(
-            project_root,
-            type_engine="none",
-            build_fts=False,
-            build_duplicates=False,
-            force_facts=True,
-        )
-    except BUG_EXCEPTIONS:
-        raise
-    except Exception:
-        logger.debug("warm_caches failed; falling back to in-memory build", exc_info=True)
-    # Always attempt to load from facts.db — FactGraph(db_path=...) creates the
-    # file on first open, so calling it unconditionally is intentional and is
-    # what allows test_fact_graph_bootstrap_persists_facts_db to pass.
-    try:
-        graph = FactGraph(db_path=str(facts_db))
-        count = graph._client.run(
-            "?[count(qn)] := *symbol[qn, _, _, _, _, _, _]"
-        )["rows"][0][0]
-        if count > 0 and _facts_schema_is_current(facts_db, project_root):
-            try:
-                graph._resolve_builtin_refs()
-            except BUG_EXCEPTIONS:
-                raise
-            except Exception:
-                logger.debug("Failed to resolve builtin refs", exc_info=True)
-            _fact_graph_cache[project_root] = graph
-            return graph
-        graph.close()
-    except BUG_EXCEPTIONS:
-        raise
-    except Exception:
-        logger.debug("Failed to load facts.db after indexing", exc_info=True)
-
-    # Fallback: build in-memory (mainly for tests where warm_caches is mocked).
-    # build_from_project already calls _resolve_builtin_refs internally.
-    graph = FactGraph.build_from_project(project_root, include_types=False)
-    _fact_graph_cache[project_root] = graph
-    return graph
+    return AnalysisStore.open(project_path).query_facts()
 
 
 def find_references(
@@ -162,8 +64,6 @@ def find_references(
     target_module = _normalize_module_qn(_file_to_module(selector.file_path, module_root))
     symbol_qn = ".".join(selector.symbol_path)
     target_qn = f"{target_module}.{symbol_qn}" if target_module else symbol_qn
-
-    from emend.fact_graph import FactGraph
 
     graph = _get_or_build_fact_graph(scan_root)
 

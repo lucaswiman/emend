@@ -150,8 +150,16 @@ def test_detect_exported_names_typescript(code, expected):
     assert detect_exported_names(code, "typescript") == expected
 
 
-def test_detect_exported_names_python_empty():
-    assert detect_exported_names("def foo(): pass\n__all__ = ['foo']\n", "python") == set()
+@pytest.mark.parametrize("code, expected", [
+    ("def foo(): pass\n__all__ = ['foo']\n", {"foo"}),
+    ("__all__ = ('foo', 'bar')", {"foo", "bar"}),
+    ("__all__ = ['foo', make('dynamic'), ['nested'], f'{computed}', b'bytes']", {"foo"}),
+    ("def f():\n    __all__ = ['nested']\nclass C:\n    __all__ = ['method']", set()),
+    ("__all__ = build('dynamic')\n__all__ += ['augmented']\nobj.__all__ = ['attribute']", {"augmented"}),
+    ("if enabled:\n    __all__ = ['conditional']\n__all__ = {'set'}", set()),
+])
+def test_detect_exported_names_python_all(code, expected):
+    assert detect_exported_names(code, "python") == expected
 
 
 @pytest.mark.parametrize("code, expected", [

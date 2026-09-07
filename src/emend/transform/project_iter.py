@@ -312,189 +312,17 @@ def _find_project_root(start_path: str) -> str:
     Checks for a valid Git marker or an emend config file first, then
     language-specific project files for Python, TypeScript/JS, and Rust.
     """
-    path = Path(start_path).resolve()
-    if path.is_file():
-        path = path.parent
+    from emend.project_config import find_project_root
 
-    markers = [
-        # Generated ``.emend/cache`` directories must not turn a shared
-        # ancestor (notably /tmp) into the project root for unrelated trees.
-        '.emend/config.toml', '.emend/rules.yaml', '.emend/mappings.yaml',
-        # Python
-        'pyproject.toml', 'setup.py', 'setup.cfg',
-        # TypeScript / JavaScript
-        'package.json', 'tsconfig.json',
-        # Rust
-        'Cargo.toml',
-    ]
-
-    current = path
-    while current != current.parent:
-        git_marker = current / ".git"
-        if git_marker.is_file() or (git_marker / "HEAD").is_file():
-            return str(current)
-        for marker in markers:
-            if (current / marker).exists():
-                return str(current)
-        current = current.parent
-
-    return str(path)
+    return str(find_project_root(start_path))
 
 
 @lru_cache(maxsize=64)
 def _find_source_root(project_root: str, language: str = "python") -> str:
-    """Find the source root directory for a project.
+    """Compatibility wrapper for the canonical source-root resolver."""
+    from emend.project_config import find_source_root
 
-    Language-specific detection:
-
-    **Python** -- checks (in order):
-    1. ``pyproject.toml`` settings (maturin, setuptools, hatch)
-    2. ``setup.cfg`` [options] package_dir
-    3. Heuristic: ``src/`` exists and contains a package (dir with ``__init__.py``)
-
-    **Rust** -- checks ``Cargo.toml`` for ``[lib] path`` and ``src/`` directory.
-
-    **TypeScript** -- checks ``tsconfig.json`` for ``rootDir``/``baseUrl`` and ``src/``.
-
-    **Other languages** -- heuristic: ``src/`` exists.
-
-    Returns the resolved source root (e.g. ``/repo/src``), or the
-    project root itself if no ``src/`` layout is detected.
-    """
-    root = Path(project_root).resolve()
-
-    if language == "python":
-        # --- pyproject.toml -------------------------------------------------
-        pyproject = root / "pyproject.toml"
-        if pyproject.is_file():
-            try:
-                import tomllib
-            except ModuleNotFoundError:          # Python < 3.11
-                try:
-                    import tomli as tomllib      # type: ignore[no-redef]
-                except ModuleNotFoundError:
-                    tomllib = None               # type: ignore[assignment]
-            if tomllib is not None:
-                try:
-                    data = tomllib.loads(pyproject.read_text())
-                    # maturin: python-source = "src"
-                    ps = (data.get("tool", {}).get("maturin", {})
-                          .get("python-source"))
-                    if ps:
-                        candidate = root / ps
-                        if candidate.is_dir():
-                            return str(candidate)
-                    # setuptools: [tool.setuptools.packages.find] where = ["src"]
-                    where = (data.get("tool", {}).get("setuptools", {})
-                             .get("packages", {}).get("find", {}).get("where"))
-                    if isinstance(where, list) and where:
-                        candidate = root / where[0]
-                        if candidate.is_dir():
-                            return str(candidate)
-                    # hatch / hatchling
-                    where = (data.get("tool", {}).get("hatch", {})
-                             .get("build", {}).get("sources", {}).get("src"))
-                    if isinstance(where, str):
-                        candidate = root / where
-                        if candidate.is_dir():
-                            return str(candidate)
-                except (OSError, ValueError, TypeError, AttributeError):
-                    logger.debug(
-                        "pyproject.toml source-root detection failed", exc_info=True,
-                    )
-
-        # --- setup.cfg ------------------------------------------------------
-        setup_cfg = root / "setup.cfg"
-        if setup_cfg.is_file():
-            import configparser
-            try:
-                cfg = configparser.ConfigParser()
-                cfg.read(str(setup_cfg))
-                pkg_dir = cfg.get("options", "package_dir", fallback=None)
-                if pkg_dir:
-                    # Format: "= src" or "\n= src"
-                    for part in pkg_dir.splitlines():
-                        part = part.strip()
-                        if part.startswith("="):
-                            src_dir = part[1:].strip()
-                            candidate = root / src_dir
-                            if candidate.is_dir():
-                                return str(candidate)
-            except (OSError, UnicodeDecodeError, configparser.Error):
-                logger.debug("setup.cfg source-root detection failed", exc_info=True)
-
-        # --- Heuristic: src/ with an __init__.py package --------------------
-        src_dir = root / "src"
-        if src_dir.is_dir():
-            for child in src_dir.iterdir():
-                if child.is_dir() and (child / "__init__.py").is_file():
-                    return str(src_dir)
-
-    elif language == "rust":
-        # Rust: check Cargo.toml for [lib] path or default src/
-        cargo_toml = root / "Cargo.toml"
-        if cargo_toml.is_file():
-            try:
-                import tomllib
-            except ModuleNotFoundError:
-                try:
-                    import tomli as tomllib  # type: ignore[no-redef]
-                except ModuleNotFoundError:
-                    tomllib = None  # type: ignore[assignment]
-            if tomllib is not None:
-                try:
-                    data = tomllib.loads(cargo_toml.read_text())
-                    lib_path = data.get("lib", {}).get("path")
-                    if lib_path:
-                        candidate = (root / lib_path).parent
-                        if candidate.is_dir():
-                            return str(candidate)
-                except (OSError, ValueError, TypeError, AttributeError):
-                    logger.debug(
-                        "Cargo.toml source-root detection failed", exc_info=True,
-                    )
-        src_dir = root / "src"
-        if src_dir.is_dir():
-            return str(src_dir)
-
-    elif language == "typescript":
-        # TypeScript: check tsconfig.json for rootDir/baseUrl
-        tsconfig = root / "tsconfig.json"
-        if tsconfig.is_file():
-            try:
-                import json
-                import re as _re
-                raw = tsconfig.read_text()
-                # Strip JSONC features: // comments, /* */ comments, trailing commas
-                raw = _re.sub(r'//[^\n]*', '', raw)
-                raw = _re.sub(r'/\*.*?\*/', '', raw, flags=_re.DOTALL)
-                raw = _re.sub(r',\s*([}\]])', r'\1', raw)
-                data = json.loads(raw)
-                root_dir = data.get("compilerOptions", {}).get("rootDir")
-                if root_dir:
-                    candidate = root / root_dir
-                    if candidate.is_dir():
-                        return str(candidate)
-                base_url = data.get("compilerOptions", {}).get("baseUrl")
-                if base_url and base_url != ".":
-                    candidate = root / base_url
-                    if candidate.is_dir():
-                        return str(candidate)
-            except (OSError, ValueError, TypeError, AttributeError):
-                logger.debug(
-                    "tsconfig.json source-root detection failed", exc_info=True,
-                )
-        src_dir = root / "src"
-        if src_dir.is_dir():
-            return str(src_dir)
-
-    else:
-        # Generic heuristic for other languages: src/ exists
-        src_dir = root / "src"
-        if src_dir.is_dir():
-            return str(src_dir)
-
-    return str(root)
+    return str(find_source_root(project_root, language))
 
 
 def _normalize_module_qn(module: str) -> str:
@@ -509,46 +337,10 @@ def _normalize_module_qn(module: str) -> str:
 
 
 def _file_to_module(file_path: str, project_path: str | None) -> str:
-    """Convert file path to module name.
+    """Compatibility wrapper for the dependency-neutral module resolver."""
+    from emend.project_config import module_name_for_file
 
-    Detects ``src/`` layout automatically so that
-    ``src/pkg/mod.py`` becomes ``pkg.mod`` rather than ``src.pkg.mod``.
-    Uses the language-specific separator from config.toml.
-
-    Rust special cases:
-    - ``src/lib.rs`` → ``lib`` (the crate root; caller may map to ``crate``)
-    - ``src/foo/mod.rs`` → ``foo`` (mod.rs represents its parent directory)
-    """
-    from emend.language_registry import detect_language, get_module_separator
-    language = detect_language(file_path) or "python"
-    sep = get_module_separator(language)
-
-    abs_file = Path(file_path).resolve()
-    proj_root = Path(project_path or _find_project_root(file_path)).resolve()
-    source_root = Path(_find_source_root(str(proj_root), language=language))
-
-    # Use the source root if the file lives under it; otherwise fall
-    # back to the project root (e.g. for test files outside src/).
-    try:
-        rel_path = abs_file.relative_to(source_root)
-    except ValueError:
-        rel_path = abs_file.relative_to(proj_root)
-
-    stem = rel_path.stem
-    dir_parts = list(rel_path.parts[:-1])
-
-    # Rust: ``mod.rs`` represents the module named after its parent directory.
-    # E.g.  src/foo/mod.rs → module "foo".
-    # Python: ``__init__.py`` represents the package (parent directory).
-    # E.g.  pkg/__init__.py → module "pkg", not "pkg.__init__".
-    if language == "rust" and stem == "mod" and dir_parts:
-        module_parts = dir_parts  # drop the "mod" stem, use parent dir as name
-    elif stem == "__init__" and dir_parts:
-        module_parts = dir_parts  # drop __init__, package is the directory
-    else:
-        module_parts = dir_parts + [stem]
-
-    return sep.join(module_parts) if module_parts else stem
+    return module_name_for_file(file_path, project_path)
 
 
 # Non-dot directories to skip.  All directories starting with '.' are
@@ -639,7 +431,11 @@ def visit_project_ts(
                 content.encode(), usedforsecurity=False
             ).digest()
             from .index import _get_cached_qnames
-            cached_qns = _get_cached_qnames(content_hash)
+            cached_qns = _get_cached_qnames(
+                content_hash,
+                file_path=str(py_file),
+                project_root=project_root,
+            )
             if cached_qns is not None:
                 if not target_qnames.intersection(cached_qns):
                     continue

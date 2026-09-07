@@ -20,7 +20,7 @@ from textwrap import dedent
 
 import pytest
 
-from emend.transform import warm_caches, _get_facts_db, _cache_db_dir, _compute_duplicate_payloads
+from emend.transform import warm_caches, _cache_db_dir, _compute_duplicate_payloads
 
 
 # ---------------------------------------------------------------------------

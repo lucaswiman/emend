@@ -747,11 +747,9 @@ class TestCliUnreachable:
             b["start_line"] > 0 or b["end_line"] > 0 for b in blocks
         ), result.output
 
-    def test_unreachable_scopes_same_basename_by_relative_path(self, tmp_path, monkeypatch):
+    def test_unreachable_scopes_same_basename_by_relative_path(self, tmp_path):
         from typer.testing import CliRunner
         from emend.cli import app
-        from emend.fact_graph import CfgBlockFact, SourceLocFact
-        import emend.transform
 
         project = tmp_path / "project"
         project.mkdir()
@@ -764,29 +762,12 @@ class TestCliUnreachable:
         (project / "right" / "mod.py").write_text(
             "\n\n\n\n\ndef f(x):\n    return 1\n    print('right')\n"
         )
-        requested_roots = []
-
-        def fake_graph(path):
-            requested_roots.append(path)
-            return type("Graph", (), {
-                "unreachable_blocks_datalog": lambda _self, func_qn=None: [
-                    CfgBlockFact("left/mod.py", "left.mod.f", 2, False, False),
-                    CfgBlockFact("right/mod.py", "right.mod.f", 2, False, False),
-                ],
-                "source_locs": lambda _self, loc_kind=None: [
-                    SourceLocFact("left/mod.py", "block", "left.mod.f:2", 3, end_line=3),
-                    SourceLocFact("right/mod.py", "block", "right.mod.f:2", 8, end_line=8),
-                ],
-            })()
-
-        monkeypatch.setattr(emend.transform, "_get_or_build_fact_graph", fake_graph)
 
         result = CliRunner().invoke(
             app, ["analyze", "cfg", str(project), "--unreachable", "--format", "json"]
         )
         assert result.exit_code == 0, result.output
         data = {entry["file"]: entry for entry in json.loads(result.output)}
-        assert requested_roots == [str(project)]
         assert set(data) == {"left/mod.py", "right/mod.py"}
         assert data["left/mod.py"]["unreachable_blocks"][0]["start_line"] < 6
         assert data["right/mod.py"]["unreachable_blocks"][0]["start_line"] >= 8
