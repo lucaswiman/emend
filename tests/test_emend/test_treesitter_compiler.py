@@ -1,52 +1,35 @@
-"""Tests for the universal Tree-sitter-based pattern compiler."""
+"""The shared compiler must produce executable patterns in every language."""
 import pytest
-from emend.language_plugins import TreeSitterPatternCompiler
 
-def test_python_compile_call():
-    compiler = TreeSitterPatternCompiler("python")
-    ir = compiler.compile("print($X)")
-    assert ir is not None
-    assert ir["type"] == "call"
-    assert ir["func"]["type"] == "name"
-    assert ir["func"]["value"] == "print"
-    assert ir["args"][0]["value"]["type"] == "metavar"
-    assert ir["args"][0]["value"]["name"] == "X"
+from emend.transform import find_pattern
 
-def test_python_compile_assign():
-    compiler = TreeSitterPatternCompiler("python")
-    ir = compiler.compile("x = $V")
-    assert ir is not None
-    assert ir["type"] == "assign"
-    assert ir["target"]["value"] == "x"
-    assert ir["value"]["type"] == "metavar"
-    assert ir["value"]["name"] == "V"
 
-def test_python_compile_import():
-    compiler = TreeSitterPatternCompiler("python")
-    ir = compiler.compile("import $M")
-    assert ir is not None
-    assert ir["type"] == "import"
-    assert ir["names"][0]["name"] == "M"
+@pytest.mark.parametrize("extension, source", [
+    ("py", "func(1)\nfunc(2, 3)\nother(4)\n"),
+    ("ts", "func(1);\nfunc(2, 3);\nother(4);\n"),
+    ("rs", "fn main() { func(1); func(2, 3); other(4); }"),
+])
+@pytest.mark.parametrize("pattern, captures", [
+    ("func($X)", [{"X": "1"}]),
+    ("func($_)", [{}]),
+    ("func($...ARGS)", [{"ARGS": "1"}, {"ARGS": "2, 3"}]),
+])
+def test_shared_compiler_matching(tmp_path, extension, source, pattern, captures):
+    path = tmp_path / f"sample.{extension}"
+    path.write_text(source)
+    assert [match.captures for match in find_pattern(pattern, str(path))] == captures
 
-def test_typescript_compile_call():
-    compiler = TreeSitterPatternCompiler("typescript")
-    ir = compiler.compile("console.log($X)")
-    assert ir is not None
-    assert ir["type"] == "call"
-    assert ir["func"]["type"] == "attr"
-    assert ir["func"]["attr"] == "log"
-    assert ir["args"][0]["value"]["name"] == "X"
 
-def test_anonymous_metavar():
-    compiler = TreeSitterPatternCompiler("python")
-    ir = compiler.compile("func($_)")
-    assert ir is not None
-    assert ir["args"][0]["value"]["type"] == "any_expr"
-
-def test_ellipsis_capture():
-    compiler = TreeSitterPatternCompiler("python")
-    ir = compiler.compile("func($...ARGS)")
-    assert ir is not None
-    assert ir["args"][0]["type"] == "ellipsis"
-    assert ir["args"][0]["name"] == "ARGS"
-    assert ir["exact_args"] is False
+@pytest.mark.parametrize("extension, pattern, source, captures", [
+    ("py", "x = $V", "x = 1\ny = 2\n", {"V": "1"}),
+    ("py", "import $M", "import pathlib\nx = 1\n", {"M": "pathlib"}),
+    ("py", "from __future__ import $X", "from __future__ import annotations\nfrom typing import Any\n", {"X": "annotations"}),
+    ("ts", "console.log($X)", "console.log(1); console.warn(2);", {"X": "1"}),
+    ("rs", "Vec::new()", "fn main() { Vec::new(); Vec::empty(); Map::new(); }", {}),
+    ("rs", "$X.parse::<i32>()",
+     "fn main() { text.parse::<i32>(); text.parse::<u32>(); text.into::<i32>(); }", {"X": "text"}),
+])
+def test_shared_compiler_statements(tmp_path, extension, pattern, source, captures):
+    path = tmp_path / f"sample.{extension}"
+    path.write_text(source)
+    assert [match.captures for match in find_pattern(pattern, str(path))] == [captures]

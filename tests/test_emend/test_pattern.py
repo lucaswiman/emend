@@ -33,6 +33,12 @@ class TestPatternParsing:
 class TestCompilePattern:
     """Tests for compile_pattern_to_rust_ir() function."""
 
+    @pytest.mark.parametrize("pattern", ["f($X) blah", "return $X nonsense", "[x for x in]", "f("])
+    def test_reject_malformed_pattern(self, pattern):
+        from emend.pattern import compile_pattern_to_rust_ir
+
+        assert compile_pattern_to_rust_ir(pattern) is None
+
     def test_compile_simple_call(self):
         """Compile a simple function call pattern."""
         from emend.pattern import compile_pattern_to_rust_ir

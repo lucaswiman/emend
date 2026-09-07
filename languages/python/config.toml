@@ -156,6 +156,7 @@ target = "name"
 [imports]
 import_statement = "import_statement"
 import_from = "import_from_statement"
+fixed_modules = { future_import_statement = "__future__" }
 module_field = "module_name"
 name_field = "name"
 alias_field = "alias"

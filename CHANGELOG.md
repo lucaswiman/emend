@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Unified pattern compilation on tree-sitter, removing the Python AST compiler
+  while preserving partial headers, definition globs, and metavariable captures.
+- Corrected exception-handler captures for patterns such as `except $E as $ERR:`.
+- Moved the remaining Python import extraction to the Rust tree-sitter backend.
+
 ## 0.5.0 (2026-09-01)
 
 ### Upgrade notes

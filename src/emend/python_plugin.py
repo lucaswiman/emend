@@ -17,7 +17,7 @@ from emend.language_plugins import (
     CommentHandler,
     ImportHandler,
     LanguagePlugin,
-    PatternCompiler,
+    TreeSitterPatternCompiler,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,53 +35,16 @@ def _get_structured_imports(source: str) -> list[dict]:
     Each dict has keys: module, level, names, start_byte, end_byte,
     start_line, end_line, is_plain.
 
-    The Rust scope resolver deliberately omits ``from __future__ import ...``
-    statements (they are not runtime dependencies).  This helper re-inserts
-    them by scanning for lines that begin with ``from __future__`` so that
-    import position detection remains correct for files that use
-    ``from __future__ import annotations`` or similar.
-
     Returns an empty list on failure or if there are no imports.
     """
     from emend import emend_core
 
     try:
         resolver = emend_core.PyScopeResolver(".", "py")
-        structured = resolver.collect_structured_imports_from_source(source, "py") or []
+        return resolver.collect_structured_imports_from_source(source, "py")
     except Exception:
         logger.debug("Structured import collection failed", exc_info=True)
         return []
-
-    # Re-add __future__ imports that the Rust resolver omits.
-    lines = source.splitlines(keepends=True)
-    future_entries: list[dict] = []
-    for lineno_0idx, line in enumerate(lines):
-        stripped = line.lstrip()
-        if stripped.startswith("from __future__"):
-            # Compute byte offsets for this line
-            start_byte = len("".join(lines[:lineno_0idx]).encode("utf-8"))
-            line_text = line.rstrip("\n")
-            end_byte = start_byte + len(line_text.encode("utf-8"))
-            future_entries.append({
-                "module": "__future__",
-                "level": 0,
-                "names": [],
-                "start_byte": start_byte,
-                "end_byte": end_byte,
-                "start_line": lineno_0idx,  # 0-indexed, matching StructuredImport
-                "end_line": lineno_0idx,     # 0-indexed, matching StructuredImport
-                "is_plain": False,
-            })
-
-    if not future_entries:
-        return structured
-
-    # Merge __future__ entries (they come first) with the resolver results,
-    # sorted by start_line to preserve document order.
-    merged = future_entries + structured
-    merged.sort(key=lambda d: d["start_line"])
-    return merged
-
 
 class PythonImportHandler(ImportHandler):
     """Import handler for Python source files."""
@@ -352,19 +315,10 @@ class PythonCommentHandler(CommentHandler):
         return None
 
 
-class PythonPatternCompiler(PatternCompiler):
-    """Pattern compiler for Python, delegating to ``_compile_python_pattern_to_rust_ir``."""
-
-    def compile(self, pattern_str: str) -> dict | None:
-        from emend.pattern import _compile_python_pattern_to_rust_ir
-
-        return _compile_python_pattern_to_rust_ir(pattern_str)
-
-
 def create_python_plugin() -> LanguagePlugin:
     """Return a fully-wired ``LanguagePlugin`` for Python."""
     return LanguagePlugin(
         import_handler=PythonImportHandler(),
         comment_handler=PythonCommentHandler(),
-        pattern_compiler=PythonPatternCompiler(),
+        pattern_compiler=TreeSitterPatternCompiler("python"),
     )

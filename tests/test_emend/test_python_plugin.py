@@ -13,7 +13,6 @@ from emend.language_plugins import (
 from emend.python_plugin import (
     PythonCommentHandler,
     PythonImportHandler,
-    PythonPatternCompiler,
     create_python_plugin,
 )
 
@@ -46,10 +45,7 @@ x = 1
 def test_python_import_handler_extract_imports():
     handler = PythonImportHandler()
     result = handler.extract_imports(SOURCE_WITH_IMPORTS)
-    assert "import os" in result
-    assert "import sys" in result
-    assert "from pathlib import Path" in result
-    assert "x = 1" not in result
+    assert result == SOURCE_WITH_IMPORTS.split("\n\n", 1)[0] + "\n"
 
 
 def test_python_import_handler_extract_imports_empty():
@@ -291,19 +287,6 @@ def test_python_plugin_does_not_import_ast():
 
 
 # ---------------------------------------------------------------------------
-# PythonPatternCompiler
-# ---------------------------------------------------------------------------
-
-def test_python_pattern_compiler():
-    from emend.pattern import compile_pattern_to_rust_ir
-    compiler = PythonPatternCompiler()
-    pattern_str = "foo($X)"
-    direct = compile_pattern_to_rust_ir(pattern_str)
-    via_plugin = compiler.compile(pattern_str)
-    assert direct == via_plugin
-
-
-# ---------------------------------------------------------------------------
 # load_plugin
 # ---------------------------------------------------------------------------
 
@@ -312,7 +295,8 @@ def test_load_plugin_python_returns_correct_types():
     assert isinstance(plugin, LanguagePlugin)
     assert isinstance(plugin.import_handler, PythonImportHandler)
     assert isinstance(plugin.comment_handler, PythonCommentHandler)
-    assert isinstance(plugin.pattern_compiler, PythonPatternCompiler)
+    assert isinstance(plugin.pattern_compiler, TreeSitterPatternCompiler)
+    assert plugin.pattern_compiler.language == "python"
 
 
 def test_load_plugin_other_returns_stubs():

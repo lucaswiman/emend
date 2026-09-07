@@ -3357,86 +3357,23 @@ def _find_containing_block(
 
 
 def _extract_imports_python(file_path: str, content: str) -> list[ImportFact]:
-    """Extract imports from Python source using tree-sitter via ``emend_core``.
+    """Extract imports from Python source using tree-sitter via ``emend_core``."""
+    from emend import emend_core
 
-    Falls back to ``stdlib ast`` when the Rust extension is unavailable (e.g.
-    during development without a compiled extension).
-    """
+    resolver = getattr(_extract_imports_python, "_resolver", None)
+    if resolver is None:
+        resolver = emend_core.PyScopeResolver(".", extension="py")
+        _extract_imports_python._resolver = resolver
     facts: list[ImportFact] = []
-    structured = None
-    try:
-        from emend import emend_core as ec  # type: ignore[attr-defined]
-        resolver = getattr(_extract_imports_python, "_resolver", None)
-        if resolver is None:
-            resolver = ec.PyScopeResolver(".", extension="py")
-            _extract_imports_python._resolver = resolver  # type: ignore[attr-defined]
-        structured = resolver.collect_structured_imports_from_source(content, ext="py")
-    except Exception:
-        logger.debug(
-            "emend_core structured import extraction failed for %s, falling back to ast.parse",
-            file_path,
-            exc_info=True,
-        )
-
-    if structured is not None:
-        for imp in structured:
-            # StructuredImport start_line is 0-indexed; ImportFact.line is
-            # 1-indexed like every other fact kind.
-            line: int = imp["start_line"] + 1
-            if imp["is_plain"]:
-                # ``import X`` or ``import X as Y`` — module is in names
-                for name, alias in imp["names"]:
-                    facts.append(ImportFact(
-                        importing_file=file_path,
-                        imported_module=name,
-                        imported_name=None,
-                        alias=alias,
-                        line=line,
-                    ))
-            else:
-                # ``from M import X`` — module field + names
-                level: int = imp["level"]
-                raw_module: str = imp["module"]
-                # Reconstruct leading dots for relative imports so that
-                # callers can distinguish absolute from relative paths.
-                module: str = ("." * level) + raw_module if level else raw_module
-                for name, alias in imp["names"]:
-                    facts.append(ImportFact(
-                        importing_file=file_path,
-                        imported_module=module,
-                        imported_name=name,
-                        alias=alias,
-                        line=line,
-                    ))
-        return facts
-
-    # Fallback: stdlib ast (Python only, but always available)
-    import ast as stdlib_ast
-    try:
-        tree = stdlib_ast.parse(content, filename=file_path)
-    except (SyntaxError, ValueError, RecursionError):
-        logger.debug("ast.parse failed for %s", file_path, exc_info=True)
-        return facts
-    for node in stdlib_ast.walk(tree):
-        if isinstance(node, stdlib_ast.Import):
-            for alias in node.names:
-                facts.append(ImportFact(
-                    importing_file=file_path,
-                    imported_module=alias.name,
-                    imported_name=None,
-                    alias=alias.asname,
-                    line=node.lineno,
-                ))
-        elif isinstance(node, stdlib_ast.ImportFrom):
-            module = node.module or ""
-            for alias in node.names:
-                facts.append(ImportFact(
-                    importing_file=file_path,
-                    imported_module=module,
-                    imported_name=alias.name,
-                    alias=alias.asname,
-                    line=node.lineno,
-                ))
+    for imp in resolver.collect_structured_imports_from_source(content, ext="py"):
+        for name, alias in imp["names"]:
+            facts.append(ImportFact(
+                importing_file=file_path,
+                imported_module=name if imp["is_plain"] else "." * imp["level"] + imp["module"],
+                imported_name=None if imp["is_plain"] else name,
+                alias=alias,
+                line=imp["start_line"] + 1,
+            ))
     return facts
 
 
@@ -3524,7 +3461,7 @@ def _extract_imports_rust(file_path: str, content: str) -> list[ImportFact]:
 def _extract_imports(file_path: str, content: str) -> list[ImportFact]:
     """Extract import facts from *content*, dispatching by language.
 
-    - Python files: tree-sitter via ``emend_core`` (falls back to ``ast.parse``)
+    - Python files: tree-sitter via ``emend_core``
     - TypeScript / JavaScript files: tree-sitter via ``PyScopeResolver``
     - Rust files: tree-sitter via ``emend_core`` (``collect_rust_imports_from_source``)
     - All others: treated as Python (best-effort)
