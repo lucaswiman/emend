@@ -128,7 +128,9 @@ def config_identity(language: str) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _parse_toml_extensions(path: Path) -> tuple[str, list[str]] | None:
+def _parse_toml_extensions(
+    payload: bytes, label: str
+) -> tuple[str, list[str]] | None:
     """Return (language_name, [extensions]) from a config.toml, or None on error."""
     if sys.version_info >= (3, 11):
         import tomllib
@@ -138,11 +140,10 @@ def _parse_toml_extensions(path: Path) -> tuple[str, list[str]] | None:
         except ImportError:
             return None
     try:
-        with open(path, "rb") as fh:
-            data = tomllib.load(fh)
-    except (OSError, ValueError):
+        data = tomllib.loads(payload.decode())
+    except (UnicodeError, ValueError):
         # TOMLDecodeError subclasses ValueError in both tomllib and tomli.
-        logger.debug("Could not parse %s", path, exc_info=True)
+        logger.debug("Could not parse %s", label, exc_info=True)
         return None
 
     lang = data.get("language", {})
@@ -153,11 +154,33 @@ def _parse_toml_extensions(path: Path) -> tuple[str, list[str]] | None:
     return None
 
 
-@lru_cache(maxsize=1)
-def _registry() -> tuple[dict[str, str], dict[str, list[str]]]:
+def _registry_inputs() -> tuple[tuple[str, str, bytes], ...]:
+    """Capture the exact language configurations used by one registry view."""
+    inputs: list[tuple[str, str, bytes]] = []
+    lang_dir = _find_languages_dir()
+    if lang_dir:
+        for path in sorted(lang_dir.glob("*/config.toml")):
+            try:
+                inputs.append(("builtin", str(path), path.read_bytes()))
+            except OSError:
+                pass
+    for name, directory in sorted(_discover_entry_point_languages().items()):
+        path = directory / "config.toml"
+        try:
+            inputs.append(("plugin", name, path.read_bytes()))
+        except OSError:
+            pass
+    return tuple(inputs)
+
+
+@lru_cache(maxsize=8)
+def _build_registry(
+    inputs: tuple[tuple[str, str, bytes], ...],
+) -> tuple[dict[str, str], dict[str, list[str]]]:
     """Return ``(ext_to_lang, lang_to_exts)`` built from TOML configs + builtins.
 
-    Results are cached for the lifetime of the process.
+    Results are content-addressed so live configuration edits cannot leave a
+    stale extension map behind.
     """
     ext_to_lang: dict[str, str] = {}
     lang_to_exts: dict[str, list[str]] = {}
@@ -167,22 +190,12 @@ def _registry() -> tuple[dict[str, str], dict[str, list[str]]]:
         for extension in extensions:
             ext_to_lang.setdefault(extension.lower(), name)
 
-    lang_dir = _find_languages_dir()
-    if lang_dir:
-        for config_path in sorted(lang_dir.glob("*/config.toml")):
-            result = _parse_toml_extensions(config_path)
-            if result:
-                name, exts = result
-                register(name, exts)
-
-    # Discover languages from installed entry-point plugins.
-    # These are loaded AFTER built-in languages so they cannot override them.
-    for lang_name, config_dir in _discover_entry_point_languages().items():
-        if lang_name in lang_to_exts:
-            continue  # built-in takes precedence
-        result = _parse_toml_extensions(config_dir / "config.toml")
+    for source, label, payload in inputs:
+        result = _parse_toml_extensions(payload, label)
         if result:
             name, exts = result
+            if source == "plugin" and name in lang_to_exts:
+                continue
             register(name, exts)
 
     # Fill in any gaps from hardcoded builtins
@@ -195,11 +208,20 @@ def _registry() -> tuple[dict[str, str], dict[str, list[str]]]:
     return ext_to_lang, lang_to_exts
 
 
+def registry_snapshot() -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Return one immutable-by-convention, exact registry revision."""
+    return _build_registry(_registry_inputs())
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def detect_language(path: str | Path) -> str | None:
+def detect_language(
+    path: str | Path,
+    *,
+    registry: tuple[dict[str, str], dict[str, list[str]]] | None = None,
+) -> str | None:
     """Return the language name for *path* based on its extension, or ``None``.
 
     Examples::
@@ -211,7 +233,7 @@ def detect_language(path: str | Path) -> str | None:
     ext = Path(path).suffix.lstrip(".").lower()
     if not ext:
         return None
-    ext_to_lang, _ = _registry()
+    ext_to_lang, _ = registry or registry_snapshot()
     return ext_to_lang.get(ext)
 
 
@@ -226,13 +248,13 @@ def get_extensions(language: str) -> list[str]:
         get_extensions("typescript")   # ["ts", "tsx", "js", "jsx"]
         get_extensions("cobol")        # []
     """
-    _, lang_to_exts = _registry()
+    _, lang_to_exts = registry_snapshot()
     return lang_to_exts.get(language, []) or _BUILTIN.get(language, [])
 
 
 def get_all_languages() -> list[str]:
     """Return all registered language names."""
-    _, lang_to_exts = _registry()
+    _, lang_to_exts = registry_snapshot()
     return list(lang_to_exts.keys())
 
 

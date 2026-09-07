@@ -207,11 +207,18 @@ class AnalysisStore:
             analysis_context_id=context_id,
         )
 
-    def _module_name(self, file_path: str, _language: str) -> str:
+    def _module_name(
+        self, file_path: str, language: str, module_separator: str | None = None
+    ) -> str:
         """Return the canonical module identity used by selectors and facts."""
         from emend.project_config import module_name_for_file
 
-        return module_name_for_file(file_path, self.project_root)
+        return module_name_for_file(
+            file_path,
+            self.project_root,
+            language=language,
+            module_separator=module_separator,
+        )
 
     def _load_observed_files(self) -> None:
         """Load the durable stat-to-content identities once per process."""
@@ -264,7 +271,11 @@ class AnalysisStore:
     def _scan_disk(self) -> _DiskScan:
         """Read the current source inventory, hashing only stat changes."""
         from emend.file_collection import collect_all_source_files
-        from emend.language_registry import detect_language, get_all_languages
+        from emend.language_registry import (
+            detect_language,
+            get_module_separator,
+            registry_snapshot,
+        )
         from emend.project_config import find_source_root
 
         self._load_observed_files()
@@ -273,10 +284,14 @@ class AnalysisStore:
         # absorb all per-file module-name lookups below.
         find_source_root.cache_clear()
         previous = self._observed_files
+        registry = registry_snapshot()
+        module_separators = {
+            language: get_module_separator(language) for language in registry[1]
+        }
         files = sorted(
             str(Path(path).resolve())
             for path in collect_all_source_files(
-                str(self.project_root), languages=get_all_languages()
+                str(self.project_root), languages=list(registry[1]), registry=registry
             )
         )
         contents: dict[str, str] = {}
@@ -289,8 +304,10 @@ class AnalysisStore:
             except OSError:
                 continue
             old = previous.get(file_path)
-            language = detect_language(file_path) or "python"
-            module_name = self._module_name(file_path, language)
+            language = detect_language(file_path, registry=registry) or "python"
+            module_name = self._module_name(
+                file_path, language, module_separators.get(language)
+            )
             identity = (
                 stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
                 getattr(stat, "st_ctime_ns", int(stat.st_ctime * 1_000_000_000)),
@@ -469,6 +486,7 @@ class AnalysisStore:
                     str(self.project_root),
                     revision.module_name,
                     resolver,
+                    revision.language,
                 )
                 result.append(ExtractedFile(
                     revision=revision,
@@ -1110,6 +1128,21 @@ class AnalysisStore:
                 digest.update(path.read_bytes())
             except OSError:
                 digest.update(b"<missing>")
+        from emend.project_config import load_typescript_config
+
+        try:
+            _options, _origins, inherited_configs = load_typescript_config(
+                self.project_root
+            )
+        except (OSError, ValueError, TypeError, AttributeError):
+            inherited_configs = ()
+        for path in inherited_configs:
+            digest.update(str(path).encode())
+            digest.update(b"\0")
+            try:
+                digest.update(path.read_bytes())
+            except OSError:
+                digest.update(b"<missing>")
         return digest.hexdigest()
 
     def type_file_identity(
@@ -1162,18 +1195,23 @@ class AnalysisStore:
             }.values())
             return matches[0] if len(matches) == 1 else None
 
-        from emend.project_config import load_jsonc
+        from emend.project_config import load_typescript_config
 
         try:
-            compiler_options = load_jsonc(
-                self.project_root / "tsconfig.json"
-            ).get("compilerOptions", {})
+            compiler_options, option_origins, _sources = load_typescript_config(
+                self.project_root
+            )
         except (OSError, ValueError, TypeError, AttributeError):
             compiler_options = {}
-        ts_base = (
-            self.project_root / compiler_options.get("baseUrl", ".")
-        ).resolve()
+            option_origins = {}
+        base_origin = option_origins.get(
+            "baseUrl", option_origins.get("paths", self.project_root)
+        )
+        base_url = compiler_options.get("baseUrl", ".")
+        ts_base = (base_origin / (base_url if isinstance(base_url, str) else ".")).resolve()
         ts_paths = compiler_options.get("paths", {})
+        if not isinstance(ts_paths, dict):
+            ts_paths = {}
 
         def typescript_aliases(name: str) -> list[Path]:
             aliases: list[Path] = []

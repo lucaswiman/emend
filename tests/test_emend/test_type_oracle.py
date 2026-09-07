@@ -756,7 +756,18 @@ class TestFileTypeCache:
         config.write_text("[tool.pyright]\ntypeCheckingMode = 'basic'\n")
 
         class FakeLsp:
-            calls = 0
+            instances = []
+
+            def __init__(self, *_args):
+                self.calls = 0
+                self.stopped = False
+                self.instances.append(self)
+
+            def start(self):
+                return True
+
+            def stop(self):
+                self.stopped = True
 
             def did_open(self, *_args, **_kwargs):
                 pass
@@ -768,9 +779,8 @@ class TestFileTypeCache:
                 self.calls += 1
                 return "```python\n(variable) value: int\n```"
 
-        lsp = FakeLsp()
+        monkeypatch.setattr("emend.type_oracle.LSPClient", FakeLsp)
         adapter = PyrightAdapter(pyright_path="pyright", db_path=None)
-        monkeypatch.setattr(adapter, "_get_lsp", lambda _root: lsp)
         adapter.infer_file(source, tmp_path)
         config.write_text("[tool.pyright]\ntypeCheckingMode = 'strict'\n")
         adapter.infer_file(source, tmp_path)
@@ -778,7 +788,9 @@ class TestFileTypeCache:
             "emend.type_oracle._type_engine_context", lambda *_args: "new-engine"
         )
         adapter.infer_file(source, tmp_path)
-        assert lsp.calls == 3
+        assert len(FakeLsp.instances) == 3
+        assert [lsp.calls for lsp in FakeLsp.instances] == [1, 1, 1]
+        assert [lsp.stopped for lsp in FakeLsp.instances] == [True, True, False]
 
 
 # ---------------------------------------------------------------------------

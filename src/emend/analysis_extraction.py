@@ -300,7 +300,9 @@ def _extract_imports_rust(file_path: str, content: str) -> list[ImportFact]:
     return facts
 
 
-def _extract_imports(file_path: str, content: str) -> list[ImportFact]:
+def _extract_imports(
+    file_path: str, content: str, language: str | None = None
+) -> list[ImportFact]:
     """Extract import facts from *content*, dispatching by language.
 
     - Python files: tree-sitter via ``emend_core``
@@ -309,7 +311,7 @@ def _extract_imports(file_path: str, content: str) -> list[ImportFact]:
     - All others: treated as Python (best-effort)
     """
     from emend.language_registry import detect_language
-    lang = detect_language(file_path)
+    lang = language or detect_language(file_path)
     if lang == "typescript":
         return _extract_imports_typescript(file_path, content)
     elif lang == "rust":
@@ -465,6 +467,7 @@ def _extract_file_facts(
     project_root: str,
     module_name: str,
     scope_resolver=None,
+    language: str | None = None,
 ) -> ExtractedFile:
     """Extract all analysis facts for a single file.
 
@@ -514,7 +517,7 @@ def _extract_file_facts(
     # ``__all__``; keep it in the canonical facts as well as the legacy
     # search index so consumers such as safe-delete see the same boundary.
     from emend.language_registry import detect_language as _detect_lang_eff
-    _lang_eff = _detect_lang_eff(abs_path) or "python"
+    _lang_eff = language or _detect_lang_eff(abs_path) or "python"
     from emend.language_registry import detect_exported_names as _detect_exports_eff
     exported_names = _detect_exports_eff(content, _lang_eff)
     if exported_names:
@@ -524,7 +527,7 @@ def _extract_file_facts(
             if sf.parent is None and sf.name in exported_names:
                 result["exported_qns"].append([rel_path, sf.qualified_name])
 
-    imports = _extract_imports(rel_path, content)
+    imports = _extract_imports(rel_path, content, _lang_eff)
     relative_bindings: dict[str, str] = {}
     if ext == "py":
         from importlib.util import resolve_name

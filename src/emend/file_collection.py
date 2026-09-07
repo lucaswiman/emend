@@ -80,6 +80,8 @@ def detect_project_languages(project_root: str) -> list[str]:
 def collect_all_source_files(
     root_path: str,
     languages: list[str] | None = None,
+    *,
+    registry: tuple[dict[str, str], dict[str, list[str]]] | None = None,
 ) -> list[str]:
     """Collect source files for all detected (or specified) languages.
 
@@ -90,12 +92,14 @@ def collect_all_source_files(
     if languages is None:
         languages = detect_project_languages(root_path)
     from emend import emend_core as _rust
-    from emend.language_registry import get_extensions
+    from emend.language_registry import registry_snapshot
 
+    registry = registry or registry_snapshot()
+    language_extensions = registry[1]
     extensions = sorted({
         extension
         for language in languages
-        for extension in get_extensions(language)
+        for extension in language_extensions.get(language, ())
     })
     return _rust.collect_files(root_path, extensions) if extensions else []
 

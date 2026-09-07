@@ -81,13 +81,23 @@ def test_get_extensions_typescript():
 def test_load_config_tracks_exact_file_revision(tmp_path, monkeypatch):
     import emend.language_registry as registry
 
-    config = tmp_path / "config.toml"
-    monkeypatch.setattr(registry, "_config_path", lambda _language: config)
+    config = tmp_path / "scratch" / "config.toml"
+    config.parent.mkdir()
+    monkeypatch.setattr(registry, "_find_languages_dir", lambda: tmp_path)
     registry.load_config.cache_clear()
-    config.write_text('[qualified_names]\nmodule_separator = "."\n')
+    config.write_text(
+        '[language]\nname = "scratch"\nfile_extensions = ["one"]\n'
+        '[qualified_names]\nmodule_separator = "."\n'
+    )
     assert registry.load_config("scratch")["qualified_names"]["module_separator"] == "."
-    config.write_text('[qualified_names]\nmodule_separator = "::"\n')
+    assert registry.get_extensions("scratch") == ["one"]
+    config.write_text(
+        '[language]\nname = "scratch"\nfile_extensions = ["two"]\n'
+        '[qualified_names]\nmodule_separator = "::"\n'
+    )
     assert registry.load_config("scratch")["qualified_names"]["module_separator"] == "::"
+    assert registry.get_extensions("scratch") == ["two"]
+    assert registry.detect_language("file.two") == "scratch"
 
 
 def test_get_extensions_unknown():

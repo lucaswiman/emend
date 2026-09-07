@@ -344,13 +344,21 @@ def test_type_identity_resolves_relative_typescript_dependency(tmp_path, specifi
     assert store.type_file_identity(target) != initial
 
 
-def test_type_identity_resolves_typescript_path_alias(tmp_path):
+@pytest.mark.parametrize("inherited", [False, True])
+def test_type_identity_resolves_typescript_path_alias(tmp_path, inherited):
     from emend.analysis_store import AnalysisStore
 
-    (tmp_path / "tsconfig.json").write_text(
-        '{\n// aliases\n"compilerOptions": '
+    options = (
+        '{\n"$schema": "https://example.com/a//schema.json",\n// aliases\n'
+        '"compilerOptions": '
         '{"baseUrl": ".", "paths": {"@lib/*": ["lib/*"]},},\n}\n'
     )
+    config = tmp_path / ("tsconfig.base.json" if inherited else "tsconfig.json")
+    config.write_text(options)
+    if inherited:
+        (tmp_path / "tsconfig.json").write_text(
+            '{"extends": "./tsconfig.base.json"}\n'
+        )
     (tmp_path / "lib").mkdir()
     dependency = tmp_path / "lib" / "dep.ts"
     target = tmp_path / "app.ts"

@@ -24,11 +24,120 @@ logger = logging.getLogger(__name__)
 def load_jsonc(path: Path) -> dict[str, Any]:
     """Load a JSON-with-comments configuration file."""
     import json
-    import re
 
     raw = path.read_text()
-    raw = re.sub(r"//[^\n]*|/\*.*?\*/", "", raw, flags=re.DOTALL)
-    return json.loads(re.sub(r",\s*([}\]])", r"\1", raw))
+    cleaned: list[str] = []
+    index = 0
+    quoted = escaped = False
+    while index < len(raw):
+        char = raw[index]
+        if quoted:
+            cleaned.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            index += 1
+        elif char == '"':
+            quoted = True
+            cleaned.append(char)
+            index += 1
+        elif raw.startswith("//", index):
+            index = raw.find("\n", index)
+            if index < 0:
+                break
+        elif raw.startswith("/*", index):
+            end = raw.find("*/", index + 2)
+            if end < 0:
+                raise ValueError(f"unterminated JSONC comment in {path}")
+            cleaned.extend("\n" for char in raw[index:end + 2] if char == "\n")
+            index = end + 2
+        else:
+            cleaned.append(char)
+            index += 1
+
+    raw = "".join(cleaned)
+    quoted = escaped = False
+    commas: set[int] = set()
+    for index, char in enumerate(raw):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char == ",":
+            commas.add(index)
+    trailing: set[int] = set()
+    next_significant = ""
+    for index in range(len(raw) - 1, -1, -1):
+        char = raw[index]
+        if index in commas and next_significant and next_significant in "}]":
+            trailing.add(index)
+        elif not char.isspace():
+            next_significant = char
+    return json.loads("".join(
+        char for index, char in enumerate(raw) if index not in trailing
+    ))
+
+
+def load_typescript_config(
+    project_root: str | Path,
+) -> tuple[dict[str, Any], dict[str, Path], tuple[Path, ...]]:
+    """Load an inherited tsconfig and retain each option's defining directory."""
+    root = Path(project_root).resolve()
+    seen: set[Path] = set()
+
+    def resolve(specifier: str, current: Path) -> Path | None:
+        base = current.parent / specifier
+        candidates = [base, base.with_suffix(base.suffix + ".json")]
+        if not specifier.startswith(".") and not Path(specifier).is_absolute():
+            candidates.extend(
+                candidate / "node_modules" / specifier
+                for candidate in (current.parent, *current.parents)
+            )
+        for candidate in candidates:
+            if candidate.is_dir():
+                candidate = candidate / "tsconfig.json"
+            if candidate.is_file():
+                return candidate.resolve()
+            json_candidate = candidate.with_suffix(candidate.suffix + ".json")
+            if json_candidate.is_file():
+                return json_candidate.resolve()
+        return None
+
+    def load(path: Path) -> tuple[dict[str, Any], dict[str, Path], list[Path]]:
+        path = path.resolve()
+        if path in seen or not path.is_file():
+            return {}, {}, []
+        seen.add(path)
+        data = load_jsonc(path)
+        options: dict[str, Any] = {}
+        origins: dict[str, Path] = {}
+        sources: list[Path] = []
+        parents = data.get("extends", [])
+        if isinstance(parents, str):
+            parents = [parents]
+        for parent in parents if isinstance(parents, list) else []:
+            parent_path = resolve(str(parent), path)
+            if parent_path is not None:
+                inherited, inherited_origins, inherited_sources = load(parent_path)
+                options.update(inherited)
+                origins.update(inherited_origins)
+                sources.extend(inherited_sources)
+        current = data.get("compilerOptions", {})
+        if isinstance(current, dict):
+            options.update(current)
+            origins.update({key: path.parent for key in current})
+        return options, origins, [*sources, path]
+
+    options, origins, sources = load(root / "tsconfig.json")
+    return options, origins, tuple(dict.fromkeys(sources))
 
 
 def find_project_root(start: str | Path = ".") -> Path:
@@ -109,13 +218,15 @@ def find_source_root(project_root: str, language: str = "python") -> Path:
         tsconfig = root / "tsconfig.json"
         if tsconfig.is_file():
             try:
-                compiler = load_jsonc(tsconfig).get("compilerOptions", {})
+                compiler, origins, _sources = load_typescript_config(root)
                 root_dir = compiler.get("rootDir")
-                if root_dir and (root / root_dir).is_dir():
-                    return (root / root_dir).resolve()
+                root_base = origins.get("rootDir", root)
+                if root_dir and (root_base / root_dir).is_dir():
+                    return (root_base / root_dir).resolve()
                 base_url = compiler.get("baseUrl")
-                if base_url and base_url != "." and (root / base_url).is_dir():
-                    return (root / base_url).resolve()
+                base_base = origins.get("baseUrl", root)
+                if base_url and base_url != "." and (base_base / base_url).is_dir():
+                    return (base_base / base_url).resolve()
             except (OSError, ValueError, TypeError, AttributeError):
                 logger.debug("tsconfig source-root detection failed", exc_info=True)
         if (root / "src").is_dir():
@@ -128,13 +239,16 @@ def find_source_root(project_root: str, language: str = "python") -> Path:
 def module_name_for_file(
     file_path: str | Path,
     project_root: str | Path | None = None,
+    *,
+    language: str | None = None,
+    module_separator: str | None = None,
 ) -> str:
     """Return the canonical import/module identity for one source file."""
     from emend.language_registry import detect_language, get_module_separator
 
     path = Path(file_path).resolve()
     root = Path(project_root).resolve() if project_root else find_project_root(path)
-    language = detect_language(path) or "python"
+    language = language or detect_language(path) or "python"
     source_root = find_source_root(str(root), language)
     try:
         relative = path.relative_to(source_root)
@@ -147,7 +261,8 @@ def module_name_for_file(
         if directories and (stem == "__init__" or language == "rust" and stem == "mod")
         else [*directories, stem]
     )
-    return get_module_separator(language).join(module_parts) if module_parts else stem
+    separator = module_separator or get_module_separator(language)
+    return separator.join(module_parts) if module_parts else stem
 
 
 @dataclass

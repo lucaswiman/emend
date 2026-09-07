@@ -494,7 +494,13 @@ class TypeOracle(ABC):
             )
         elif not separator:
             return
-        cache.namespace = f"{_type_shared_context(project_root)}|{engine_context}"
+        refreshed = f"{_type_shared_context(project_root)}|{engine_context}"
+        if refreshed != namespace:
+            cache.namespace = refreshed
+            self._cache_context_changed()
+
+    def _cache_context_changed(self) -> None:
+        """Adopt a new analyzer/config context; stateless adapters do nothing."""
 
     def _current_file_key(
         self, path: Path, project_root: Path | None = None
@@ -1560,6 +1566,15 @@ class _LSPTypeOracle(TypeOracle):
                 if not self._lsp.start():
                     self._lsp = None
             return self._lsp
+
+    def _cache_context_changed(self) -> None:
+        """Restart stateful analyzers so cache and live semantics stay aligned."""
+        with self._lsp_lock:
+            if self._lsp:
+                self._lsp.stop()
+            self._lsp = None
+            self._open_documents.clear()
+            self._known_project_paths = None
 
     def _sync_documents(
         self, lsp: LSPClient, sources: dict[str, str], project_paths: set[str]
