@@ -1162,7 +1162,9 @@ class AnalysisStore:
 
     def _type_dependency_state(self, graph):
         """Resolve local import edges in one immutable graph generation."""
-        from emend.language_registry import get_extensions
+        from emend.language_registry import registry_snapshot
+
+        _, language_extensions = registry_snapshot()
 
         revisions = {revision.file_path: revision for revision in graph.snapshot.files}
         module_to_revision = {
@@ -1234,7 +1236,7 @@ class AnalysisStore:
             return aliases
 
         def source_candidates(base: Path, language: str) -> list[Path]:
-            extensions = get_extensions(language)
+            extensions = language_extensions.get(language, ())
             candidates = [base]
             candidates.extend(base.with_suffix(f".{ext}") for ext in extensions)
             if not base.suffix:
