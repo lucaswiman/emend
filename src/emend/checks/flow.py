@@ -297,8 +297,10 @@ def _pattern_spans(
 
 def _choose_event(
     events: list["FlowEventFact"], span: _PatternSpan, purpose: str,
+    capture_range: tuple[int, int] | None = None,
 ) -> "FlowEventFact | None":
-    ranges = [(cap[1], cap[2]) for cap in span.captures if cap[0] != "_"]
+    ranges = ([capture_range] if capture_range is not None else
+              [(cap[1], cap[2]) for cap in span.captures if cap[0] != "_"])
     if purpose in {"sink", "sanitizer", "source_capture"} and ranges:
         candidates = [event for event in events if any(
             event.start_byte >= start and event.end_byte <= end for start, end in ranges
@@ -343,12 +345,25 @@ def _resolve_endpoints(
             match_cache[key] = spans
     for span in spans:
         actual = str(Path(span.file_path).resolve())
-        event = _choose_event(events_by_actual.get(actual, []), span, purpose)
-        if event is not None:
-            captured_value = next((capture[7] for capture in span.captures
-                                   if capture[0] != "_"), "")
+        captures = [capture for capture in span.captures if capture[0] != "_"]
+        targets = captures if purpose in {"sink", "sanitizer"} and captures else [None]
+        seen_nodes: set[tuple[str, int]] = set()
+        for capture in targets:
+            event = _choose_event(
+                events_by_actual.get(actual, []), span, purpose,
+                (capture[1], capture[2]) if capture is not None else None,
+            )
+            if event is None:
+                continue
+            node = (actual_to_stored.get(actual, event.file_path), event.event_id)
+            if node in seen_nodes:
+                continue
+            seen_nodes.add(node)
+            captured_value = capture[7] if capture is not None else next(
+                (item[7] for item in captures), "",
+            )
             matches.append(_EndpointMatch(
-                (actual_to_stored.get(actual, event.file_path), event.event_id), span,
+                node, span,
                 event.access_path or event.var or captured_value or span.text,
             ))
     return matches
@@ -770,7 +785,10 @@ def evaluate_compiled_flow(
     inferred_root = os.path.commonpath(actual_paths)
     if len(actual_paths) == 1 or Path(inferred_root).is_file():
         inferred_root = str(Path(actual_paths[0]).parent)
-    project_root = str(Path(project_path or inferred_root).resolve())
+    root_path = Path(project_path or inferred_root).resolve()
+    if root_path.is_file():
+        root_path = root_path.parent
+    project_root = str(root_path)
     if graph is None:
         from emend.analysis_store import AnalysisStore
         needs_types = any(
@@ -787,12 +805,11 @@ def evaluate_compiled_flow(
             store = AnalysisStore.open(project_root)
         project_root = str(store.project_root)
         graph = store.query_facts(include_types=needs_types)
-
-    snapshot_paths = {revision.file_path for revision in graph.snapshot.files}
-    actual_paths = [path for path in actual_paths
-                    if path in snapshot_paths or path in overrides]
-    if not actual_paths:
-        return []
+        snapshot_paths = {revision.file_path for revision in graph.snapshot.files}
+        actual_paths = [path for path in actual_paths
+                        if path in snapshot_paths or path in overrides]
+        if not actual_paths:
+            return []
 
     actual_to_stored = {path: graph.stored_path(path) for path in actual_paths}
     stored_to_actual = {stored: actual for actual, stored in actual_to_stored.items()}

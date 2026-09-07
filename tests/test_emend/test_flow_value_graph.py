@@ -176,6 +176,39 @@ def test_sanitizer_byte_order_is_significant(tmp_path, source, reports):
     assert bool(_run(tmp_path, source, config)) is reports
 
 
+@pytest.mark.parametrize(
+    ("first", "second", "reports"),
+    [
+        ("source()", "0", True),
+        ("0", "source()", True),
+        ("source()", "source()", True),
+        ("0", "0", False),
+    ],
+)
+def test_each_sink_capture_is_an_independent_endpoint(
+    tmp_path, first, second, reports,
+):
+    config = _config(sink="sink($X, $Y)")
+    source = f"def f():\n    sink({first}, {second})\n"
+    violations = _run(tmp_path, source, config)
+
+    assert bool(violations) is reports
+
+
+def test_sanitizer_first_capture_is_resolved_independently(tmp_path):
+    config = _config(
+        sanitizers=[FlowSanitizer("clean_pair($X, $Y)", "value")],
+    )
+    source = (
+        "def f():\n"
+        "    x = source()\n"
+        "    clean_pair(x, 0)\n"
+        "    sink(x)\n"
+    )
+
+    assert not _run(tmp_path, source, config)
+
+
 def test_sanitizer_quantifier_all_paths_and_some_path(tmp_path):
     source = (
         "def f():\n"
