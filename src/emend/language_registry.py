@@ -299,8 +299,6 @@ def load_config(language: str) -> dict:
 @lru_cache(maxsize=32)
 def _load_config(language: str, _identity: str, config_path: Path | None) -> dict:
     """Parse one exact config revision, reusing unchanged revisions."""
-    import sys
-
     if config_path is None:
         return {}
 

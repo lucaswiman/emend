@@ -1,7 +1,7 @@
 //! Tree-sitter-based pattern matching for Python code.
 
 use crate::Match;
-use tree_sitter::{Parser, Node, Tree};
+use tree_sitter::{Node, Parser, Tree};
 
 /// Get a thread-local parser for a specific language.
 fn get_parser(lang_name: &str) -> Parser {
@@ -24,69 +24,29 @@ fn get_parser(lang_name: &str) -> Parser {
     parser
 }
 
-/// Parse Python source into a tree-sitter Tree.
+/// Parse source into a tree-sitter Tree using the named language grammar.
+fn parse(source: &str, lang_name: &str) -> Option<Tree> {
+    get_parser(lang_name).parse(source.as_bytes(), None)
+}
+
 pub(crate) fn parse_python(source: &str) -> Option<Tree> {
-    let mut parser = get_parser("python");
-    parser.parse(source.as_bytes(), None)
-}
-
-/// Parse TypeScript/TSX source into a tree-sitter Tree.
-pub(crate) fn parse_typescript(source: &str, is_tsx: bool) -> Option<Tree> {
-    let mut parser = if is_tsx { get_parser("tsx") } else { get_parser("typescript") };
-    parser.parse(source.as_bytes(), None)
-}
-
-/// Parse Rust source into a tree-sitter Tree.
-pub(crate) fn parse_rust(source: &str) -> Option<Tree> {
-    let mut parser = get_parser("rust");
-    parser.parse(source.as_bytes(), None)
-}
-
-/// Parse HTML source into a tree-sitter Tree.
-pub(crate) fn parse_html(source: &str) -> Option<Tree> {
-    let mut parser = get_parser("html");
-    parser.parse(source.as_bytes(), None)
-}
-
-/// Parse CSS source into a tree-sitter Tree.
-pub(crate) fn parse_css(source: &str) -> Option<Tree> {
-    let mut parser = get_parser("css");
-    parser.parse(source.as_bytes(), None)
-}
-
-/// Parse SQL source into a tree-sitter Tree.
-pub(crate) fn parse_sql(source: &str) -> Option<Tree> {
-    let mut parser = get_parser("sql");
-    parser.parse(source.as_bytes(), None)
-}
-
-/// Parse Jinja2 source into a tree-sitter Tree.
-pub(crate) fn parse_jinja2(source: &str) -> Option<Tree> {
-    let mut parser = get_parser("jinja2");
-    parser.parse(source.as_bytes(), None)
-}
-
-/// Parse Datalog (Soufflé) source into a tree-sitter Tree.
-pub(crate) fn parse_datalog(source: &str) -> Option<Tree> {
-    let mut parser = get_parser("datalog");
-    parser.parse(source.as_bytes(), None)
+    parse(source, "python")
 }
 
 /// Parse source based on file extension.
 pub(crate) fn parse_by_extension(source: &str, ext: &str) -> Option<Tree> {
-    match ext {
-        "py" | "pyi" => parse_python(source),
-        "ts" => parse_typescript(source, false),
-        "tsx" => parse_typescript(source, true),
-        "js" | "jsx" => parse_typescript(source, false), // JS uses TS grammar
-        "rs" => parse_rust(source),
-        "html" | "htm" => parse_html(source),
-        "css" => parse_css(source),
-        "sql" => parse_sql(source),
-        "jinja" | "jinja2" | "j2" => parse_jinja2(source),
-        "dl" | "datalog" => parse_datalog(source),
-        _ => parse_python(source),
-    }
+    let language = match ext {
+        "ts" | "js" | "jsx" => "typescript", // JS uses TS grammar
+        "tsx" => "tsx",
+        "rs" => "rust",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "sql" => "sql",
+        "jinja" | "jinja2" | "j2" => "jinja2",
+        "dl" | "datalog" => "datalog",
+        _ => "python",
+    };
+    parse(source, language)
 }
 
 /// Find all `identifier` nodes in the tree that match `target_name`.
@@ -99,7 +59,7 @@ pub fn find_identifiers(source: &str, target_name: &str, file_path: &str) -> Vec
     let mut matches = Vec::new();
     let source_bytes = source.as_bytes();
 
-    walk_tree(tree.root_node(), source_bytes, &mut |node| {
+    walk_tree(tree.root_node(), &mut |node| {
         if node.kind() == "identifier" {
             let text = &source_bytes[node.start_byte()..node.end_byte()];
             if text == target_name.as_bytes() {
@@ -130,7 +90,7 @@ pub fn find_calls(source: &str, target_name: &str, file_path: &str) -> Vec<Match
     let mut matches = Vec::new();
     let source_bytes = source.as_bytes();
 
-    walk_tree(tree.root_node(), source_bytes, &mut |node| {
+    walk_tree(tree.root_node(), &mut |node| {
         if node.kind() == "call" {
             if let Some(func_node) = node.child_by_field_name("function") {
                 let is_match = match func_node.kind() {
@@ -187,7 +147,7 @@ pub fn find_method_calls(source: &str, method_name: &str, file_path: &str) -> Ve
     let mut matches = Vec::new();
     let source_bytes = source.as_bytes();
 
-    walk_tree(tree.root_node(), source_bytes, &mut |node| {
+    walk_tree(tree.root_node(), &mut |node| {
         if node.kind() == "call" {
             if let Some(func_node) = node.child_by_field_name("function") {
                 if func_node.kind() == "attribute" {
@@ -230,7 +190,7 @@ pub fn extract_import_modules(source: &str) -> Vec<String> {
     let mut modules = Vec::new();
     let source_bytes = source.as_bytes();
 
-    walk_tree(tree.root_node(), source_bytes, &mut |node| {
+    walk_tree(tree.root_node(), &mut |node| {
         match node.kind() {
             // `import foo.bar` or `import foo.bar as baz`
             "import_statement" => {
@@ -332,7 +292,7 @@ pub fn extract_call_sites(
     let source_bytes = source.as_bytes();
     let mut results = Vec::new();
 
-    walk_tree(tree.root_node(), source_bytes, &mut |node| {
+    walk_tree(tree.root_node(), &mut |node| {
         if node.kind() != call_node_type {
             return;
         }
@@ -441,7 +401,7 @@ pub fn collect_callees_from_source(source: &str) -> Vec<(String, Vec<String>)> {
                 let mut callees: Vec<String> = Vec::new();
                 let mut seen = std::collections::HashSet::new();
 
-                walk_tree(node, source_bytes, &mut |n| {
+                walk_tree(node, &mut |n| {
                     if n.kind() == "call" {
                         if let Some(func_node) = n.child_by_field_name("function") {
                             let callee_name = match func_node.kind() {
@@ -479,7 +439,7 @@ pub fn collect_callees_from_source(source: &str) -> Vec<(String, Vec<String>)> {
 }
 
 /// Walk all nodes in a tree-sitter tree, calling `f` on each node.
-fn walk_tree<F>(node: Node, source: &[u8], f: &mut F)
+fn walk_tree<F>(node: Node, f: &mut F)
 where
     F: FnMut(Node),
 {
@@ -487,7 +447,7 @@ where
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
         loop {
-            walk_tree(cursor.node(), source, f);
+            walk_tree(cursor.node(), f);
             if !cursor.goto_next_sibling() {
                 break;
             }

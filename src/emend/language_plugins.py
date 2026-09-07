@@ -449,7 +449,6 @@ class DocCommentHandler(RegexCommentHandler):
         self, source: str
     ) -> list[tuple[int, int, str]]:
         """Return ``(start_byte, end_byte, text)`` for all doc comments."""
-        encoded = source.encode("utf-8")
         results: list[tuple[int, int, str]] = []
 
         if self._doc_style == "block":

@@ -85,6 +85,34 @@ _KIND_KEYWORD = {
 }
 
 
+def _line_suffix(sym: TreeSymbol) -> str:
+    """Format a symbol's optional source location."""
+    if not sym.line:
+        return ""
+    if sym.end_line and sym.line != sym.end_line:
+        return f"  [L{sym.line}-L{sym.end_line}]"
+    return f"  [L{sym.line}]"
+
+
+def _format_symbol(sym: TreeSymbol, display_name: str, *, include_variables: bool) -> str | None:
+    """Format one symbol, returning ``None`` for omitted flat-mode entries."""
+    keyword = _KIND_KEYWORD.get(sym.kind, sym.kind[:3])
+    suffix = _line_suffix(sym)
+    if sym.kind in ("function", "async_function", "method", "async_method"):
+        signature = sym.signature or "()"
+        if not signature.startswith("("):
+            signature = f"({signature})"
+        return f"{keyword} {display_name}{signature}{suffix}"
+    if sym.kind == "class":
+        return f"{keyword} {display_name}{suffix}"
+    if include_variables and sym.kind == "variable":
+        annotation = f": {sym.type_annotation}" if sym.type_annotation else ""
+        return f"{keyword} {display_name}{annotation}{suffix}"
+    if include_variables and sym.kind == "reference":
+        return f"{keyword} {display_name}"
+    return None
+
+
 def _print_symbol_tree(symbols: list[TreeSymbol], indent: int = 0, max_depth: int | None = None, current_display_depth: int = 1):
     """Print symbols in tree format with full Python keywords.
 
@@ -96,28 +124,9 @@ def _print_symbol_tree(symbols: list[TreeSymbol], indent: int = 0, max_depth: in
 
     for sym in symbols:
         prefix = "  " * indent
-        kind_keyword = _KIND_KEYWORD.get(sym.kind, sym.kind[:3])
-
-        if sym.line and sym.end_line and sym.line != sym.end_line:
-            line_suffix = f"  [L{sym.line}-L{sym.end_line}]"
-        elif sym.line:
-            line_suffix = f"  [L{sym.line}]"
-        else:
-            line_suffix = ""
-
-        if sym.kind in ("function", "async_function", "method", "async_method"):
-            # Ensure signature starts with (
-            sig = sym.signature or "()"
-            if not sig.startswith("("):
-                sig = f"({sig})"
-            print(f"{prefix}{kind_keyword} {sym.name}{sig}{line_suffix}")
-        elif sym.kind == "class":
-            print(f"{prefix}{kind_keyword} {sym.name}{line_suffix}")
-        elif sym.kind == "variable":
-            ann = f": {sym.type_annotation}" if sym.type_annotation else ""
-            print(f"{prefix}{kind_keyword} {sym.name}{ann}{line_suffix}")
-        elif sym.kind == "reference":
-            print(f"{prefix}{kind_keyword} {sym.name}")
+        formatted = _format_symbol(sym, sym.name, include_variables=True)
+        if formatted:
+            print(prefix + formatted)
 
         if sym.children:
             _print_symbol_tree(sym.children, indent + 1, max_depth, current_display_depth + 1)
@@ -130,24 +139,9 @@ def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = "", max_dep
 
     for sym in symbols:
         full_path = f"{parent_path}{separator}{sym.name}" if parent_path else sym.name
-        kind_keyword = _KIND_KEYWORD.get(sym.kind, sym.kind[:3])
-
-        if sym.line and sym.end_line and sym.line != sym.end_line:
-            line_suffix = f"  [L{sym.line}-L{sym.end_line}]"
-        elif sym.line:
-            line_suffix = f"  [L{sym.line}]"
-        else:
-            line_suffix = ""
-
-        if sym.kind in ("function", "async_function", "method", "async_method"):
-            # Ensure signature starts with (
-            sig = sym.signature or "()"
-            if not sig.startswith("("):
-                sig = f"({sig})"
-            print(f"{kind_keyword} {full_path}{sig}{line_suffix}")
-        elif sym.kind == "class":
-            print(f"{kind_keyword} {full_path}{line_suffix}")
-        # Skip variables and references in flat mode
+        formatted = _format_symbol(sym, full_path, include_variables=False)
+        if formatted:
+            print(formatted)
 
         _print_symbol_flat(sym.children, full_path, max_depth, current_display_depth + 1, separator=separator)
 
