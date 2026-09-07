@@ -302,7 +302,8 @@ def test_deadcode_config_can_disable_new_defaults(tmp_path):
     assert data == []
 
 
-def test_trace_analysis_interprocedural_includes_engine(tmp_path):
+@pytest.fixture
+def trace_target(tmp_path):
     p = tmp_path / "example.py"
     p.write_text(
         "def run_query(cursor, query):\n"
@@ -312,33 +313,22 @@ def test_trace_analysis_interprocedural_includes_engine(tmp_path):
         "    name = request.args.get('name')\n"
         "    run_query(cursor, name)\n"
     )
-
-    result = trace_analysis(
-        path=str(p),
-        from_pattern="request.args.get($X)",
-        to_pattern="cursor.execute($Q)",
-        interprocedural=True,
-    )
-    data = json.loads(result)
-
-    assert data["violations"]
-    assert all(v["engine"] == "occurrence" for v in data["violations"])
+    return p
 
 
-def test_analyze_trace_mode_interprocedural_includes_engine(tmp_path):
-    p = tmp_path / "example.py"
-    p.write_text(
-        "def run_query(cursor, query):\n"
-        "    cursor.execute(query)\n"
-        "\n"
-        "def handle_request(request, cursor):\n"
-        "    name = request.args.get('name')\n"
-        "    run_query(cursor, name)\n"
-    )
-
-    result = analyze(
-        mode="trace",
-        path=str(p),
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        pytest.param(lambda path, **kwargs: trace_analysis(path=path, **kwargs), id="focused"),
+        pytest.param(
+            lambda path, **kwargs: analyze(mode="trace", path=path, **kwargs),
+            id="unified",
+        ),
+    ],
+)
+def test_trace_adapters_interprocedural_include_engine(trace_target, invoke):
+    result = invoke(
+        str(trace_target),
         from_pattern="request.args.get($X)",
         to_pattern="cursor.execute($Q)",
         interprocedural=True,
@@ -468,8 +458,7 @@ def test_trace_analysis_unknown_preset_returns_json_error(tmp_path):
     assert "nonexistent_preset_xyz" in data["error"].lower() or "unknown" in data["error"].lower()
 
 
-def test_trace_analysis_intraprocedural_no_crash(tmp_path):
-    """trace_analysis without interprocedural should not crash with TypeError."""
+def test_trace_analysis_intraprocedural_reports_exact_violation_contract(tmp_path):
     p = tmp_path / "example.py"
     p.write_text(
         "def handler(request, cursor):\n"
@@ -483,16 +472,32 @@ def test_trace_analysis_intraprocedural_no_crash(tmp_path):
         interprocedural=False,
     )
     data = json.loads(result)
-    assert isinstance(data, dict) or isinstance(data, list)
+    assert len(data) == 1
+    assert data[0]["label"] == "inline"
+    assert data[0]["engine"] == "occurrence"
+    assert data[0]["sink_pattern"] == "cursor.execute($Q)"
 
 
-def test_analyze_duplicates_uses_correct_limit(tmp_path):
-    """analyze(mode='duplicates') should not use max_depth as the limit."""
-    p = tmp_path / "example.py"
-    p.write_text("def foo():\n    pass\n")
-    result = analyze(mode="duplicates", path=str(tmp_path))
-    data = json.loads(result)
-    assert isinstance(data, dict) or isinstance(data, list)
+def test_analyze_duplicates_delegates_explicit_contract(monkeypatch, tmp_path):
+    """The unified adapter must not confuse impact depth with duplicate limit."""
+    from importlib import import_module
+
+    (tmp_path / "example.py").write_text("def foo():\n    pass\n")
+    assert json.loads(analyze(mode="duplicates", path=str(tmp_path))) == []
+
+    analyze_module = import_module("emend.mcp.analyze")
+    duplicate_query = Mock(return_value="[]")
+    monkeypatch.setattr(analyze_module, "duplicates_analysis", duplicate_query)
+
+    assert json.loads(analyze(mode="duplicates", path=str(tmp_path), max_depth=99)) == []
+    duplicate_query.assert_called_once_with(
+        path=str(tmp_path),
+        mode="all",
+        file_path=None,
+        min_lines=5,
+        min_score=0.0,
+        cross_file=True,
+    )
 
 
 def test_mcp_help():

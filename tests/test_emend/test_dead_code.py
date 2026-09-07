@@ -107,38 +107,35 @@ class TestDeadCodeWarmPath:
 
         warm_caches(project_path, type_engine="none")
 
-    def test_warm_path_finds_dead_function(self, tmp_path):
-        """Warm path should detect an unreferenced function."""
+    def _warm_dead_names(self, tmp_path, files):
+        """Build the indexed project represented by *files* and return dead names."""
         from emend.transform import find_dead_code
 
-        project = make_project_dir(tmp_path)
-        (project / "mod.py").write_text(
+        project = make_project(tmp_path, files)
+        self._build_index(str(project))
+        return {
+            item.name
+            for item in find_dead_code(str(project), show_last_reference=False)
+        }
+
+    def test_warm_path_finds_dead_function(self, tmp_path):
+        """Warm path should detect an unreferenced function."""
+        dead_names = self._warm_dead_names(tmp_path, {"mod.py": (
             "def used():\n    return 1\n\n"
             "def unused():\n    return 2\n\n"
             "x = used()\n"
-        )
-
-        self._build_index(str(project))
-        dead = list(find_dead_code(str(project), show_last_reference=False))
-        dead_names = {d.name for d in dead}
+        )})
         assert "unused" in dead_names
         assert "used" not in dead_names
 
     def test_warm_path_skips_entry_points(self, tmp_path):
         """Warm path should skip test_, describe_, and dunder functions."""
-        from emend.transform import find_dead_code
-
-        project = make_project_dir(tmp_path)
-        (project / "tests.py").write_text(
+        dead_names = self._warm_dead_names(tmp_path, {"tests.py": (
             "def test_foo():\n    pass\n\n"
             "def describe_feature():\n    pass\n\n"
             "def __init__():\n    pass\n\n"
             "def real_dead():\n    pass\n"
-        )
-
-        self._build_index(str(project))
-        dead = list(find_dead_code(str(project), show_last_reference=False))
-        dead_names = {d.name for d in dead}
+        )})
         assert "test_foo" not in dead_names
         assert "describe_feature" not in dead_names
         assert "__init__" not in dead_names
@@ -146,76 +143,50 @@ class TestDeadCodeWarmPath:
 
     def test_warm_path_respects_all_exports(self, tmp_path):
         """Warm path should exclude symbols listed in __all__."""
-        from emend.transform import find_dead_code
-
-        project = make_project_dir(tmp_path)
-        (project / "mod.py").write_text(
+        dead_names = self._warm_dead_names(tmp_path, {"mod.py": (
             "__all__ = ['exported']\n\n"
             "def exported():\n    return 1\n\n"
             "def not_exported():\n    return 2\n"
-        )
-
-        self._build_index(str(project))
-        dead = list(find_dead_code(str(project), show_last_reference=False))
-        dead_names = {d.name for d in dead}
+        )})
         assert "exported" not in dead_names
         assert "not_exported" in dead_names
 
     def test_warm_path_cross_file_reference(self, tmp_path):
         """Warm path should detect cross-file references."""
-        from emend.transform import find_dead_code
-
-        project = make_project_dir(tmp_path)
-        (project / "lib.py").write_text(
+        dead_names = self._warm_dead_names(tmp_path, {
+            "lib.py": (
             "def helper():\n    return 1\n\n"
             "def orphan():\n    return 2\n"
-        )
-        (project / "main.py").write_text(
+            ),
+            "main.py": (
             "from lib import helper\n\n"
             "x = helper()\n"
-        )
-
-        self._build_index(str(project))
-        dead = list(find_dead_code(str(project), show_last_reference=False))
-        dead_names = {d.name for d in dead}
+            ),
+        })
         assert "helper" not in dead_names
         assert "orphan" in dead_names
 
     def test_warm_path_intra_file_class_instantiation(self, tmp_path):
         """Warm path: class instantiated within the same file should not be dead."""
-        from emend.transform import find_dead_code
-
-        project = make_project_dir(tmp_path)
-        (project / "mod.py").write_text(
+        dead_names = self._warm_dead_names(tmp_path, {"mod.py": (
             "class Inner:\n"
             "    def run(self): return 1\n\n"
             "class Outer:\n"
             "    def __init__(self):\n"
             "        self._inner = Inner()\n"
-        )
-
-        self._build_index(str(project))
-        dead = list(find_dead_code(str(project), show_last_reference=False))
-        dead_names = {d.name for d in dead}
+        )})
         assert "Inner" not in dead_names, "Inner is instantiated by Outer.__init__"
 
     def test_warm_path_intra_file_type_annotation(self, tmp_path):
         """Warm path: class used only in a type annotation in the same file is not dead."""
-        from emend.transform import find_dead_code
-
-        project = make_project_dir(tmp_path)
-        (project / "mod.py").write_text(
+        dead_names = self._warm_dead_names(tmp_path, {"mod.py": (
             "from __future__ import annotations\n\n"
             "class Client:\n"
             "    def connect(self): pass\n\n"
             "class Service:\n"
             "    def __init__(self):\n"
             "        self._client: Client | None = None\n"
-        )
-
-        self._build_index(str(project))
-        dead = list(find_dead_code(str(project), show_last_reference=False))
-        dead_names = {d.name for d in dead}
+        )})
         assert "Client" not in dead_names, "Client is referenced in Service type annotation"
 
     def test_partial_scan_keeps_references_from_project_root(self, tmp_path):
@@ -252,20 +223,13 @@ class TestDeadCodeWarmPath:
 
     def test_warm_path_intra_file_function_call(self, tmp_path):
         """Warm path: helper function called only within the same file is not dead."""
-        from emend.transform import find_dead_code
-
-        project = make_project_dir(tmp_path)
-        (project / "mod.py").write_text(
+        dead_names = self._warm_dead_names(tmp_path, {"mod.py": (
             "def normalize(s: str) -> str:\n"
             "    return s.strip().lower()\n\n"
             "class Processor:\n"
             "    def process(self, val: str) -> str:\n"
             "        return normalize(val)\n"
-        )
-
-        self._build_index(str(project))
-        dead = list(find_dead_code(str(project), show_last_reference=False))
-        dead_names = {d.name for d in dead}
+        )})
         assert "normalize" not in dead_names, "normalize is called by Processor.process"
 
     def test_index_materializes_noncall_private_member_references(self, tmp_path):

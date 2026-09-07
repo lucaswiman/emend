@@ -2341,99 +2341,75 @@ class TestEllipsisMatching:
 class TestTypeConstraints:
     """Tests for type constraint matching ($X:int, $X:str, etc.)."""
 
-    def test_int_constraint_matches_integers(self, tmp_path):
-        """Type constraint $N:int matches only integer literals."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
-            "range(10)\n"
-            "range(n)\n"
-            "range(5)\n"
-        )
-
-        from emend.transform import find_pattern
-        matches = find_pattern("range($N:int)", str(test_file))
-        assert len(matches) == 2  # Only the two integer literals
-
-    def test_str_constraint_matches_strings(self, tmp_path):
-        """Type constraint $MSG:str matches only string literals."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
-            "print('hello')\n"
-            "print(msg)\n"
-            "print(\"world\")\n"
-        )
-
-        from emend.transform import find_pattern
-        matches = find_pattern("print($MSG:str)", str(test_file))
-        assert len(matches) == 2  # Only the two string literals
-
-    def test_identifier_constraint_matches_names(self, tmp_path):
-        """Type constraint $X:identifier matches only names/identifiers."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
-            "print(x)\n"
-            "print(42)\n"
-            "print(y)\n"
-        )
-
-        from emend.transform import find_pattern
-        matches = find_pattern("print($X:identifier)", str(test_file))
-        assert len(matches) == 2  # Only the two identifiers x and y
-
-    def test_mixed_type_constraints(self, tmp_path):
-        """Multiple type constraints in one pattern."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
-            "assertEqual(x, 5)\n"
-            "assertEqual('hello', 'world')\n"
-            "assertEqual(y, 10)\n"
-        )
-
-        from emend.transform import find_pattern
-        matches = find_pattern("assertEqual($X:identifier, $N:int)", str(test_file))
-        assert len(matches) == 2  # x, 5 and y, 10
-
-    def test_float_constraint_matches_floats(self, tmp_path):
-        """Type constraint $N:float matches only float literals."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
-            "value = 3.14\n"
-            "other = 42\n"
-            "pi = 3.14159\n"
-            "msg = 'hello'\n"
-        )
-
-        from emend.transform import find_pattern
-        matches = find_pattern("$X = $N:float", str(test_file))
-        assert len(matches) == 2  # Only the two float literals
-
-    def test_call_constraint_matches_calls(self, tmp_path):
-        """Type constraint $X:call matches only function calls."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
-            "result = func()\n"
-            "other = x\n"
-            "value = process(data)\n"
-            "number = 42\n"
-        )
-
-        from emend.transform import find_pattern
-        matches = find_pattern("$NAME = $X:call", str(test_file))
-        assert len(matches) == 2  # Only the two function calls
-
-    def test_attr_constraint_matches_attributes(self, tmp_path):
-        """Type constraint $X:attr matches only attribute access."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text(
-            "result = obj.attr\n"
-            "other = x\n"
-            "value = instance.method\n"
-            "call = func()\n"
-        )
-
-        from emend.transform import find_pattern
-        matches = find_pattern("$NAME = $X:attr", str(test_file))
-        assert len(matches) == 2  # Only the two attribute accesses
+    @pytest.mark.parametrize(
+        ("source", "pattern", "expected_matches"),
+        [
+            pytest.param(
+                "range(10)\n"
+                "range(n)\n"
+                "range(5)\n",
+                "range($N:int)",
+                ["range(10)", "range(5)"],
+                id="integer-literals",
+            ),
+            pytest.param(
+                "print('hello')\n"
+                "print(msg)\n"
+                'print("world")\n',
+                "print($MSG:str)",
+                ["print('hello')", 'print("world")'],
+                id="string-literals",
+            ),
+            pytest.param(
+                "print(x)\n"
+                "print(42)\n"
+                "print(y)\n",
+                "print($X:identifier)",
+                ["print(x)", "print(y)"],
+                id="identifiers",
+            ),
+            pytest.param(
+                "assertEqual(x, 5)\n"
+                "assertEqual('hello', 'world')\n"
+                "assertEqual(y, 10)\n",
+                "assertEqual($X:identifier, $N:int)",
+                ["assertEqual(x, 5)", "assertEqual(y, 10)"],
+                id="mixed-constraints",
+            ),
+            pytest.param(
+                "value = 3.14\n"
+                "other = 42\n"
+                "pi = 3.14159\n"
+                "msg = 'hello'\n",
+                "$X = $N:float",
+                ["value = 3.14", "pi = 3.14159"],
+                id="float-literals",
+            ),
+            pytest.param(
+                "result = func()\n"
+                "other = x\n"
+                "value = process(data)\n"
+                "number = 42\n",
+                "$NAME = $X:call",
+                ["result = func()", "value = process(data)"],
+                id="calls",
+            ),
+            pytest.param(
+                "result = obj.attr\n"
+                "other = x\n"
+                "value = instance.method\n"
+                "call = func()\n",
+                "$NAME = $X:attr",
+                ["result = obj.attr", "value = instance.method"],
+                id="attributes",
+            ),
+        ],
+    )
+    def test_expression_constraint_matches_only_requested_node_kind(
+        self, tmp_path, source, pattern, expected_matches
+    ):
+        matches = assert_find(tmp_path, source, pattern, len(expected_matches))
+        assert [match.node_text for match in matches] == expected_matches
 
     def test_stmt_constraint_matches_statements(self, tmp_path):
         """Type constraint $X:stmt matches statement-level nodes."""
@@ -2613,101 +2589,22 @@ class TestFindPattern:
 class TestContentInterpolation:
     """Tests for ${NAME.content} string interpolation in replace patterns."""
 
-    def test_content_basic_double_quotes(self, tmp_path):
-        """${X.content} strips double quotes from a captured SimpleString."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text('x = wrap("hello")\n')
-
-        diff, count = replace_pattern(
-            "wrap($X:str)", '"unwrapped: ${X.content}"', str(test_file), apply=True
-        )
-        assert count == 1
-        content = test_file.read_text()
-        assert content.strip() == 'x = "unwrapped: hello"'
-
-    def test_content_single_quotes(self, tmp_path):
-        """${X.content} strips single quotes from a captured SimpleString."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text("x = wrap('hello')\n")
-
-        diff, count = replace_pattern(
-            "wrap($X:str)", '"unwrapped: ${X.content}"', str(test_file), apply=True
-        )
-        assert count == 1
-        content = test_file.read_text()
-        assert content.strip() == 'x = "unwrapped: hello"'
-
-    def test_content_union_to_pipe_string_first(self, tmp_path):
-        """Union['MyClass', int] -> 'MyClass | int' with ${X.content}."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text('x: Union["MyClass", int]\n')
-
-        diff, count = replace_pattern(
-            "Union[$X:str, $Y]",
-            '"${X.content} | $Y"',
-            str(test_file),
-            apply=True,
-        )
-        assert count == 1
-        content = test_file.read_text()
-        assert content.strip() == 'x: "MyClass | int"'
-
-    def test_content_union_to_pipe_string_second(self, tmp_path):
-        """Union[int, 'MyClass'] -> 'int | MyClass' with ${Y.content}."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text('x: Union[int, "MyClass"]\n')
-
-        diff, count = replace_pattern(
-            "Union[$X, $Y:str]",
-            '"$X | ${Y.content}"',
-            str(test_file),
-            apply=True,
-        )
-        assert count == 1
-        content = test_file.read_text()
-        assert content.strip() == 'x: "int | MyClass"'
-
-    def test_content_both_strings(self, tmp_path):
-        """Union['Foo', 'Bar'] -> 'Foo | Bar' using ${.content} on both."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text('x: Union["Foo", "Bar"]\n')
-
-        diff, count = replace_pattern(
-            "Union[$X:str, $Y:str]",
-            '"${X.content} | ${Y.content}"',
-            str(test_file),
-            apply=True,
-        )
-        assert count == 1
-        content = test_file.read_text()
-        assert content.strip() == 'x: "Foo | Bar"'
-
-    def test_content_mixed_with_regular_metavar(self, tmp_path):
-        """${X.content} and $Y can coexist in one replacement."""
-        from emend.transform import replace_pattern
-
-        test_file = tmp_path / "test.py"
-        test_file.write_text('convert("name", default)\n')
-
-        diff, count = replace_pattern(
-            'convert($X:str, $Y)',
-            'convert_named("${X.content}", $Y)',
-            str(test_file),
-            apply=True,
-        )
-        assert count == 1
-        content = test_file.read_text()
-        assert content.strip() == 'convert_named("name", default)'
+    @pytest.mark.parametrize(
+        ("source", "pattern", "replacement", "expected"),
+        [
+            pytest.param('x = wrap("hello")\n', "wrap($X:str)", '"unwrapped: ${X.content}"', 'x = "unwrapped: hello"', id="double-quotes"),
+            pytest.param("x = wrap('hello')\n", "wrap($X:str)", '"unwrapped: ${X.content}"', 'x = "unwrapped: hello"', id="single-quotes"),
+            pytest.param('x: Union["MyClass", int]\n', "Union[$X:str, $Y]", '"${X.content} | $Y"', 'x: "MyClass | int"', id="string-first"),
+            pytest.param('x: Union[int, "MyClass"]\n', "Union[$X, $Y:str]", '"$X | ${Y.content}"', 'x: "int | MyClass"', id="string-second"),
+            pytest.param('x: Union["Foo", "Bar"]\n', "Union[$X:str, $Y:str]", '"${X.content} | ${Y.content}"', 'x: "Foo | Bar"', id="both-strings"),
+            pytest.param('convert("name", default)\n', 'convert($X:str, $Y)', 'convert_named("${X.content}", $Y)', 'convert_named("name", default)', id="with-regular-metavar"),
+        ],
+    )
+    def test_content_interpolation_strips_quotes(
+        self, tmp_path, source, pattern, replacement, expected
+    ):
+        content = assert_replace(tmp_path, source, pattern, replacement, 1)
+        assert content.strip() == expected
 
     def test_content_no_match_non_string(self, tmp_path):
         """${X.content} on a non-string capture leaves the reference as-is."""

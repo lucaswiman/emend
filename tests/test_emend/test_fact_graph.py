@@ -79,33 +79,25 @@ def _make_graph() -> FactGraph:
     return g
 
 
-class TestSymbolQueries:
-    def test_symbols_all(self):
-        g = _make_graph()
-        assert len(g.symbols()) == 5
+@pytest.fixture
+def query_graph():
+    graph = _make_graph()
+    yield graph
+    graph.close()
 
-    def test_symbols_by_name(self):
-        g = _make_graph()
-        results = g.symbols(name="compute")
-        assert len(results) == 1
-        assert results[0].qualified_name == "lib.compute"
 
-    def test_symbols_by_kind(self):
-        g = _make_graph()
-        funcs = g.symbols(kind="function")
-        assert len(funcs) == 3
-        classes = g.symbols(kind="class")
-        assert len(classes) == 1
-
-    def test_symbols_by_file(self):
-        g = _make_graph()
-        lib_syms = g.symbols(file_path="lib.py")
-        assert len(lib_syms) == 3
-
-    def test_symbols_multi_filter(self):
-        g = _make_graph()
-        results = g.symbols(kind="function", file_path="app.py")
-        assert len(results) == 2
+@pytest.mark.parametrize(("filters", "expected"), [
+    pytest.param({}, {"app.main", "app.helper", "lib.compute", "lib.MyClass", "lib.MyClass.method"}, id="all"),
+    pytest.param({"name": "compute"}, {"lib.compute"}, id="name"),
+    pytest.param({"kind": "function"}, {"app.main", "app.helper", "lib.compute"}, id="functions"),
+    pytest.param({"kind": "class"}, {"lib.MyClass"}, id="classes"),
+    pytest.param({"file_path": "lib.py"}, {"lib.compute", "lib.MyClass", "lib.MyClass.method"}, id="file"),
+    pytest.param({"kind": "function", "file_path": "app.py"}, {"app.main", "app.helper"}, id="combined"),
+])
+def test_symbol_query_filters(query_graph, filters, expected):
+    symbols = query_graph.symbols(**filters)
+    assert len(symbols) == len(expected)
+    assert {symbol.qualified_name for symbol in symbols} == expected
 
 
 class TestCallQueries:
@@ -150,26 +142,19 @@ class TestReferenceQueries:
         assert refs[0].ref_kind == "import"
 
 
-class TestTraceFlowQueries:
-    def test_trace_flows_all(self):
-        g = _make_graph()
-        flows = g.trace_flows()
-        assert len(flows) == 1
+@pytest.mark.parametrize("filters", [
+    pytest.param({}, id="all"),
+    pytest.param({"label": "sqli"}, id="label"),
+    pytest.param({"file_path": "app.py"}, id="file"),
+])
+def test_trace_flow_query_filters(query_graph, filters):
+    assert query_graph.trace_flows(**filters) == [
+        TraceFlowFact("user_input", "query", "sqli", "app.py", "app.main", 3, 5)
+    ]
 
-    def test_trace_flows_by_label(self):
-        g = _make_graph()
-        flows = g.trace_flows(label="sqli")
-        assert len(flows) == 1
-        assert flows[0].source_var == "user_input"
 
-    def test_trace_flows_by_file(self):
-        g = _make_graph()
-        flows = g.trace_flows(file_path="app.py")
-        assert len(flows) == 1
-
-    def test_trace_flows_no_match(self):
-        g = _make_graph()
-        assert g.trace_flows(label="nonexistent") == []
+def test_trace_flow_query_unknown_label(query_graph):
+    assert query_graph.trace_flows(label="nonexistent") == []
 
 
 class TestTypeQueries:
@@ -201,15 +186,17 @@ class TestRustImportExtraction:
             del _extract_imports_rust._resolver
         return _extract_imports_rust("test.rs", content)
 
-    def test_simple_use(self):
-        """``use std::io;`` — plain scoped import."""
-        facts = self._extract("use std::io;\n")
-        assert len(facts) == 1
-        f = facts[0]
-        assert f.imported_module == "std"
-        assert f.imported_name == "io"
-        assert f.alias is None
-        assert f.line == 1
+    @pytest.mark.parametrize(("source", "module", "name", "alias"), [
+        pytest.param("use std::io;\n", "std", "io", None, id="simple-use"),
+        pytest.param("pub use crate::foo::Bar;\n", "crate::foo", "Bar", None, id="reexport"),
+        pytest.param("use std::collections::HashMap as HM;\n", "std::collections", "HashMap", "HM", id="alias"),
+        pytest.param("use std::io::*;\n", "std::io", "*", None, id="glob"),
+        pytest.param("mod sub_module;\n", "sub_module", None, None, id="external-module"),
+        pytest.param("use super::baz as b;\n", "super", "baz", "b", id="relative-alias"),
+        pytest.param("pub(crate) use std::sync::Arc;\n", "std::sync", "Arc", None, id="crate-visibility"),
+    ])
+    def test_single_import_contract(self, source, module, name, alias):
+        assert self._extract(source) == [ImportFact("test.rs", module, name, alias, 1)]
 
     def test_nested_use_tree(self):
         """``use std::{io, fmt::{self, Display}}`` — nested use tree."""
@@ -225,60 +212,6 @@ class TestRustImportExtraction:
         # Display from std::fmt
         assert "Display" in by_name
         assert by_name["Display"].imported_module == "std::fmt"
-
-    def test_pub_use_reexport(self):
-        """``pub use crate::foo::Bar`` — re-export."""
-        facts = self._extract("pub use crate::foo::Bar;\n")
-        assert len(facts) == 1
-        f = facts[0]
-        assert f.imported_module == "crate::foo"
-        assert f.imported_name == "Bar"
-        assert f.alias is None
-
-    def test_aliased_import(self):
-        """``use std::collections::HashMap as HM`` — aliased import."""
-        facts = self._extract("use std::collections::HashMap as HM;\n")
-        assert len(facts) == 1
-        f = facts[0]
-        assert f.imported_module == "std::collections"
-        assert f.imported_name == "HashMap"
-        assert f.alias == "HM"
-
-    def test_glob_import(self):
-        """``use std::io::*;`` — wildcard/glob import."""
-        facts = self._extract("use std::io::*;\n")
-        assert len(facts) == 1
-        f = facts[0]
-        assert f.imported_module == "std::io"
-        assert f.imported_name == "*"
-        assert f.alias is None
-
-    def test_mod_declaration(self):
-        """``mod sub_module;`` — external module declaration."""
-        facts = self._extract("mod sub_module;\n")
-        assert len(facts) == 1
-        f = facts[0]
-        assert f.imported_module == "sub_module"
-        assert f.imported_name is None
-        assert f.alias is None
-        assert f.line == 1
-
-    def test_aliased_relative_import(self):
-        """``use super::baz as b;`` — aliased relative import."""
-        facts = self._extract("use super::baz as b;\n")
-        assert len(facts) == 1
-        f = facts[0]
-        assert f.imported_module == "super"
-        assert f.imported_name == "baz"
-        assert f.alias == "b"
-
-    def test_pub_crate_visibility(self):
-        """``pub(crate) use std::sync::Arc;`` — visibility modifier ignored."""
-        facts = self._extract("pub(crate) use std::sync::Arc;\n")
-        assert len(facts) == 1
-        f = facts[0]
-        assert f.imported_module == "std::sync"
-        assert f.imported_name == "Arc"
 
     def test_line_numbers(self):
         """Line numbers are correctly reported for each import."""

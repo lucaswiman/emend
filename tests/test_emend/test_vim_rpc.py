@@ -11,6 +11,7 @@ import json
 import textwrap
 import time
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -348,16 +349,18 @@ class TestIncrementalSearch:
         # Should return nearly instantly (< 1 second), not block on reindex.
         assert elapsed < 1.0
 
-    def test_reindex_async_sets_indexing_flag(self, engine):
-        """While background reindex is running, is_indexing should be True."""
+    def test_reindex_async_reports_started_index_state(self, engine, monkeypatch):
+        """The RPC response reflects both the start result and current state."""
         eng, proj = engine
-        result = _dispatch(eng, "reindex_async", {})
-        if result["started"]:
-            assert eng.is_indexing or not eng.is_indexing  # may finish instantly
-        # After waiting for completion, flag should clear.
-        if eng._index_thread:
-            eng._index_thread.join(timeout=10)
-        assert not eng.is_indexing
+        start = Mock(return_value=True)
+        monkeypatch.setattr(eng, "start_background_reindex", start)
+        eng._indexing = True
+
+        assert _dispatch(eng, "reindex_async", {}) == {
+            "started": True,
+            "indexing": True,
+        }
+        start.assert_called_once_with()
 
     def test_search_returns_indexing_field(self, engine):
         """Search results should include 'indexing' when reindexing is active."""
@@ -376,6 +379,7 @@ class TestIncrementalSearch:
         eng.start_background_reindex()
         if eng._index_thread:
             eng._index_thread.join(timeout=10)
+        assert not eng.is_indexing
         # First check should return True.
         assert eng.check_index_complete() is True
         # Second check should return False (already consumed).
