@@ -1,99 +1,118 @@
-# Large simplification options
+# Simplification options: current-stack audit
 
-Proposals only: none of these architectural replacements is implemented by
-PR #226. Estimates are physical lines, include replacement code and tests,
-and require a prototype to validate. Scopes overlap; do not add the estimates.
+Reconciled on 2026-09-07 against `2149de6` (#233), using six Luna audit
+lanes and parent review. Footprints are physical lines at that baseline,
+not assumed deletions. Estimated net savings include replacement code and
+tests; ranges overlap and must not be added. Larger changes remain proposals.
 
-| Option | Inspected footprint | Estimated net reduction |
+## Completed work, not new proposals
+
+| Earlier option | Current status |
+| --- | --- |
+| Python tree-sitter migration | #230 removed the separate Python AST compiler, retaining partial patterns. |
+| One analysis snapshot/cache owner | #231 owns freshness and shared content artifacts, including worktree/edit/revert reuse. Its correctness machinery increased LOC; this is not a future 2–4K deletion claim. |
+| One compiled rule model/flow evaluator | #232 removed competing rule/flow paths; subsequent cleanup must build on that evaluator. |
+| Behavioral-contract suites | #233 removed 922 total lines including its guide, with structural oracles and mutation checks. The original 5–8K hypothesis was not achieved. |
+
+The misc follow-up keeps small behavior-preserving changes: common native
+parser dispatch and symbol formatting, ordered config-layer merging, removal
+of unused allocations/imports, and the frozen dataclass's generated hash.
+Compatibility exports and public command aliases remain intact.
+
+## Prioritized additional refactors
+
+| Proposal | Inspected footprint | Hypothesized net reduction |
 | --- | --- | --- |
-| Behavioral-contract test suites | About 55K Python test lines | 5–8K |
-| Replace custom pattern machinery with ast-grep | 5,883 compiler/matcher source lines, at least 4,744 relevant test lines | 3–5.5K |
-| One compiled rule model and flow evaluator | About 10K source and 10K relevant test lines | 2–4K |
-| One analysis snapshot/cache owner | About 8.6K index/editor/type source lines, plus FactGraph | 2–4K |
+| One CLI/MCP command service boundary | 4,058 CLI + 1,733 MCP source lines | 400–1,000 |
+| Config-driven embedded-language extraction | 1,588 DSL source + 2,050 dedicated test lines | 700–1,300 |
+| One symbol projection for lookup/index/summary | 264 `ast_utils` + 302 `ast_commands` + 542 `query` + 1,498 `transform/index` lines | 300–750 |
+| One benchmark harness | 1,666 lines in five benchmark/support modules | 300–600 |
+| Canonical/generated user reference | 7,088 lines under `docs/` and `ideas/` | 800–1,500, documentation only |
 
-## Behavioral-contract test suites
+### 1. One command service boundary
 
-The strongest candidate for deleting more than 5K lines is repeated test
-harness code. The audit counted roughly 3,000 test definitions and 1,579
-`write_text()` calls, not 3,000 redundant behaviors. For example,
-`test_trace_typescript.py` and `test_trace_rust.py` repeatedly construct files,
-configure the same source/sink contract, execute it, and assert violations.
+`cli_find.py` and `mcp/find.py`, and the analysis/edit/check counterparts,
+repeat scope normalization, dispatch, result conversion, and error handling.
+Move shared domain operations into small typed services; keep Typer/MCP
+wrappers responsible for their different input, error and serialization
+contracts. Delete duplicate orchestration, not features. Do not introduce a
+generic command-description interpreter merely to shorten wrappers.
 
-Organize engine tests around explicit scenarios with language-specific source
-data. Exercise CLI, MCP and editor adapters for argument/output contracts,
-retaining a smaller real end-to-end set. Source fixtures still count toward
-the line total; moving inline strings into files is not a reduction.
+Prototype one search or analysis operation first. Preserve default scope,
+single/multiple files, hidden aliases, dry-run/apply, JSON fields, CLI exit
+codes and MCP schemas. Retain real end-to-end tests for both transports.
+Measure total code/tests and cold/warm invocation cost before broadening it.
 
-Before committing: inventory every semantic case and language exception;
-prove representative broken implementations still fail the consolidated
-tests. Preserve readable scenario names and precise assertions. The 5–8K
-estimate is a hypothesis about repeated harnesses, not a measured deletion.
+### 2. Embedded-language extraction
 
-## Replace the custom structural matcher
+`dsl.py` has separate SQL/Jinja/GraphQL region, symbol and link paths plus
+repeated dispatch in `analyze_file`. Standardize region/source-offset mapping
+and symbol records around configured tree-sitter queries. Keep ORM, template,
+GraphQL and regex-group linking rules explicit where their semantics differ;
+moving branches into separate plugin classes alone saves nothing.
 
-The original inspection counted 5,883 source lines across `pattern.py`,
-`rust/src/pattern.rs`, and `rust/src/matcher.rs`. Patterns now use one
-tree-sitter compiler feeding the custom IR and matcher; the separate Python
-AST compiler has been removed. The replacement estimates above predate this
-migration and need remeasurement before pursuing the larger replacement.
+First prototype two existing extraction paths. Compare exact regions, byte
+offsets, symbols and links on the existing 2,050-line test corpus, including
+Unicode, multiline/malformed literals, magic comments and standalone files.
+Benchmark project extraction. No supported language is removed, and no
+structural parser is replaced with raw-source regexes.
 
-Prototype a small emend syntax/constraint adapter over ast-grep's Rust library.
-Its [rule language](https://ast-grep.github.io/reference/rule.html) supplies
-structural and relational predicates, and its
-[programmatic API](https://ast-grep.github.io/guide/api-usage) supplies tree
-inspection and edit support. Retain type-oracle postfilters and byte-edit
-operations where necessary.
+### 3. One symbol projection
 
-This is not a drop-in replacement. Its
-[FAQ](https://ast-grep.github.io/advanced/faq) documents fragment-context and
-metavariable constraints. Differentially test spans, captures, variadics,
-repeated metavariables, headers, comments, malformed input and replacements
-across languages; benchmark project searches. Exceeding 5K net deletions
-requires both a small adapter and test consolidation.
+`ast_utils.py`, `ast_commands.py`, `query.py` and `transform/index.py` adapt
+tree-sitter symbol data for different consumers. Inventory those conversions,
+then provide one immutable projection with consumer-specific views for paths,
+signatures and hierarchy. Delete only genuinely repeated conversion/remapping
+code. This is not another cache owner: reuse `AnalysisStore` and its snapshots.
 
-The internal tree-sitter compiler migration preserves Python comprehension,
-exception/header and wildcard-definition matching. Any external matcher
-replacement still needs to preserve these partial-pattern semantics.
+Gate on exact CLI/editor output, nested/anonymous symbols, module-qualified
+names, unsaved overlays, identical content at distinct paths, worktrees and
+incremental/full-index parity. No extra parse/type work on warm queries.
 
-## One rule model and flow evaluator
+### 4. Benchmark and documentation consolidation
 
-`checks/flow.py` still selects different evaluators depending on whether a
-FactGraph was supplied. `trace.py` has a separate CFG/Datalog path. The current
-cleanup removes the lint-to-flow adapter roundtrip, but preserves these
-existing semantics; it does not complete the migration.
+`bench_django.py` (467), `bench_cozodb.py` (449), `goto_def_audit.py` (507),
+`django_checkout.py` (196), and `bench_utils.py` (47) are candidates for shared
+process/timing/output/checkout handling. Keep workload and correctness-audit
+logic independent. Preserve JSON, accepted exit codes, cold/warm labels and
+cache isolation; run each benchmark family before accepting the replacement.
 
-Compile lint, policy and trace configuration into one representation, resolving
-source/sink matches, effects, scopes and witnesses once. Keep existing commands
-and configuration forms as thin compatibility boundaries.
+For docs, choose one reference per concept and generate repeated CLI/MCP
+tables from existing registration metadata. Validate with strict Sphinx and
+link checks, accounting for every visible command/config key. Do not silently
+delete unresolved idea documents or call shorter documentation runtime-code
+simplification. Generation must save more maintenance than its generator adds.
 
-Define contracts for assignment ordering, same-line statements, loop-carried
-flow, nested/module scopes, overwritten values, all/some-path sanitizers and
-interprocedural summaries. An attempted source-line filter suppressed valid
-same-line and loop-carried flows during this audit and was discarded. Correct
-ordering belongs in CFG/dataflow facts, not an output filter. Parity must
-preserve intended semantics, not copy known deficiencies of the old tracker.
+## High-ceiling experiment: replace the custom matcher
 
-## One analysis snapshot and cache owner
+This remains an unimplemented earlier proposal, not a newly discovered cut.
+The current footprint is 5,892 source lines: `pattern.py` (369), Rust
+`pattern.rs` (746), and `matcher.rs` (4,777). Five selected pattern/find/sequence
+suites alone contain 2,797 lines; these cases are not presumed redundant.
 
-FactGraph imports extraction from `transform.cache`, which imports FactGraph
-definitions/helpers back. Symbol/import/reference indices, Cozo relations,
-editor state and type results have overlapping refresh and persistence paths.
+Prototype an adapter to ast-grep, retaining emend's scope/type filters and
+byte-edit layer. Its [rule model](https://ast-grep.github.io/reference/rule.html)
+supports structural/relational composition and contextual patterns, but its
+[FAQ](https://ast-grep.github.io/advanced/faq.html) describes syntax/matching
+constraints. Neither source proves compatibility with emend's partial patterns.
 
-Use a dependency-neutral analysis snapshot produced by extraction and consumed
-by query engines and derived indices. Give one owner responsibility for cache
-identity, validity and rebuilds; SQLite FTS can remain a derived search index.
+Require differential spans/captures, variadics, repeated metavariables, partial
+headers, comprehensions, comments, malformed input and replacements across
+languages. Preserve source overrides and occurrence-flow endpoints. Benchmark
+project search. A 3–5K net cut is plausible only if most custom machinery can
+actually be deleted; count zero savings until the prototype establishes that.
 
-Type inference exposes a concrete unresolved distinction: adapter memoization
-must include engine/configuration/project identity, while dead-code analysis
-asks for the latest available types without starting an engine. The current
-path/content key fix prevents cross-file collisions but does not resolve that
-contract or invalidate results after imported dependencies change.
+## Do not implement as incidental cleanup
 
-Gate the redesign on incremental/full rebuild parity, identical files in
-different modules, engine/config/dependency changes, unsaved editor buffers,
-concurrency and startup latency. A cycle-free ownership model is valuable even
-if the net deletion falls below 5K.
-
-Suggested order: consolidate behavioral tests, specify the single rule
-evaluator, and run a bounded ast-grep compatibility experiment before choosing
-a matcher replacement.
+- Retiring experimental `saturate` could remove roughly 1.3–1.5K lines including
+  tests/docs, but is a product decision. Its shared `UnionFind` is also used by
+  duplicate detection. Keeping it calls for a parser/e-graph compatibility
+  experiment, not silent feature deletion.
+- `transform/cache.py` is now 283 lines, largely schema and delegates. Audit
+  individual legacy table readers before retiring anything; do not repeat the
+  completed owner migration or touch user-authored mappings or deferred GC.
+- More project fixtures may help isolated suites, but raw `write_text` counts
+  do not justify another multi-thousand-line estimate after #233. Require an
+  actual case mapping and mutation-preserving prototype first.
+- Language/CLI alias removal and optionalizing default type engines change
+  user contracts. They are not included in the design savings above.

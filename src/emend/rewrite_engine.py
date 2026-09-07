@@ -33,9 +33,6 @@ class ENode:
     op: str
     children: tuple[int, ...] = ()
 
-    def __hash__(self) -> int:
-        return hash((self.op, self.children))
-
 
 @dataclass
 class RewriteRule:

@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
-from fnmatch import fnmatch
 from pathlib import Path
 
 import yaml
@@ -472,8 +470,6 @@ def run_lint(
     if dsl_rules:
         from emend.dsl import (
             detect_dsl_regions,
-            extract_sql_symbols,
-            DslKind,
             _compile_dsl_find_pattern,
         )
 

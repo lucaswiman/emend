@@ -301,9 +301,7 @@ def _load_toml(path: Path) -> dict[str, Any]:
 def _merge_environment_lookup(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Merge environment_lookup dicts; override wins for each key present."""
     merged = dict(base)
-    for key in ("enabled", "paths"):
-        if key in override:
-            merged[key] = override[key]
+    merged.update({key: override[key] for key in ("enabled", "paths") if key in override})
     return merged
 
 
@@ -329,15 +327,13 @@ def load_project_config(project_root: str, language: str = "python") -> dict[str
     # Layer 2: pyproject.toml [tool.emend]
     pyproject_data = _load_toml(root / "pyproject.toml")
     tool_emend = pyproject_data.get("tool", {}).get("emend", {})
-    if "environment_lookup" in tool_emend:
-        base = result.get("environment_lookup", {})
-        result["environment_lookup"] = _merge_environment_lookup(base, tool_emend["environment_lookup"])
-
     # Layer 3: .emend/config.toml
     emend_config = _load_toml(root / ".emend" / "config.toml")
-    if "environment_lookup" in emend_config:
-        base = result.get("environment_lookup", {})
-        result["environment_lookup"] = _merge_environment_lookup(base, emend_config["environment_lookup"])
+    for config in (tool_emend, emend_config):
+        if "environment_lookup" in config:
+            result["environment_lookup"] = _merge_environment_lookup(
+                result.get("environment_lookup", {}), config["environment_lookup"]
+            )
 
     return result
 
