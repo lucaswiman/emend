@@ -101,7 +101,7 @@ def test_warm_caches_populates_dup_cache(tmp_path):
     # We have 2 Python files; each should produce a dup_cache entry.
     assert len(rows) >= 1, "Expected at least one dup_cache row"
     for _hash, version in rows:
-        assert version == "2"
+        assert version == "4"
 
 
 def test_warm_caches_dup_cache_data_valid(tmp_path):
@@ -252,7 +252,7 @@ def test_compute_duplicate_payloads_directly(tmp_path):
 
     assert len(rows) == 1
     content_hash, version, data = rows[0]
-    assert version == "2"
+    assert version == "4"
 
     assert content_hash == expected_hash
 
