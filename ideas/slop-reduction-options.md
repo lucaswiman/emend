@@ -31,10 +31,11 @@ estimate is a hypothesis about repeated harnesses, not a measured deletion.
 
 ## Replace the custom structural matcher
 
-`pattern.py` (1,201 lines), `rust/src/pattern.rs` (708), and
-`rust/src/matcher.rs` (3,974) total 5,883 source lines. Python patterns currently
-use a Python AST compiler, while other languages use tree-sitter before
-feeding a custom IR and matcher.
+The original inspection counted 5,883 source lines across `pattern.py`,
+`rust/src/pattern.rs`, and `rust/src/matcher.rs`. Patterns now use one
+tree-sitter compiler feeding the custom IR and matcher; the separate Python
+AST compiler has been removed. The replacement estimates above predate this
+migration and need remeasurement before pursuing the larger replacement.
 
 Prototype a small emend syntax/constraint adapter over ast-grep's Rust library.
 Its [rule language](https://ast-grep.github.io/reference/rule.html) supplies
@@ -50,10 +51,9 @@ repeated metavariables, headers, comments, malformed input and replacements
 across languages; benchmark project searches. Exceeding 5K net deletions
 requires both a small adapter and test consolidation.
 
-An internal alternative is finishing one tree-sitter compiler. Direct probes
-showed the current Rust path does not preserve Python comprehension,
-exception/header and wildcard-definition semantics, so deleting the Python
-compiler today would remove supported behavior.
+The internal tree-sitter compiler migration preserves Python comprehension,
+exception/header and wildcard-definition matching. Any external matcher
+replacement still needs to preserve these partial-pattern semantics.
 
 ## One rule model and flow evaluator
 

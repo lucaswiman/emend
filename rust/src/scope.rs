@@ -758,6 +758,9 @@ pub struct ImportsSection {
     pub import_statement: String,
     #[serde(default)]
     pub import_from: String,
+    /// Import node kinds whose module is implicit in the grammar.
+    #[serde(default)]
+    pub fixed_modules: HashMap<String, String>,
     pub module_field: String,
     pub name_field: String,
     #[serde(default)]
@@ -2665,10 +2668,12 @@ impl ScopeResolver {
         ) {
             let nk = node.kind();
 
-            if !imports.import_from.is_empty() && nk == imports.import_from {
+            if (!imports.import_from.is_empty() && nk == imports.import_from)
+                || imports.fixed_modules.contains_key(nk)
+            {
                 let mod_node = node.child_by_field_name(&imports.module_field);
-                let raw_module = mod_node
-                    .map(|n| node_text(n, source).to_string())
+                let raw_module = imports.fixed_modules.get(nk).cloned()
+                    .or_else(|| mod_node.map(|n| node_text(n, source).to_string()))
                     .unwrap_or_default();
                 let mod_node_id = mod_node.map(|n| n.id());
 
@@ -3462,6 +3467,7 @@ impl LanguageConfig {
             imports: ImportsSection {
                 import_statement: "import_statement".to_string(),
                 import_from: "import_from_statement".to_string(),
+                fixed_modules: HashMap::from([("future_import_statement".to_string(), "__future__".to_string())]),
                 module_field: "module_name".to_string(),
                 name_field: "name".to_string(),
                 alias_field: "alias".to_string(),

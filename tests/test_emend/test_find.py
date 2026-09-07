@@ -82,6 +82,31 @@ class TestNegatedTypeConstraints:
 class TestCompoundStatementPatterns:
     """Tests for if/for/while/with statement header patterns."""
 
+    @pytest.mark.parametrize("pattern, source, expected", [
+        ("def test_*($...ARGS):",
+         "def test_one(x):\n    return x\ndef helper(y):\n    return y\n", [(1, {})]),
+        ("def test_*",
+         "def test_one(x):\n    return x\ndef helper(y):\n    return y\n", [(1, {})]),
+        ("class Model*:",
+         "class ModelOne(Base):\n    value = 1\nclass Other:\n    value = 2\n", [(1, {})]),
+        ("async def $F($...ARGS)",
+         "async def run(x):\n    return x\ndef plain():\n    pass\n", [(1, {"F": "run"})]),
+        ("except $E as $ERR:",
+         "try:\n    risky()\nexcept ValueError as error:\n    recover(error)\n",
+         [(3, {"E": "ValueError", "ERR": "error"})]),
+        ("except ValueError:",
+         "try:\n    risky()\nexcept ValueError:\n    recover()\nexcept TypeError:\n    raise\n",
+         [(3, {})]),
+        ("try:", "try:\n    risky()\nfinally:\n    cleanup()\n", [(1, {})]),
+    ])
+    def test_partial_headers(self, tmp_path, pattern, source, expected):
+        test_file = tmp_path / "sample.py"
+        test_file.write_text(source)
+        matches = find_pattern(pattern, str(test_file))
+        assert [match.line for match in matches] == [line for line, _ in expected]
+        for match, (_, captures) in zip(matches, expected):
+            assert {name: match.captures.get(name) for name in captures} == captures
+
     def test_if_condition_pattern(self, tmp_path):
         """'if $COND:' matches if statements, capturing the condition."""
         test_file = tmp_path / "test.py"
@@ -492,6 +517,10 @@ class TestLambdaStarArgs:
         assert len(matches) == 1
         assert matches[0].captures["ARGS"] == "a"
         assert matches[0].captures["KWARGS"] == "kw"
+        literal_matches = find_pattern("lambda *args, **kwargs: $EXPR", str(test_file))
+        assert [(m.matched_text, m.captures) for m in literal_matches] == [
+            (matches[0].matched_text, {"EXPR": "(a, kw)"})
+        ]
 
     def test_lambda_star_does_not_match_regular_params(self, tmp_path):
         """'lambda *$ARGS: $EXPR' does NOT match regular-param lambdas."""

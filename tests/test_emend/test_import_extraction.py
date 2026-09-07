@@ -33,6 +33,28 @@ def _named(facts: list[ImportFact], module: str) -> list[ImportFact]:
 class TestPythonImports:
     """Verify Python import extraction produces correct ImportFact objects."""
 
+    @pytest.mark.parametrize("source,expected", [
+        ("from __future__ import annotations\n", [("__future__", "annotations", None, 0)]),
+        ("if True:\n    import os.path as p, sys\n    from ..pkg import (a as b, c)\n",
+         [("os.path", None, "p", 0), ("sys", None, None, 0),
+          ("pkg", "a", "b", 2), ("pkg", "c", None, 2)]),
+        ("from . import *\n", [("", "*", None, 1)]),
+    ])
+    def test_import_consumers_preserve_structure(self, tmp_path, source, expected):
+        from emend.ast_utils import get_imports
+
+        path = tmp_path / "imports.py"
+        path.write_text(source)
+        assert get_imports(str(path)) == [
+            dict(module=module, name=name, asname=alias, level=level)
+            for module, name, alias, level in expected
+        ]
+        assert [(f.imported_module, f.imported_name, f.alias)
+                for f in _facts(str(path), source)] == [
+            ("." * level + module, name, alias)
+            for module, name, alias, level in expected
+        ]
+
     def test_plain_import(self):
         facts = _facts("test.py", "import os\n")
         assert len(facts) == 1

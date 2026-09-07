@@ -128,11 +128,14 @@ class TestRustIRCompilation:
         ("$X is not None", "is not"),
         ("$X in $Y", "in"),
         ("$X not in $Y", "not in"),
+        ("$A == \\\n $B", "=="),
+        ("($A < # comment\n $B)", "<"),
     ])
     def test_compare(self, pattern, op):
         ir = compile_pattern_to_rust_ir(pattern)
         assert ir is not None
         assert ir["type"] == "compare"
+        assert len(ir["ops"]) == 1
         assert ir["ops"][0]["op"] == op
 
     def test_unary_not(self):
@@ -195,15 +198,19 @@ class TestRustIRCompilation:
         assert ir is not None
         assert ir["type"] == "empty_list"
 
-    def test_integer(self):
-        ir = compile_pattern_to_rust_ir("42")
+    @pytest.mark.parametrize("literal", ["42", "0x2a", "4_2"])
+    def test_integer(self, literal):
+        ir = compile_pattern_to_rust_ir(literal)
         assert ir is not None
         assert ir == {"type": "integer", "value": "42"}
+        assert len(_rust_match([("sample.py", "x = 42\ny = 43\n")], literal)) == 1
 
-    def test_string(self):
-        ir = compile_pattern_to_rust_ir("'hello'")
+    @pytest.mark.parametrize("literal", ["'hello'", "r'hello'", "'he' 'llo'", r"'he\x6clo'"])
+    def test_string(self, literal):
+        ir = compile_pattern_to_rust_ir(literal)
         assert ir is not None
         assert ir["type"] == "string"
+        assert len(_rust_match([("sample.py", "x = 'hello'\ny = 'other'\n")], literal)) == 1
 
     def test_funcdef(self):
         ir = compile_pattern_to_rust_ir("def foo($...ARGS):")
