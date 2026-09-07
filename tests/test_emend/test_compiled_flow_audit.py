@@ -155,7 +155,7 @@ def test_regular_and_scope_sanitizers_compose(tmp_path):
     ],
 )
 def test_source_sink_and_sanitizer_type_constraints(
-    tmp_path, endpoint, constraint, type_name, expected,
+    tmp_path, request, endpoint, constraint, type_name, expected,
 ):
     source_text = "def f():\n    y = source(x)\n    clean(y)\n    sink(y)\n"
     path = tmp_path / "app.py"
@@ -163,7 +163,9 @@ def test_source_sink_and_sanitizer_type_constraints(
     # Endpoint filtering is conservative only when no binding is available;
     # provide the exact local bindings needed for this matrix.
     from emend.analysis_store import AnalysisStore
-    graph = AnalysisStore.open(tmp_path).query_facts()
+    store = AnalysisStore.open(tmp_path)
+    graph = store.detached_facts(store.query_facts())
+    request.addfinalizer(graph.close)
     graph.add_type(TypeFact("x", type_name, "app.py", 2, "definition"))
     graph.add_type(TypeFact("y", type_name, "app.py", 2, "definition"))
     source_constraint = constraint if endpoint == "source" else ""
@@ -205,7 +207,7 @@ def test_type_constraints_keep_unknown_bindings_conservatively(tmp_path, endpoin
     assert bool(_run(tmp_path, path.read_text(), config, graph)) is (endpoint != "sanitizer")
 
 
-def test_type_filtered_rules_remain_isolated(tmp_path):
+def test_type_filtered_rules_remain_isolated(tmp_path, request):
     path = tmp_path / "app.py"
     path.write_text(
         "def f():\n"
@@ -215,7 +217,9 @@ def test_type_filtered_rules_remain_isolated(tmp_path):
         "    sink_b(b)\n"
     )
     from emend.analysis_store import AnalysisStore
-    graph = AnalysisStore.open(tmp_path).query_facts()
+    store = AnalysisStore.open(tmp_path)
+    graph = store.detached_facts(store.query_facts())
+    request.addfinalizer(graph.close)
     graph.add_type(TypeFact("x", "int", "app.py", 2, "definition"))
     graph.add_type(TypeFact("y", "str", "app.py", 3, "definition"))
     config = CompiledFlowConfig(

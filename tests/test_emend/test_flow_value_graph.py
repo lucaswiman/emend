@@ -248,13 +248,15 @@ def test_resolved_calls_use_returns_but_opaque_calls_propagate(
     assert bool(_run(tmp_path, source, _config())) is reports
 
 
-def test_return_constraints_use_snapshot_type_facts(tmp_path):
+def test_return_constraints_use_snapshot_type_facts(tmp_path, request):
     from emend.analysis_snapshot import TypeFact
     from emend.analysis_store import AnalysisStore
 
     path = tmp_path / "app.py"
     path.write_text("def f():\n    x = source()\n    sink(x)\n")
-    graph = AnalysisStore.open(tmp_path).query_facts()
+    store = AnalysisStore.open(tmp_path)
+    graph = store.detached_facts(store.query_facts())
+    request.addfinalizer(graph.close)
     graph.add_type(TypeFact("sink", "(object) -> str", "app.py", 3, "reference"))
 
     matching = _config(sink="$F:returns[str]($X)")
