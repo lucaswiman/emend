@@ -470,8 +470,12 @@ class FactGraph:
             )
             for row in rows
         )
+        context_rows = self._client.run(
+            '?[value] := *facts_meta["analysis_context_id", value]'
+        )["rows"]
         return AnalysisSnapshot(
-            str(Path(project_root).resolve()), snapshot_id, revisions
+            str(Path(project_root).resolve()), snapshot_id, revisions,
+            analysis_context_id=(str(context_rows[0][0]) if context_rows else ""),
         )
 
     def publish_snapshot(self, snapshot: AnalysisSnapshot) -> None:
@@ -493,6 +497,7 @@ class FactGraph:
                 ["schema_version", FACT_GRAPH_SCHEMA_VERSION],
                 ["project_root", snapshot.project_root],
                 ["snapshot_id", snapshot.snapshot_id],
+                ["analysis_context_id", snapshot.analysis_context_id],
             ]},
         )
         self.bind_snapshot(snapshot)

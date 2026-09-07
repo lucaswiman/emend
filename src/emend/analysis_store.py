@@ -144,14 +144,33 @@ class AnalysisStore:
                 self._artifact_connection.close()
                 self._artifact_connection = None
 
-    @staticmethod
-    def _snapshot_id(revisions: Iterable[FileRevision]) -> str:
+    def _extraction_context_id(self, revisions: Iterable[FileRevision]) -> str:
+        """Return the schema/config identity governing extracted facts."""
+        from emend.fact_graph import FACT_GRAPH_SCHEMA_VERSION
+
+        languages = {revision.language for revision in revisions}
+        payload = (
+            FACT_GRAPH_SCHEMA_VERSION,
+            EXTRACTION_ARTIFACT_VERSION,
+            tuple(sorted(
+                (language, self._language_config_id(language))
+                for language in languages
+            )),
+        )
+        return hashlib.sha256(repr(payload).encode()).hexdigest()
+
+    def _snapshot_id(
+        self, revisions: Iterable[FileRevision], context_id: str
+    ) -> str:
         ordered = sorted(revisions, key=lambda item: item.file_path)
-        payload = [
-            (item.file_path, item.content_hash, item.language, item.module_name,
-             item.origin, item.version)
-            for item in ordered
-        ]
+        payload = (
+            context_id,
+            tuple(
+                (item.file_path, item.content_hash, item.language, item.module_name,
+                 item.origin, item.version)
+                for item in ordered
+            ),
+        )
         return hashlib.sha256(
             json.dumps(payload, separators=(",", ":")).encode()
         ).hexdigest()
@@ -163,11 +182,13 @@ class AnalysisStore:
         base_snapshot_id: str | None = None,
     ) -> AnalysisSnapshot:
         ordered = tuple(sorted(revisions, key=lambda item: item.file_path))
+        context_id = self._extraction_context_id(ordered)
         return AnalysisSnapshot(
             project_root=str(self.project_root),
-            snapshot_id=self._snapshot_id(ordered),
+            snapshot_id=self._snapshot_id(ordered, context_id),
             files=ordered,
             base_snapshot_id=base_snapshot_id,
+            analysis_context_id=context_id,
         )
 
     def _module_name(self, file_path: str, _language: str) -> str:
@@ -476,12 +497,9 @@ class AnalysisStore:
 
     @staticmethod
     def _language_config_id(language: str) -> str:
-        config = Path(__file__).parent / "languages" / language / "config.toml"
-        try:
-            payload = config.read_bytes()
-        except OSError:
-            payload = language.encode()
-        return hashlib.sha256(payload).hexdigest()
+        from emend.language_registry import config_identity
+
+        return config_identity(language)
 
     @contextmanager
     def _facts_write_lock(self):
@@ -585,6 +603,13 @@ class AnalysisStore:
             path for path, revision in current_by_path.items()
             if previous_by_path.get(path) != revision
         )
+        if graph is not None and (
+            graph.snapshot.analysis_context_id != scan.snapshot.analysis_context_id
+        ):
+            # The files are unchanged but their extraction schema or language
+            # configuration changed. Rebuild every affected artifact rather
+            # than merely republishing a new marker over stale rows.
+            changed_paths = tuple(current_by_path)
         deleted_paths = tuple(set(previous_by_path) - set(current_by_path))
         self.ensure_cache_directory()
         fd, candidate_name = tempfile.mkstemp(
@@ -732,8 +757,16 @@ class AnalysisStore:
                 target = requested
                 target.parent.mkdir(parents=True, exist_ok=True)
 
-            # Never let a legacy caller open the owner's live database.
-            if target == source:
+            owned_paths = {
+                path.resolve()
+                for path in (
+                    self.facts_path, self._disk_path, self._overlay_path,
+                    self._typed_graph[2] if self._typed_graph is not None else None,
+                )
+                if path is not None
+            }
+            # Never let a legacy caller mutate an owner-managed generation.
+            if target == source or target in owned_paths:
                 fd, name = tempfile.mkstemp(
                     prefix="facts-detached-", suffix=".db", dir=self.cache_dir
                 )
@@ -759,6 +792,8 @@ class AnalysisStore:
                 snapshot = self._make_snapshot(
                     revisions, base_snapshot_id=graph.snapshot.base_snapshot_id
                 )
+                detached.clear_snapshot_marker()
+                detached.publish_snapshot(snapshot)
                 detached.bind_snapshot(
                     snapshot,
                     source_overrides=getattr(graph, "_source_overrides", None),
@@ -885,35 +920,37 @@ class AnalysisStore:
         overlays are active; returning an empty typed view is safer than
         attaching types read from disk to overlay facts.
         """
-        from emend.type_oracle import create_type_oracle, parse_type_string
+        from emend.type_oracle import (
+            _type_engine_context,
+            create_type_oracle,
+            parse_type_string,
+        )
 
         resolved_engine = engine
         if engine == "auto":
             from emend.type_oracle import detect_type_engine
 
             resolved_engine = detect_type_engine(self.project_root)
-        cached = self._typed_graph
-        context_prefix = (
-            f"{TYPE_FACTS_ARTIFACT_VERSION}:{self.type_context_id()}"
+        expected_context = (
+            f"{self.type_context_id()}|{_type_engine_context(resolved_engine, {})}"
         )
-        if (
-            cached is not None
-            and cached[0][0] == graph.snapshot.snapshot_id
-            and cached[0][2] == resolved_engine
-            and cached[0][1].startswith(context_prefix)
-        ):
-            return cached[1]
-
-        candidate_oracle = create_type_oracle(
-            engine=engine, project_root=self.project_root
-        )
-        cache_context = getattr(candidate_oracle, "cache_context_id", "")
-        oracle_key = (resolved_engine, str(cache_context))
-        if self._type_oracle is not None and self._type_oracle[0] == oracle_key:
+        expected_oracle_key = (resolved_engine, expected_context)
+        if self._type_oracle is not None and self._type_oracle[0] == expected_oracle_key:
             oracle = self._type_oracle[1]
         else:
-            oracle = candidate_oracle
+            candidate = create_type_oracle(
+                engine=resolved_engine, project_root=self.project_root
+            )
+            cache_context = str(getattr(candidate, "cache_context_id", ""))
+            oracle_key = (resolved_engine, cache_context)
+            oracle = (
+                self._type_oracle[1]
+                if self._type_oracle is not None
+                and self._type_oracle[0] == oracle_key
+                else candidate
+            )
             self._type_oracle = (oracle_key, oracle)
+        cache_context = str(getattr(oracle, "cache_context_id", ""))
         key = (
             graph.snapshot.snapshot_id,
             f"{TYPE_FACTS_ARTIFACT_VERSION}:{cache_context}",
@@ -1093,8 +1130,17 @@ class AnalysisStore:
             return matches[0] if len(matches) == 1 else None
 
         dependencies: dict[str, set[str]] = {}
+        ambient_typescript = {
+            revision.file_path
+            for revision in revisions.values()
+            if revision.language == "typescript"
+            and revision.file_path.endswith(".d.ts")
+        }
         for revision in revisions.values():
-            resolved_dependencies: set[str] = set()
+            resolved_dependencies = (
+                ambient_typescript - {revision.file_path}
+                if revision.language == "typescript" else set()
+            )
             try:
                 imports = graph.imports_in(graph.stored_path(revision.file_path))
             except Exception:
@@ -1119,12 +1165,21 @@ class AnalysisStore:
                         ))
                 elif name.startswith("."):
                     base = (Path(revision.file_path).parent / name).resolve()
-                    paths = [base] if base.suffix else [
-                        *(base.with_suffix(f".{ext}")
-                          for ext in get_extensions(revision.language)),
-                        *(base / f"index.{ext}"
-                          for ext in get_extensions(revision.language)),
-                    ]
+                    extensions = get_extensions(revision.language)
+                    paths = [base]
+                    if base.suffix:
+                        # TypeScript commonly imports emitted ``.js`` names
+                        # whose source dependency is ``.ts``/``.tsx``.
+                        paths.extend(
+                            base.with_suffix(f".{ext}") for ext in extensions
+                        )
+                    else:
+                        paths.extend(
+                            base.with_suffix(f".{ext}") for ext in extensions
+                        )
+                        paths.extend(
+                            base / f"index.{ext}" for ext in extensions
+                        )
                     candidates.extend(revisions.get(str(path)) for path in paths)
                 else:
                     normalized = name.replace("::", ".").replace("/", ".")

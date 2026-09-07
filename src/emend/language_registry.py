@@ -20,6 +20,7 @@ Usage::
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import sys
 from functools import lru_cache
@@ -98,6 +99,33 @@ def _discover_entry_point_languages() -> dict[str, Path]:
     except Exception:
         logger.debug("Entry-point discovery for emend.languages failed", exc_info=True)
     return result
+
+
+def _config_path(language: str) -> Path | None:
+    """Return the effective configuration path for one language."""
+    lang_dir = _find_languages_dir()
+    if lang_dir is not None:
+        candidate = lang_dir / language / "config.toml"
+        if candidate.is_file():
+            return candidate
+    plugin_dir = _discover_entry_point_languages().get(language)
+    if plugin_dir is not None:
+        candidate = plugin_dir / "config.toml"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def config_identity(language: str) -> str:
+    """Hash the exact language configuration consumed by analysis."""
+    path = _config_path(language)
+    try:
+        payload = path.read_bytes() if path is not None else repr(
+            _BUILTIN.get(language, ())
+        ).encode()
+    except OSError:
+        payload = repr(_BUILTIN.get(language, ())).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _parse_toml_extensions(path: Path) -> tuple[str, list[str]] | None:
@@ -244,22 +272,7 @@ def load_config(language: str) -> dict:
     """
     import sys
 
-    config_path: Path | None = None
-
-    # 1. Check built-in languages directory
-    lang_dir = _find_languages_dir()
-    if lang_dir:
-        candidate = lang_dir / language / "config.toml"
-        if candidate.is_file():
-            config_path = candidate
-
-    # 2. Check entry-point plugins
-    if config_path is None:
-        ep_langs = _discover_entry_point_languages()
-        if language in ep_langs:
-            candidate = ep_langs[language] / "config.toml"
-            if candidate.is_file():
-                config_path = candidate
+    config_path = _config_path(language)
 
     if config_path is None:
         return {}

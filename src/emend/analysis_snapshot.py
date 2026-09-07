@@ -62,6 +62,7 @@ class AnalysisSnapshot:
     snapshot_id: str
     files: tuple[FileRevision, ...]
     base_snapshot_id: str | None = None
+    analysis_context_id: str = ""
 
 
 @dataclass(frozen=True)

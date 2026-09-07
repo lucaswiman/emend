@@ -735,13 +735,18 @@ def run_trace_analysis(
         if not paths:
             return []
 
-    paths = [path for path in paths if Path(path).is_file()]
-    if not paths:
-        return []
-
     _proj = (project_path or str(Path(paths[0]).resolve().parent)) if paths else ""
+    if not Path(_proj).is_dir():
+        return []
     from emend.analysis_store import AnalysisStore
     graph = AnalysisStore.open(_proj).query_facts()
+    snapshot_paths = {revision.file_path for revision in graph.snapshot.files}
+    paths = [
+        path for path in paths
+        if str(Path(path).resolve()) in snapshot_paths
+    ]
+    if not paths:
+        return []
     logger.debug("Using Datalog intraprocedural trace engine for %d files", len(paths))
     result = _run_trace_datalog(
         paths, config,

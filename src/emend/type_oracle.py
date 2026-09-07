@@ -20,6 +20,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Any
 
@@ -478,7 +479,16 @@ class TypeOracle(ABC):
         prepared = getattr(self, "_prepared_file_keys", None)
         if prepared is not None and resolved in prepared:
             return prepared[resolved]
+        self._refresh_cache_context(project_root or path.parent)
         return self._current_file_key(path, project_root)
+
+    def _refresh_cache_context(self, project_root: Path | None) -> None:
+        """Keep a long-lived adapter in the owner's current config namespace."""
+        cache = getattr(self, "_cache", None)
+        namespace = getattr(cache, "namespace", "")
+        _old_context, separator, engine_context = namespace.partition("|")
+        if separator:
+            cache.namespace = f"{_type_shared_context(project_root)}|{engine_context}"
 
     def _current_file_key(
         self, path: Path, project_root: Path | None = None
@@ -495,6 +505,7 @@ class TypeOracle(ABC):
         from emend.analysis_store import AnalysisStore
 
         root = project_root or (paths[0].parent if paths else Path.cwd())
+        self._refresh_cache_context(root)
         store = AnalysisStore.open(root)
         # Pin both cache identities and source bytes to the same immutable
         # owner graph.  This matters for LSP overlays: a second query after an
@@ -1155,8 +1166,21 @@ def _type_shared_context(project_root: Path | None) -> str:
     return AnalysisStore.open(project_root or ".").type_context_id()
 
 
+@lru_cache(maxsize=32)
+def _type_engine_version(executable: str, executable_identity: object) -> object:
+    """Probe a binary once per stable filesystem identity."""
+    del executable_identity
+    try:
+        result = subprocess.run(
+            [executable, "--version"], capture_output=True, text=True, timeout=2,
+        )
+        return result.returncode, result.stdout.strip(), result.stderr.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _type_engine_context(engine: str, options: dict[str, Any]) -> str:
-    """Hash analyzer identity, executable version, and invocation arguments."""
+    """Hash analyzer identity, cached version, and invocation arguments."""
     executable_options = {
         "pyrefly": ("pyrefly_path", "pyrefly"),
         "pyright": ("pyright_path", "pyright-langserver"),
@@ -1174,20 +1198,7 @@ def _type_engine_context(engine: str, options: dict[str, Any]) -> str:
         )
     except OSError:
         executable_identity = executable
-    try:
-        version_result = subprocess.run(
-            [executable, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        executable_version = (
-            version_result.returncode,
-            version_result.stdout.strip(),
-            version_result.stderr.strip(),
-        )
-    except (OSError, subprocess.SubprocessError):
-        executable_version = None
+    executable_version = _type_engine_version(executable, executable_identity)
     stable_options = {
         key: repr(value)
         for key, value in sorted(options.items())
@@ -1220,6 +1231,7 @@ def load_cached_file_types(
     *,
     project_root: Path | None = None,
     content_hash: str | None = None,
+    file_identity: str | None = None,
     engine: str = CURRENT_ANY_ENGINE,
     engine_options: dict[str, Any] | None = None,
     shared_context: str | None = None,
@@ -1241,7 +1253,7 @@ def load_cached_file_types(
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         try:
-            file_key = _file_cache_key(
+            file_key = file_identity or _file_cache_key(
                 path, content_hash, project_root,
                 include_overlays=include_overlays,
             )

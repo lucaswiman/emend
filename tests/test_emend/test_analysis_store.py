@@ -279,6 +279,22 @@ def test_type_cache_reads_current_engine_dependencies_and_config(tmp_path):
     assert load_cached_file_types(target, project_root=tmp_path) is None
 
 
+def test_long_lived_type_oracle_refreshes_config_namespace(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'types'\n[tool.pyright]\ntypeCheckingMode = 'basic'\n"
+    )
+    source = tmp_path / "app.py"
+    source.write_text("value = 1\n")
+    _FakeTypeOracle.calls = 0
+    oracle = _FakeTypeOracle(tmp_path)
+    oracle.infer_file(source, tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        "[project]\nname = 'types'\n[tool.pyright]\ntypeCheckingMode = 'strict'\n"
+    )
+    oracle.infer_file(source, tmp_path)
+    assert _FakeTypeOracle.calls == 2
+
+
 @pytest.mark.parametrize(
     "statement",
     [
@@ -306,7 +322,8 @@ def test_type_identity_resolves_relative_dependency_in_its_package(
     assert store.type_file_identity(target) != initial
 
 
-def test_type_identity_resolves_relative_typescript_dependency(tmp_path):
+@pytest.mark.parametrize("specifier", ["./dep", "./dep.js"])
+def test_type_identity_resolves_relative_typescript_dependency(tmp_path, specifier):
     from emend.analysis_store import AnalysisStore
 
     for package in ("alpha", "beta"):
@@ -316,7 +333,7 @@ def test_type_identity_resolves_relative_typescript_dependency(tmp_path):
         )
     dependency = tmp_path / "beta" / "dep.ts"
     target = tmp_path / "beta" / "use.ts"
-    target.write_text("import { value } from './dep';\nconst result = value;\n")
+    target.write_text(f"import {{ value }} from '{specifier}';\nconst result = value;\n")
     store = AnalysisStore.open(tmp_path)
     initial = store.type_file_identity(target)
     (tmp_path / "alpha" / "dep.ts").write_text(
@@ -327,7 +344,21 @@ def test_type_identity_resolves_relative_typescript_dependency(tmp_path):
     assert store.type_file_identity(target) != initial
 
 
+def test_typescript_ambient_declarations_participate_in_type_identity(tmp_path):
+    from emend.analysis_store import AnalysisStore
+
+    target = tmp_path / "app.ts"
+    ambient = tmp_path / "globals.d.ts"
+    target.write_text("const value = window.projectValue;\n")
+    ambient.write_text("interface Window { projectValue: number }\n")
+    store = AnalysisStore.open(tmp_path)
+    initial = store.type_file_identity(target)
+    ambient.write_text("interface Window { projectValue: string }\n")
+    assert store.type_file_identity(target) != initial
+
+
 def test_deadcode_computes_type_snapshot_context_once(tmp_path, monkeypatch):
+    from emend.analysis_store import AnalysisStore
     from emend.transform import find_dead_code, warm_caches
     import emend.type_oracle as type_oracle
 
@@ -340,17 +371,29 @@ def test_deadcode_computes_type_snapshot_context_once(tmp_path, monkeypatch):
             f"def {name}():\n    return 1\n"
         )
     warm_caches(str(tmp_path), type_engine="none")
-    original = type_oracle._type_shared_context
-    calls = 0
+    store = AnalysisStore.open(tmp_path)
+    original_context = type_oracle._type_shared_context
+    original_scan = store._scan_disk
+    original_dependencies = store._type_dependency_state
+    calls = {"context": 0, "scan": 0, "dependencies": 0}
 
     def counted(project_root):
-        nonlocal calls
-        calls += 1
-        return original(project_root)
+        calls["context"] += 1
+        return original_context(project_root)
+
+    def count_scan():
+        calls["scan"] += 1
+        return original_scan()
+
+    def count_dependencies(graph):
+        calls["dependencies"] += 1
+        return original_dependencies(graph)
 
     monkeypatch.setattr(type_oracle, "_type_shared_context", counted)
+    monkeypatch.setattr(store, "_scan_disk", count_scan)
+    monkeypatch.setattr(store, "_type_dependency_state", count_dependencies)
     list(find_dead_code(str(tmp_path), show_last_reference=False))
-    assert calls == 1
+    assert calls == {"context": 1, "scan": 1, "dependencies": 1}
 
 
 def test_editor_overlay_owner_cannot_remove_a_newer_session(tmp_path):
@@ -403,7 +446,12 @@ def test_query_facts_reuses_generation_and_incrementally_matches_full_build(tmp_
     assert [fact.name for fact in cold.symbols()] == ["first", "second"]
     assert cold.source_text(first).startswith("def first")
     assert cold.source_text(second).startswith("def second")
-    rebuilt = FactGraph.build_from_project(str(tmp_path), include_types=False)
+    rebuilt = FactGraph()
+    rebuilt.update_files(
+        [(str(first), first.read_text())],
+        project_root=str(tmp_path), resolver_root=str(tmp_path),
+    )
+    rebuilt._resolve_builtin_refs()
     try:
         assert {
             (fact.file_path, fact.qualified_name, fact.kind)
@@ -469,6 +517,23 @@ def test_extraction_artifacts_reuse_across_content_revert(tmp_path, extracted_fi
     assert len(extracted_files) == 2
     source.write_text(first_content)
     store.query_facts()
+    assert len(extracted_files) == 2
+
+
+def test_language_config_identity_invalidates_published_and_shared_facts(
+    tmp_path, extracted_files, monkeypatch,
+):
+    from emend.analysis_store import AnalysisStore
+
+    source = tmp_path / "app.py"
+    source.write_text("value = 1\n")
+    store = AnalysisStore.open(tmp_path)
+    context = ["first"]
+    monkeypatch.setattr(store, "_language_config_id", lambda _language: context[0])
+    first = store.query_facts()
+    context[0] = "second"
+    second = store.query_facts()
+    assert second.snapshot.snapshot_id != first.snapshot.snapshot_id
     assert len(extracted_files) == 2
 
 
@@ -761,6 +826,28 @@ def test_build_from_project_adapts_owned_facts_without_owning_the_owner(
     assert [symbol.name for symbol in owner_graph.symbols()] == ["live"]
 
 
+def test_legacy_filtered_build_cannot_overwrite_owner_generation(tmp_path):
+    from emend.analysis_store import AnalysisStore
+    from emend.fact_graph import FactGraph
+
+    (tmp_path / "app.py").write_text("def python_symbol():\n    pass\n")
+    (tmp_path / "app.ts").write_text("function tsSymbol() {}\n")
+    store = AnalysisStore.open(tmp_path)
+    store.query_facts()
+    detached = FactGraph.build_from_project(
+        str(tmp_path), language="python", db_path=str(store.facts_path),
+        include_types=False,
+    )
+    try:
+        assert [symbol.name for symbol in detached.symbols()] == ["python_symbol"]
+    finally:
+        detached.close()
+    reopened = AnalysisStore(tmp_path).query_facts()
+    assert {symbol.name for symbol in reopened.symbols()} == {
+        "python_symbol", "tsSymbol",
+    }
+
+
 def test_type_batch_uses_one_snapshot_and_reuses_linked_worktree_payload(
     tmp_path, monkeypatch
 ):
@@ -830,6 +917,52 @@ def test_typed_fact_view_is_lazy_cached_and_snapshot_bound(tmp_path, monkeypatch
     refreshed = store.query_facts(include_types=True)
     assert refreshed is not typed
     assert typed.source_text(source) == "value = 1\n"
+
+
+def test_typed_fact_view_refreshes_when_engine_identity_changes(tmp_path, monkeypatch):
+    from emend.analysis_store import AnalysisStore
+
+    (tmp_path / "app.py").write_text("value = 1\n")
+    version = ["engine-v1"]
+
+    class VersionedOracle(_TypedOracle):
+        @property
+        def cache_context_id(self):
+            return version[0]
+
+    monkeypatch.setattr(
+        "emend.type_oracle.create_type_oracle", lambda **_: VersionedOracle()
+    )
+    VersionedOracle.calls = 0
+    store = AnalysisStore.open(tmp_path)
+    first = store.query_facts(include_types=True)
+    version[0] = "engine-v2"
+    second = store.query_facts(include_types=True)
+    assert second is not first
+    assert VersionedOracle.calls == 2
+
+
+def test_trace_reads_overlay_only_file_from_selected_snapshot(tmp_path):
+    from emend.analysis_store import AnalysisStore
+    from emend.trace import TraceConfig, TraceSink, TraceSource, run_trace_analysis
+
+    path = tmp_path / "new.py"
+    store = AnalysisStore.open(tmp_path)
+    store.update_overlay(
+        path, "def f():\n    x = source()\n    sink(x)\n", 1,
+    )
+    violations = run_trace_analysis(
+        [str(path)],
+        TraceConfig(
+            labels=["value"],
+            sources=[TraceSource("source()", "value")],
+            sinks=[TraceSink("sink($X)", "value", "unsafe")],
+        ),
+        project_path=str(tmp_path),
+    )
+    assert [(violation.file_path, violation.line) for violation in violations] == [
+        (str(path), 3)
+    ]
 
 
 def test_cli_and_mcp_type_queries_use_the_typed_owner_view(tmp_path, monkeypatch):

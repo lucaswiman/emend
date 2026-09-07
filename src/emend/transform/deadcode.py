@@ -1059,6 +1059,18 @@ def _typed_decorator_entry_points(
         parse_type_string,
     )
     type_shared_context = _type_shared_context(root)
+    from emend.analysis_store import AnalysisStore
+
+    absolute_paths = {
+        file_path: (
+            Path(file_path) if Path(file_path).is_absolute()
+            else root / file_path
+        ).resolve()
+        for file_path in decorated_by_file
+    }
+    file_identities = AnalysisStore.open(root).type_file_identities(
+        absolute_paths.values(), graph=graph,
+    )
 
     for file_path, decorators in decorated_by_file.items():
         imports = imports_by_file.get(file_path, {})
@@ -1074,9 +1086,7 @@ def _typed_decorator_entry_points(
             if resolved_type in known_types:
                 receiver_types[binding_name] = resolved_type
 
-        abs_path = Path(file_path)
-        if not abs_path.is_absolute():
-            abs_path = root / abs_path
+        abs_path = absolute_paths[file_path]
         try:
             source = abs_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -1088,6 +1098,7 @@ def _typed_decorator_entry_points(
                 abs_path,
                 project_root=root,
                 shared_context=type_shared_context,
+                file_identity=file_identities.get(str(abs_path)),
             )
             if cached_types is not None:
                 for receiver in receivers:
