@@ -305,6 +305,25 @@ def _compile_generators(generators, metavar_map: dict) -> list | None:
     return generators_ir
 
 
+def _compile_regular_parameters(args, metavar_map: dict[str, MetaVar]) -> list | None:
+    patterns = []
+    for i, param in enumerate(args.args):
+        metavar = metavar_map.get(param.arg)
+        default_idx = i - (len(args.args) - len(args.defaults))
+        if metavar and metavar.ellipsis:
+            patterns.append({"type": "ellipsis"})
+        elif default_idx >= 0:
+            default_ir = _ast_to_rust_ir(args.defaults[default_idx], metavar_map)
+            if default_ir is None:
+                return None
+            patterns.append({"type": "with_default", "default_value": default_ir})
+        elif metavar:
+            patterns.append({"type": "any"})
+        else:
+            patterns.append({"type": "name", "value": param.arg})
+    return patterns
+
+
 def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
     """Convert a stdlib ast node to a Rust IR dict."""
     import ast as _ast
@@ -421,13 +440,14 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
     elif isinstance(node, _ast.Dict):
         elems_ir = []
         for k, v in zip(node.keys, node.values):
+            spread = v if k is None else k
+            if isinstance(spread, _ast.Name) and spread.id in metavar_map:
+                metavar = metavar_map[spread.id]
+                if metavar.ellipsis:
+                    elems_ir.append({"type": "ellipsis", "name": metavar.name})
+                    continue
             if k is None:
                 # **spread
-                if isinstance(v, _ast.Name) and v.id in metavar_map:
-                    metavar = metavar_map[v.id]
-                    if metavar.ellipsis:
-                        elems_ir.append({"type": "ellipsis", "name": metavar.name})
-                        continue
                 if isinstance(v, _ast.Name) and v.id == "__EMEND_SPREAD__":
                     elems_ir.append({"type": "ellipsis"})
                     continue
@@ -436,11 +456,6 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
                     return None
                 elems_ir.append({"type": "spread", "value": v_ir})
             else:
-                if isinstance(k, _ast.Name) and k.id in metavar_map:
-                    metavar = metavar_map[k.id]
-                    if metavar.ellipsis:
-                        elems_ir.append({"type": "ellipsis", "name": metavar.name})
-                        continue
                 k_ir = _ast_to_rust_ir(k, metavar_map)
                 v_ir = _ast_to_rust_ir(v, metavar_map)
                 if k_ir is None or v_ir is None:
@@ -609,31 +624,10 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
             else:
                 param_patterns.append({"type": "name", "value": p.arg})
         # regular params
-        n_defaults = len(args.defaults)
-        n_args = len(args.args)
-        for i, p in enumerate(args.args):
-            default_idx = i - (n_args - n_defaults)
-            has_default = default_idx >= 0
-            if p.arg in metavar_map:
-                metavar = metavar_map[p.arg]
-                if metavar.ellipsis:
-                    param_patterns.append({"type": "ellipsis"})
-                    continue
-                if has_default:
-                    dv_ir = _ast_to_rust_ir(args.defaults[default_idx], metavar_map)
-                    if dv_ir is None:
-                        return None
-                    param_patterns.append({"type": "with_default", "default_value": dv_ir})
-                else:
-                    param_patterns.append({"type": "any"})
-            else:
-                if has_default:
-                    dv_ir = _ast_to_rust_ir(args.defaults[default_idx], metavar_map)
-                    if dv_ir is None:
-                        return None
-                    param_patterns.append({"type": "with_default", "default_value": dv_ir})
-                else:
-                    param_patterns.append({"type": "name", "value": p.arg})
+        regular_params = _compile_regular_parameters(args, metavar_map)
+        if regular_params is None:
+            return None
+        param_patterns.extend(regular_params)
         # *args
         if args.vararg:
             p = args.vararg
@@ -772,34 +766,10 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
         return {"type": "ifexp", "test": test_ir, "body": body_ir, "orelse": orelse_ir}
 
     elif isinstance(node, _ast.Lambda):
-        # Build param patterns similar to FunctionDef
-        param_patterns = []
         args = node.args
-        n_defaults = len(args.defaults)
-        n_args = len(args.args)
-        for i, p in enumerate(args.args):
-            default_idx = i - (n_args - n_defaults)
-            has_default = default_idx >= 0
-            if p.arg in metavar_map:
-                metavar = metavar_map[p.arg]
-                if metavar.ellipsis:
-                    param_patterns.append({"type": "ellipsis"})
-                    continue
-                if has_default:
-                    dv_ir = _ast_to_rust_ir(args.defaults[default_idx], metavar_map)
-                    if dv_ir is None:
-                        return None
-                    param_patterns.append({"type": "with_default", "default_value": dv_ir})
-                else:
-                    param_patterns.append({"type": "any"})
-            else:
-                if has_default:
-                    dv_ir = _ast_to_rust_ir(args.defaults[default_idx], metavar_map)
-                    if dv_ir is None:
-                        return None
-                    param_patterns.append({"type": "with_default", "default_value": dv_ir})
-                else:
-                    param_patterns.append({"type": "name", "value": p.arg})
+        param_patterns = _compile_regular_parameters(args, metavar_map)
+        if param_patterns is None:
+            return None
         if args.vararg:
             if args.vararg.arg in metavar_map:
                 metavar = metavar_map[args.vararg.arg]
@@ -923,10 +893,7 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
             return None
         return {"type": "delete", "target": target_ir}
 
-    elif isinstance(node, _ast.Global):
-        # Global has identifier names, but metavars need special handling
-        # If any name is a metavar, we can't express this as a simple name list
-        # Convert to a positional match
+    elif isinstance(node, (_ast.Global, _ast.Nonlocal)):
         items_ir = []
         for name in node.names:
             if name in metavar_map:
@@ -934,17 +901,7 @@ def _ast_to_rust_ir(node, metavar_map: dict[str, MetaVar]) -> dict | None:
                 items_ir.append({"type": "metavar", "name": metavar.name})
             else:
                 items_ir.append(name)
-        return {"type": "global", "names": items_ir}
-
-    elif isinstance(node, _ast.Nonlocal):
-        items_ir = []
-        for name in node.names:
-            if name in metavar_map:
-                metavar = metavar_map[name]
-                items_ir.append({"type": "metavar", "name": metavar.name})
-            else:
-                items_ir.append(name)
-        return {"type": "nonlocal", "names": items_ir}
+        return {"type": type(node).__name__.lower(), "names": items_ir}
 
     elif isinstance(node, _ast.Await):
         value_ir = _ast_to_rust_ir(node.value, metavar_map)

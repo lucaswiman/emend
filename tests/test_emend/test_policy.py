@@ -62,15 +62,6 @@ def test_matching_type_check_reports_oracle_failure(tmp_path, monkeypatch, failu
     assert "type oracle unavailable" in violations[0].message
 
 
-def _write_policies(tmp_path, policies_dict):
-    """Write a YAML policy config file."""
-    config_dir = tmp_path / ".emend"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_file = config_dir / "policies.yaml"
-    config_file.write_text(yaml.dump(policies_dict))
-    return str(config_file)
-
-
 def _write_rules(tmp_path, rules_dict):
     """Write a unified rules config file."""
     config_dir = tmp_path / ".emend"
@@ -82,7 +73,7 @@ def _write_rules(tmp_path, rules_dict):
 
 class TestLoadPolicies:
     def test_load_structural_policy(self, tmp_path):
-        config = _write_policies(tmp_path, {
+        config = _write_rules(tmp_path, {
             "policies": [{
                 "name": "no-print",
                 "description": "No print() calls",
@@ -100,7 +91,7 @@ class TestLoadPolicies:
         assert isinstance(policies[0].checks[0], StructuralCheck)
 
     def test_load_flow_policy(self, tmp_path):
-        config = _write_policies(tmp_path, {
+        config = _write_rules(tmp_path, {
             "policies": [{
                 "name": "no-sqli",
                 "description": "No SQL injection",
@@ -121,7 +112,7 @@ class TestLoadPolicies:
         assert check.label == "user_input"
 
     def test_load_multiple_policies(self, tmp_path):
-        config = _write_policies(tmp_path, {
+        config = _write_rules(tmp_path, {
             "policies": [
                 {"name": "p1", "severity": "error", "checks": [{"type": "structural", "pattern": "eval($X)"}]},
                 {"name": "p2", "severity": "warning", "checks": [{"type": "structural", "pattern": "exec($X)"}]},
@@ -135,13 +126,13 @@ class TestLoadPolicies:
             load_policies(str(tmp_path / "nonexistent.yaml"))
 
     def test_load_invalid_yaml(self, tmp_path):
-        config = _write_policies(tmp_path, {"not_policies": []})
+        config = _write_rules(tmp_path, {"not_policies": []})
         with pytest.raises(ValueError, match="policies"):
             load_policies(config)
 
     def test_load_hyphenated_keys(self, tmp_path):
         """Hyphenated YAML keys (flows-from) should be accepted."""
-        config = _write_policies(tmp_path, {
+        config = _write_rules(tmp_path, {
             "policies": [{
                 "name": "test",
                 "severity": "error",
@@ -301,9 +292,12 @@ class TestLoadPolicies:
         policies = load_policies(config_path)
         assert policies == []
 
-    def test_load_sequence_null_path(self, tmp_path):
-        """Sequence check with `path:` (null value) should not crash."""
-        config_path = _write_policies(tmp_path, {
+    @pytest.mark.parametrize("path, error", [
+        (None, None),
+        ({"a -> missing": {}}, "path references unknown step 'missing'"),
+    ])
+    def test_load_sequence_path(self, tmp_path, path, error):
+        config_path = _write_rules(tmp_path, {
             "policies": [{
                 "name": "test-seq",
                 "severity": "error",
@@ -316,12 +310,15 @@ class TestLoadPolicies:
                         {"bind": "a", "pattern": "$X = input()"},
                         {"bind": "b", "pattern": "eval($X)"},
                     ],
-                    "path": None,
+                    "path": path,
                 }],
             }],
         })
-        policies = load_policies(config_path)
-        assert len(policies) == 1
+        if error:
+            with pytest.raises(ValueError, match=error):
+                load_policies(config_path)
+        else:
+            assert len(load_policies(config_path)) == 1
 
 
 class TestValidatePolicies:
@@ -329,11 +326,22 @@ class TestValidatePolicies:
         p = Policy("test", "desc", "error", [StructuralCheck("print($X)")])
         assert validate_policies([p]) == []
 
-    def test_invalid_severity(self):
+    @pytest.mark.parametrize("schema", ["policies", "rules"])
+    def test_invalid_severity(self, tmp_path, schema):
         p = Policy("test", "desc", "critical", [StructuralCheck("print($X)")])
         errors = validate_policies([p])
         assert len(errors) == 1
         assert "severity" in errors[0]
+        document = ({"policies": [{"name": "test", "severity": "critical",
+                                  "checks": [{"type": "structural", "pattern": "print($X)"}]}]}
+                    if schema == "policies" else
+                    {"rules": {"test": {"severity": "critical", "match": "print($X)"}}})
+        config = _write_rules(tmp_path, document)
+        with pytest.raises(ValueError, match="invalid severity"):
+            load_policies(config)
+        result = runner.invoke(app, ["policy", str(tmp_path), "--config", config])
+        assert result.exit_code != 0
+        assert "invalid severity" in result.output
 
     def test_no_checks(self):
         p = Policy("test", "desc", "error", [])

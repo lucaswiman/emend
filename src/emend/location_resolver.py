@@ -268,22 +268,6 @@ class LocationResolver:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _collect_func_ranges(
-    syms: list,  # list[NestedSymbol]
-    out: list[_FuncRange],
-    prefix: str = "",
-) -> None:
-    """Recursively collect (qualified_name, start_line, end_line) for functions."""
-    _FUNC_KINDS = {"function", "async_function", "method", "async_method"}
-    for sym in syms:
-        qn = ".".join(sym.path) if sym.path else sym.name
-        if sym.kind in _FUNC_KINDS:
-            out.append((qn, sym.line_start, sym.line_end))
-        # Always recurse to pick up nested functions inside classes, etc.
-        if sym.children:
-            _collect_func_ranges(sym.children, out, qn)
-
-
 def _collect_func_ranges_from_raw(
     raw_syms: list[dict],
     out: list[_FuncRange],

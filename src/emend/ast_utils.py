@@ -270,32 +270,3 @@ def find_symbol_by_line(symbols: list[NestedSymbol], line: int, line_end: int | 
         return best_match
 
     return find_innermost(symbols)
-
-
-def get_symbol_source(filepath: str, symbol: NestedSymbol, dedent: bool = False) -> str:
-    """Extract the source code for a symbol, optionally dedenting."""
-    with open(filepath) as f:
-        lines = f.readlines()
-
-    # Include decorator lines if present
-    start_line = symbol.line_start
-    if symbol.decorator_line_start is not None:
-        start_line = symbol.decorator_line_start
-
-    source_lines = lines[start_line - 1:symbol.line_end]
-    source = ''.join(source_lines)
-
-    if dedent:
-        # Find minimum indentation
-        non_empty_lines = [l for l in source_lines if l.strip()]
-        if non_empty_lines:
-            min_indent = min(len(l) - len(l.lstrip()) for l in non_empty_lines)
-            dedented_lines = []
-            for line in source_lines:
-                if line.strip():
-                    dedented_lines.append(line[min_indent:])
-                else:
-                    dedented_lines.append('\n')
-            source = ''.join(dedented_lines)
-
-    return source
