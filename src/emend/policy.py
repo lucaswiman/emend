@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +27,16 @@ from emend.rules_config import (
 )
 
 # Import check types from their canonical modules.
-from emend.checks.structural import StructuralCheck
-from emend.checks.types import TypeCheck
-from emend.checks.datalog import DatalogCheck
-from emend.checks.custom import CustomCheck
-from emend.checks.sequence import SequenceCheck, SequenceStep, SequencePathConstraint
+from emend.checks.structural import StructuralCheck, run_structural_check as _run_structural_check
+from emend.checks.types import TypeCheck, run_type_check as _run_type_check
+from emend.checks.deadcode import run_deadcode_check as _run_deadcode_check
+from emend.checks.datalog import DatalogCheck, run_datalog_check as _run_datalog_check
+from emend.checks.custom import CustomCheck, run_custom_check as _run_custom_check
+from emend.checks.sequence import (
+    SequenceCheck, SequenceStep, SequencePathConstraint,
+    run_sequence_check as _run_sequence_check,
+)
+from emend.checks.violations import PolicyViolation
 
 # Policy and lint share the same dead-code configuration dataclass.
 # ``DeadCodeCheck`` is kept as an alias for readability in policy-side code.
@@ -62,19 +67,6 @@ class Policy:
     description: str
     severity: str  # "error", "warning", "info"
     checks: list[PolicyCheck]
-
-
-@dataclass
-class PolicyViolation:
-    """A single policy violation."""
-    file_path: str
-    line: int
-    col: int
-    policy_name: str
-    check_name: str
-    severity: str
-    message: str
-    witness: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -456,67 +448,6 @@ def _run_flow_check(
             witness=witness,
         ))
     return violations
-
-
-def _run_structural_check(
-    check: StructuralCheck,
-    policy: Policy,
-    file_path: str,
-    source: str,
-    language: str,
-) -> list[PolicyViolation]:
-    from emend.checks.structural import run_structural_check
-    return run_structural_check(check, policy, file_path, source, language)
-
-
-def _run_type_check(
-    check: TypeCheck,
-    policy: Policy,
-    file_path: str,
-    source: str,
-    language: str,
-    project_root: str | None = None,
-) -> list[PolicyViolation]:
-    from emend.checks.types import run_type_check
-    return run_type_check(check, policy, file_path, source, language, project_root)
-
-
-def _run_deadcode_check(
-    check: DeadCodeCheck,
-    policy: Policy,
-    project_path: str,
-) -> list[PolicyViolation]:
-    from emend.checks.deadcode import run_deadcode_check
-    return run_deadcode_check(check, policy, project_path)
-
-
-def _run_custom_check(
-    check: CustomCheck,
-    policy: Policy,
-    file_path: str,
-    source: str,
-    language: str,
-) -> list[PolicyViolation]:
-    from emend.checks.custom import run_custom_check
-    return run_custom_check(check, policy, file_path, source, language)
-
-
-def _run_datalog_check(
-    check: DatalogCheck,
-    policy: Policy,
-    project_path: str,
-) -> list[PolicyViolation]:
-    from emend.checks.datalog import run_datalog_check
-    return run_datalog_check(check, policy, project_path)
-
-
-def _run_sequence_check(
-    check: SequenceCheck,
-    policy: Policy,
-    project_path: str,
-) -> list[PolicyViolation]:
-    from emend.checks.sequence import run_sequence_check
-    return run_sequence_check(check, policy, project_path)
 
 
 # ---------------------------------------------------------------------------

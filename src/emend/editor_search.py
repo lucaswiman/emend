@@ -418,7 +418,6 @@ class EditorSearchEngine:
         # Query history (session-scoped, most recent first)
         self._query_history: list[dict] = []
         self._query_history_max = 100
-        self._project_file_cache: tuple[int, list[str]] | None = None
 
         # Hot buffer snapshots (unsaved editor content)
         self._hot_buffers: dict[str, str] = {}  # resolved file_path -> content
@@ -465,17 +464,6 @@ class EditorSearchEngine:
 
     def _collect_project_files(self) -> list[str]:
         root = Path(self.project_root).resolve()
-        try:
-            root_mtime = root.stat().st_mtime_ns
-        except OSError:
-            root_mtime = -1
-
-        if (
-            self._project_file_cache is not None
-            and self._project_file_cache[0] == root_mtime
-        ):
-            return self._project_file_cache[1]
-
         files: list[str] = []
         try:
             proc = subprocess.run(
@@ -520,7 +508,6 @@ class EditorSearchEngine:
                 for filename in filenames:
                     files.append(str(Path(dirpath) / filename))
 
-        self._project_file_cache = (root_mtime, files)
         return files
 
     # -- FTS ----------------------------------------------------------------
@@ -1980,25 +1967,11 @@ class EditorSearchEngine:
 
         items: list[dict] = []
         # impacted_symbols are selector strings like "file.py::Class.method"
-        for sel_str in result.impacted_symbols[:limit]:
+        for sel_str in [*result.impacted_symbols[:limit], *result.impacted_tests[:limit]]:
             parts = sel_str.split("::", 1)
-            fp = parts[0] if parts else ""
+            fp = parts[0]
             sym_part = parts[1] if len(parts) > 1 else sel_str
             name = sym_part.rsplit(".", 1)[-1] if sym_part else sel_str
-            items.append({
-                "name": name,
-                "kind": "function",
-                "file_path": fp,
-                "line": 1,
-                "end_line": 1,
-                "qualified_name": sym_part,
-            })
-        # Also include impacted tests
-        for test_str in result.impacted_tests[:limit]:
-            parts = test_str.split("::", 1)
-            fp = parts[0] if parts else ""
-            sym_part = parts[1] if len(parts) > 1 else test_str
-            name = sym_part.rsplit(".", 1)[-1] if sym_part else test_str
             items.append({
                 "name": name,
                 "kind": "function",
@@ -2828,29 +2801,17 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         line = int(params.pop("line", 1))
         col = int(params.pop("col", 0))
         return engine.goto_definition(file, line, col).to_dict()
-    elif method == "rename_preview":
+    elif method in ("rename_preview", "rename_apply"):
         qn = params.get("qualified_name", "")
         new_name = params.get("new_name", "")
         file = params.get("file", "")
-        return engine.rename_preview(qn, new_name, file=file).to_dict()
-    elif method == "rename_apply":
-        qn = params.get("qualified_name", "")
-        new_name = params.get("new_name", "")
-        file = params.get("file", "")
-        return engine.rename_apply(qn, new_name, file=file).to_dict()
-    elif method == "complete":
+        return getattr(engine, method)(qn, new_name, file=file).to_dict()
+    elif method in ("complete", "complete_diagnostics"):
         prefix = params.get("prefix", params.get("query", ""))
         file = params.get("file", "")
         line = int(params.get("line", 0))
         col = int(params.get("col", 0))
-        logger.debug("complete() called: prefix=%r, file=%r, line=%s, col=%s", prefix, file, line, col)
-        return engine.complete(prefix, file=file, line=line, col=col).to_dict()
-    elif method == "complete_diagnostics":
-        prefix = params.get("prefix", params.get("query", ""))
-        file = params.get("file", "")
-        line = int(params.get("line", 0))
-        col = int(params.get("col", 0))
-        return engine.complete_diagnostics(prefix, file=file, line=line, col=col).to_dict()
+        return getattr(engine, method)(prefix, file=file, line=line, col=col).to_dict()
     # -- Mapping methods --
     elif method == "mapping_lookup":
         return _mapping_lookup(engine, params)
@@ -2871,42 +2832,22 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
         return _module_resolve(engine, params)
     elif method == "module_map_add":
         return _module_map_add(engine, params)
-    elif method == "replace_preview":
-        return engine.replace_preview(
+    elif method in ("replace_preview", "replace_apply"):
+        return getattr(engine, method)(
             pattern=params.get("pattern", ""),
             replacement=params.get("replacement", ""),
             file=params.get("file", ""),
             inside=params.get("inside"),
             not_inside=params.get("not_inside"),
         ).to_dict()
-    elif method == "replace_apply":
-        return engine.replace_apply(
-            pattern=params.get("pattern", ""),
-            replacement=params.get("replacement", ""),
-            file=params.get("file", ""),
-            inside=params.get("inside"),
-            not_inside=params.get("not_inside"),
-        ).to_dict()
-    elif method == "move_preview":
-        return engine.move_preview(
+    elif method in ("move_preview", "move_apply"):
+        return getattr(engine, method)(
             qualified_name=params.get("qualified_name", ""),
             dest_file=params.get("dest_file", ""),
             file=params.get("file", ""),
         ).to_dict()
-    elif method == "move_apply":
-        return engine.move_apply(
-            qualified_name=params.get("qualified_name", ""),
-            dest_file=params.get("dest_file", ""),
-            file=params.get("file", ""),
-        ).to_dict()
-    elif method == "callers":
-        return engine.callers(
-            qualified_name=params.get("qualified_name", ""),
-            file=params.get("file", ""),
-            limit=int(params.get("limit", 50)),
-        ).to_dict()
-    elif method == "callees":
-        return engine.callees(
+    elif method in ("callers", "callees", "impact"):
+        return getattr(engine, method)(
             qualified_name=params.get("qualified_name", ""),
             file=params.get("file", ""),
             limit=int(params.get("limit", 50)),
@@ -2917,12 +2858,6 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
             line=int(params.get("line", 0)),
             col=int(params.get("col", 0)),
         ).to_dict()
-    elif method == "impact":
-        return engine.impact(
-            qualified_name=params.get("qualified_name", ""),
-            file=params.get("file", ""),
-            limit=int(params.get("limit", 50)),
-        ).to_dict()
     elif method == "check_duplicates":
         return engine.check_duplicates(
             file=params.get("file", ""),
@@ -2931,16 +2866,11 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
             min_lines=int(params.get("min_lines", 5)),
             min_score=float(params.get("min_score", 0.0)),
         ).to_dict()
-    elif method == "buffer_open":
+    elif method in ("buffer_open", "buffer_update"):
         fp = params.pop("file", "")
         content = params.pop("content", "")
         version = int(params.pop("version", 0))
-        return engine.buffer_open(fp, content, version).to_dict()
-    elif method == "buffer_update":
-        fp = params.pop("file", "")
-        content = params.pop("content", "")
-        version = int(params.pop("version", 0))
-        return engine.buffer_update(fp, content, version).to_dict()
+        return getattr(engine, method)(fp, content, version).to_dict()
     elif method == "buffer_close":
         fp = params.pop("file", "")
         return engine.buffer_close(fp).to_dict()

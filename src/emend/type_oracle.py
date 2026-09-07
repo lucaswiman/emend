@@ -425,10 +425,10 @@ class TypeOracle(ABC):
     def infer_file(self, path: Path, project_root: Path | None = None) -> FileTypes:
         """Return inferred types for all symbols/expressions in a file."""
 
-    @abstractmethod
     def type_at(self, path: Path, line: int, col: int,
                 project_root: Path | None = None) -> TypeBinding | None:
         """Return the inferred type at a specific source position."""
+        return self.infer_file(path, project_root).type_at(line, col)
 
     @abstractmethod
     def clear_cache(self) -> None:
@@ -863,7 +863,7 @@ def _parse_pyrefly_debug(debug_json: dict, file_path: str) -> FileTypes:
 # ---------------------------------------------------------------------------
 
 class _FileTypeCache:
-    """Thread-safe two-tier cache of FileTypes keyed by file content hash.
+    """Thread-safe two-tier cache of FileTypes keyed by path and content hash.
 
     Tier 1: In-memory dict (fast, lost on exit).
     Tier 2: On-disk SQLite table (persists across invocations).
@@ -890,19 +890,18 @@ class _FileTypeCache:
         if self._db is not None:
             ft = self._db.get(content_hash)
             if ft is not None:
-                with self._lock:
-                    self._cache[content_hash] = ft
+                self._put_memory(content_hash, ft)
                 return ft
         return None
 
-    def put(self, content_hash: str, ft: FileTypes) -> None:
+    def _put_memory(self, content_hash: str, ft: FileTypes) -> None:
         with self._lock:
-            if len(self._cache) >= self._max_entries:
-                # Evict first-inserted ~25% (FIFO)
-                keys = list(self._cache.keys())[:self._max_entries // 4]
-                for k in keys:
-                    del self._cache[k]
             self._cache[content_hash] = ft
+            if len(self._cache) > max(0, self._max_entries):
+                del self._cache[next(iter(self._cache))]
+
+    def put(self, content_hash: str, ft: FileTypes) -> None:
+        self._put_memory(content_hash, ft)
         # Persist to disk
         if self._db is not None:
             self._db.put(content_hash, ft)
@@ -987,10 +986,10 @@ class _TypeOracleDiskCache:
             logger.debug("type cache clear failed", exc_info=True)
 
 
-def _content_hash(path: Path) -> str:
-    """Compute a fast content hash for a file."""
-    content = path.read_bytes()
-    return hashlib.md5(content, usedforsecurity=False).hexdigest()
+def _file_cache_key(path: Path, content_hash: str | None = None) -> str:
+    """Key file-specific type results by resolved path and content digest."""
+    digest = content_hash or hashlib.md5(path.read_bytes(), usedforsecurity=False).hexdigest()
+    return f"{path.resolve()}:{digest}"
 
 
 def _type_cache_db_path(
@@ -1047,7 +1046,7 @@ def load_cached_file_types(
         try:
             row = conn.execute(
                 "SELECT data FROM type_cache WHERE hash = ?",
-                (content_hash or _content_hash(path),),
+                (_file_cache_key(path, content_hash),),
             ).fetchone()
         finally:
             conn.close()
@@ -1104,7 +1103,7 @@ class PyreflyAdapter(TypeOracle):
             return FileTypes(path=str(path))
 
         # Check cache first
-        content_hash = _content_hash(path)
+        content_hash = _file_cache_key(path)
         cached = self._cache.get(content_hash)
         if cached is not None:
             return cached
@@ -1119,11 +1118,6 @@ class PyreflyAdapter(TypeOracle):
 
         self._cache.put(content_hash, ft)
         return ft
-
-    def type_at(self, path: Path, line: int, col: int,
-                project_root: Path | None = None) -> TypeBinding | None:
-        ft = self.infer_file(path, project_root)
-        return ft.type_at(line, col)
 
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -1187,7 +1181,7 @@ class PyreflyAdapter(TypeOracle):
             if not rp.exists():
                 results[str(rp)] = FileTypes(path=str(rp))
                 continue
-            content_hash = _content_hash(rp)
+            content_hash = _file_cache_key(rp)
             cached = self._cache.get(content_hash)
             if cached is not None:
                 results[str(rp)] = cached
@@ -1308,7 +1302,7 @@ class _LSPTypeOracle(TypeOracle):
         if not path.exists():
             return FileTypes(path=str(path))
 
-        content_hash = _content_hash(path)
+        content_hash = _file_cache_key(path)
         cached = self._cache.get(content_hash)
         if cached is not None:
             return cached
@@ -1366,11 +1360,6 @@ class _LSPTypeOracle(TypeOracle):
 
     def _parse_hover_type(self, hover_text: str) -> str | None:  # pragma: no cover
         raise NotImplementedError
-
-    def type_at(self, path: Path, line: int, col: int,
-                project_root: Path | None = None) -> TypeBinding | None:
-        ft = self.infer_file(path, project_root)
-        return ft.type_at(line, col)
 
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -1583,7 +1572,7 @@ class TypeScriptAdapter(TypeOracle):
         if not path.exists():
             return FileTypes(path=str(path))
 
-        content_hash = _content_hash(path)
+        content_hash = _file_cache_key(path)
         cached = self._cache.get(content_hash)
         if cached is not None:
             return cached
@@ -1629,11 +1618,6 @@ class TypeScriptAdapter(TypeOracle):
             ))
         ft.build_index()
         return ft
-
-    def type_at(self, path: Path, line: int, col: int,
-                project_root: Path | None = None) -> TypeBinding | None:
-        ft = self.infer_file(path, project_root)
-        return ft.type_at(line, col)
 
     def clear_cache(self) -> None:
         self._cache.clear()

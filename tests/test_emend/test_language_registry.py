@@ -106,178 +106,58 @@ def test_is_source_file():
     assert is_source_file("README.md") is False
 
 
-# ---------------------------------------------------------------------------
-# resolve_files — default (python)
-# ---------------------------------------------------------------------------
-
-def test_resolve_files_default_python(tmp_path):
-    (tmp_path / "a.py").write_text("x = 1")
-    (tmp_path / "b.ts").write_text("let x = 1")
-    files, is_multi = resolve_files(str(tmp_path))
-    names = {f.name for f in files}
-    assert "a.py" in names
-    assert "b.ts" not in names
-    assert is_multi is True
+@pytest.fixture
+def mixed_project(tmp_path):
+    for name, content in [
+        ("a.py", "x = 1"), ("b.ts", "let x = 1"),
+        ("c.tsx", "export default () => <div/>;"),
+    ]:
+        (tmp_path / name).write_text(content)
+    return tmp_path
 
 
-def test_resolve_files_typescript(tmp_path):
-    (tmp_path / "a.py").write_text("x = 1")
-    (tmp_path / "b.ts").write_text("let x = 1")
-    (tmp_path / "c.tsx").write_text("export default () => <div/>;")
-    files, is_multi = resolve_files(str(tmp_path), language="typescript")
-    names = {f.name for f in files}
-    assert "b.ts" in names
-    assert "c.tsx" in names
-    assert "a.py" not in names
-    assert is_multi is True
+@pytest.mark.parametrize("target, options, expected, is_multi", [
+    ("", {}, {"a.py"}, True),
+    ("", {"language": "typescript"}, {"b.ts", "c.tsx"}, True),
+    ("a.py", {}, {"a.py"}, False),
+    ("*.py", {}, {"a.py"}, True),
+    ("*", {"language": "typescript"}, {"b.ts", "c.tsx"}, True),
+])
+def test_resolve_files(mixed_project, target, options, expected, is_multi):
+    files, actual_multi = resolve_files(str(mixed_project / target), **options)
+    assert {f.name for f in files} == expected
+    assert len(files) == len(expected)
+    assert actual_multi is is_multi
 
 
-def test_resolve_files_single_file(tmp_path):
-    p = tmp_path / "foo.py"
-    p.write_text("pass")
-    files, is_multi = resolve_files(str(p))
-    assert len(files) == 1
-    assert files[0].name == "foo.py"
-    assert is_multi is False
+@pytest.mark.parametrize("code, expected", [
+    ("export function foo(): void {}\nfunction internal(): void {}\n", {"foo"}),
+    ("export class Bar {}\nclass NotExported {}\n", {"Bar"}),
+    ("export const baz = 42;\nconst hidden = 1;\n", {"baz"}),
+    ("export let x = 3;\nlet y = 4;\nexport var z = 5;\nvar w = 6;\n", {"x", "z"}),
+    ("export interface IFoo { x: number; }\ninterface IBar {}\n", {"IFoo"}),
+    ("export type MyType = string;\ntype Other = number;\n", {"MyType"}),
+    ("export enum Color { Red, Green, Blue }\nenum Status { On, Off }\n", {"Color"}),
+    ("function foo() {}\nfunction bar() {}\nexport { foo, bar };\n", {"foo", "bar"}),
+    # A local export alias retains the original declaration name.
+    ("function foo() {}\nexport { foo as f };\n", {"foo"}),
+    ("export default class Anonymous {}\n", {"Anonymous"}),
+    ("export abstract class AbstractFoo {}\n", {"AbstractFoo"}),
+    # Re-exports do not declare names in this module.
+    ('export { Foo } from "./other";\n', set()),
+])
+def test_detect_exported_names_typescript(code, expected):
+    assert detect_exported_names(code, "typescript") == expected
 
 
-def test_resolve_files_glob_python(tmp_path):
-    (tmp_path / "a.py").write_text("x = 1")
-    (tmp_path / "b.ts").write_text("let x = 1")
-    pattern = str(tmp_path / "*.py")
-    files, is_multi = resolve_files(pattern)
-    names = {f.name for f in files}
-    assert "a.py" in names
-    assert "b.ts" not in names
-    assert is_multi is True
+def test_detect_exported_names_python_empty():
+    assert detect_exported_names("def foo(): pass\n__all__ = ['foo']\n", "python") == set()
 
 
-def test_resolve_files_glob_typescript(tmp_path):
-    (tmp_path / "a.py").write_text("x = 1")
-    (tmp_path / "b.ts").write_text("let x = 1")
-    pattern = str(tmp_path / "*")
-    files, is_multi = resolve_files(pattern, language="typescript")
-    names = {f.name for f in files}
-    assert "b.ts" in names
-    assert "a.py" not in names
-
-
-# ---------------------------------------------------------------------------
-# detect_exported_names — TypeScript
-# ---------------------------------------------------------------------------
-
-def test_detect_exported_names_ts_function():
-    code = "export function foo(): void {}\nfunction internal(): void {}\n"
-    result = detect_exported_names(code, "typescript")
-    assert "foo" in result
-    assert "internal" not in result
-
-
-def test_detect_exported_names_ts_class():
-    code = "export class Bar {}\nclass NotExported {}\n"
-    result = detect_exported_names(code, "typescript")
-    assert "Bar" in result
-    assert "NotExported" not in result
-
-
-def test_detect_exported_names_ts_const():
-    code = "export const baz = 42;\nconst hidden = 1;\n"
-    result = detect_exported_names(code, "typescript")
-    assert "baz" in result
-    assert "hidden" not in result
-
-
-def test_detect_exported_names_ts_let_var():
-    code = "export let x = 3;\nlet y = 4;\nexport var z = 5;\nvar w = 6;\n"
-    result = detect_exported_names(code, "typescript")
-    assert "x" in result
-    assert "z" in result
-    assert "y" not in result
-    assert "w" not in result
-
-
-def test_detect_exported_names_ts_interface():
-    code = "export interface IFoo { x: number; }\ninterface IBar {}\n"
-    result = detect_exported_names(code, "typescript")
-    assert "IFoo" in result
-    assert "IBar" not in result
-
-
-def test_detect_exported_names_ts_type():
-    code = "export type MyType = string;\ntype Other = number;\n"
-    result = detect_exported_names(code, "typescript")
-    assert "MyType" in result
-    assert "Other" not in result
-
-
-def test_detect_exported_names_ts_enum():
-    code = "export enum Color { Red, Green, Blue }\nenum Status { On, Off }\n"
-    result = detect_exported_names(code, "typescript")
-    assert "Color" in result
-    assert "Status" not in result
-
-
-def test_detect_exported_names_ts_named_block():
-    code = "function foo() {}\nfunction bar() {}\nexport { foo, bar };\n"
-    result = detect_exported_names(code, "typescript")
-    assert "foo" in result
-    assert "bar" in result
-
-
-def test_detect_exported_names_ts_named_block_with_alias():
-    code = "function foo() {}\nexport { foo as f };\n"
-    result = detect_exported_names(code, "typescript")
-    # Original name (before 'as') should be in the result
-    assert "foo" in result
-    assert "f" not in result
-
-
-def test_detect_exported_names_ts_default_class():
-    code = "export default class Anonymous {}\n"
-    result = detect_exported_names(code, "typescript")
-    assert "Anonymous" in result
-
-
-def test_detect_exported_names_ts_abstract_class():
-    code = "export abstract class AbstractFoo {}\n"
-    result = detect_exported_names(code, "typescript")
-    assert "AbstractFoo" in result
-
-
-def test_detect_exported_names_ts_reexport_not_included():
-    # Re-exports: `export { X } from "module"` — X is from another module,
-    # not defined here, so it should NOT be in the result.
-    code = 'export { Foo } from "./other";\n'
-    result = detect_exported_names(code, "typescript")
-    assert "Foo" not in result
-
-
-def test_detect_exported_names_ts_python_empty():
-    # Python always returns empty set
-    py_code = "def foo(): pass\n__all__ = ['foo']\n"
-    assert detect_exported_names(py_code, "python") == set()
-
-
-# ---------------------------------------------------------------------------
-# detect_exported_names — Rust
-# ---------------------------------------------------------------------------
-
-def test_detect_exported_names_rust_pub_fn():
-    code = "pub fn exported_fn() {}\nfn private_fn() {}\n"
-    result = detect_exported_names(code, "rust")
-    assert "exported_fn" in result
-    assert "private_fn" not in result
-
-
-def test_detect_exported_names_rust_pub_struct():
-    code = "pub struct ExportedStruct {}\nstruct PrivateStruct {}\n"
-    result = detect_exported_names(code, "rust")
-    assert "ExportedStruct" in result
-    assert "PrivateStruct" not in result
-
-
-def test_detect_exported_names_rust_pub_crate():
-    code = "pub(crate) fn crate_fn() {}\nfn private_fn() {}\n"
-    result = detect_exported_names(code, "rust")
-    assert "crate_fn" in result
-    assert "private_fn" not in result
+@pytest.mark.parametrize("code, expected", [
+    ("pub fn exported_fn() {}\nfn private_fn() {}\n", {"exported_fn"}),
+    ("pub struct ExportedStruct {}\nstruct PrivateStruct {}\n", {"ExportedStruct"}),
+    ("pub(crate) fn crate_fn() {}\nfn private_fn() {}\n", {"crate_fn"}),
+])
+def test_detect_exported_names_rust(code, expected):
+    assert detect_exported_names(code, "rust") == expected

@@ -25,6 +25,8 @@ def test_editor_search_files(tmp_path):
     conn.close()
 
     engine = EditorSearchEngine(str(tmp_path))
+    directory = tmp_path / "docs"
+    directory.mkdir()
     
     # Search for "foo.py"
     res = engine.search("foo.py")
@@ -38,4 +40,11 @@ def test_editor_search_files(tmp_path):
     res = engine.search("p/bz")
     assert any(item["kind"] == "file" and item["file_path"] == "pkg/baz.ts" for item in res.items)
     
+    # Changes in a nested directory must be visible without touching the root.
+    assert engine.search("guide.txt").items == []
+    guide = directory / "guide.txt"
+    guide.write_text("guide")
+    assert [item["file_path"] for item in engine.search("guide.txt").items] == [str(guide)]
+    guide.unlink()
+    assert engine.search("guide.txt").items == []
     engine.close()

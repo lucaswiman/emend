@@ -114,30 +114,11 @@ class PythonImportHandler(ImportHandler):
         lines = source_code.splitlines(keepends=True)
         import_line = import_str.rstrip("\n") + "\n"
 
-        first_import_line = None  # 0-indexed
-        last_import_line = None  # 0-indexed
-        last_future_line = None  # 0-indexed
-
-        for imp in imports:
-            sl = imp["start_line"]  # 0-indexed
-            el = imp["end_line"]  # 0-indexed
-            if first_import_line is None:
-                first_import_line = sl
-            last_import_line = el
-            # Detect __future__ imports: is_plain=False and module='__future__'
-            if not imp["is_plain"] and imp.get("module") == "__future__":
-                last_future_line = el
-
-        # ``lines`` is a 0-indexed list; to insert *after* line index N we
-        # insert at list position N + 1.
         if position == 0:
-            insert_at = (last_future_line + 1) if last_future_line is not None else 0
-            lines.insert(insert_at, import_line)
-        else:
-            if last_import_line is not None:
-                lines.insert(last_import_line + 1, import_line)
-            else:
-                lines.insert(0, import_line)
+            imports = [imp for imp in imports
+                       if not imp["is_plain"] and imp.get("module") == "__future__"]
+        insert_at = imports[-1]["end_line"] + 1 if imports else 0
+        lines.insert(insert_at, import_line)
 
         return "".join(lines)
 

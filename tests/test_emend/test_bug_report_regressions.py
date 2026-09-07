@@ -3,7 +3,6 @@
 import ast
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -107,7 +106,6 @@ def test_rename_private_symbol_updates_definition(tmp_path, monkeypatch):
     'def _hidden()' unchanged in a.py, causing a runtime ImportError when b.py
     tries 'from a import hidden'.
     """
-    import os
     from emend.transform import rename_symbol
     from emend.component_selector import ExtendedSelector
 
@@ -140,7 +138,7 @@ def test_rename_private_symbol_updates_definition(tmp_path, monkeypatch):
     )
 
     # project_path='.' mirrors the CLI flag '-p .' from the bug report
-    diffs = rename_symbol(selector, "hidden", project_path=".", apply=True)
+    rename_symbol(selector, "hidden", project_path=".", apply=True)
 
     # The defining declaration in a.py should be renamed
     a_content = a_file.read_text()
@@ -169,422 +167,95 @@ def test_rename_private_symbol_updates_definition(tmp_path, monkeypatch):
     )
 
 
-# ---------------------------------------------------------------------------
-# Issue #135: Module Rename Missing String-Based References
-# ---------------------------------------------------------------------------
-
-
-def test_rename_module_relative_import_in_init(tmp_path, run_emend_cmd):
-    """Relative imports in __init__.py should be updated on module rename.
-
-    GitHub issue #135: When renaming pkg/models.py to pkg/resolution_models.py,
-    a relative import like ``from .models import VALUE`` in __init__.py is not
-    updated.
-    """
-    # Create a package structure
+@pytest.mark.parametrize(
+    "consumer_path,source,expected",
+    [
+        pytest.param(
+            "pkg/__init__.py", "from .models import VALUE\n__all__ = ['VALUE']\n",
+            "from .resolution_models import VALUE\n__all__ = ['VALUE']\n",
+            id="relative-symbol-import",
+        ),
+        pytest.param(
+            "pkg/__init__.py", 'from . import models\n__all__ = ("models", "VALUE")\n',
+            'from . import resolution_models\n__all__ = ("resolution_models", "VALUE")\n',
+            id="tuple-exports",
+        ),
+        pytest.param(
+            "pkg/__init__.py", "from . import models\n__all__ = ['models']\n",
+            "from . import resolution_models\n__all__ = ['resolution_models']\n",
+            id="list-exports",
+        ),
+        pytest.param(
+            "loader.py", 'import importlib\nmod = importlib.import_module("pkg.models")\n',
+            'import importlib\nmod = importlib.import_module("pkg.resolution_models")\n',
+            id="dynamic-import",
+        ),
+        pytest.param(
+            "pkg/consumer.py", "from . import models\n\ndef use_it():\n    return models.VALUE\n",
+            "from . import resolution_models\n\ndef use_it():\n    return resolution_models.VALUE\n",
+            id="sibling-import-and-use",
+        ),
+        pytest.param(
+            "pkg/sub/consumer.py", "from .. import models\n\ndef use_it():\n    return models.VALUE\n",
+            "from .. import resolution_models\n\ndef use_it():\n    return resolution_models.VALUE\n",
+            id="parent-import-and-use",
+        ),
+    ],
+)
+def test_rename_module_references(tmp_path, run_emend_cmd, consumer_path, source, expected):
+    """Issue #135: rewrite imports, attribute uses, and module export strings."""
     pkg = tmp_path / "pkg"
     pkg.mkdir()
-
-    (pkg / "__init__.py").write_text(
-        "from .models import VALUE\n"
-        "__all__ = ['VALUE']\n"
-    )
-    (pkg / "models.py").write_text(
-        "VALUE = 42\n"
-    )
-
-    # Rename pkg/models.py -> pkg/resolution_models.py
-    result = run_emend_cmd([
-        "rename", str(pkg / "models.py"),
-        "--to", "resolution_models",
-        "--project", str(tmp_path),
-        "--apply",
-    ])
-    assert result.returncode == 0
-
-    # The new file should exist
-    assert (pkg / "resolution_models.py").exists()
-    assert not (pkg / "models.py").exists()
-
-    init_content = (pkg / "__init__.py").read_text()
-    # The relative import should have been updated
-    assert "from .resolution_models import VALUE" in init_content, (
-        f"Relative import was not updated. __init__.py content:\n{init_content}"
-    )
-    assert "from .models import" not in init_content, (
-        f"Old relative import still present. __init__.py content:\n{init_content}"
-    )
-
-
-def test_rename_module_all_entry(tmp_path, run_emend_cmd):
-    """__all__ string entries referencing the module should be updated on rename.
-
-    GitHub issue #135: When renaming pkg/models.py to pkg/resolution_models.py,
-    an __all__ entry like ``__all__ = ("models", "VALUE")`` still references the
-    old module name after renaming.
-    """
-    pkg = tmp_path / "pkg"
-    pkg.mkdir()
-
-    (pkg / "__init__.py").write_text(
-        'from . import models\n'
-        '__all__ = ("models", "VALUE")\n'
-    )
-    (pkg / "models.py").write_text(
-        "VALUE = 42\n"
-    )
-
-    result = run_emend_cmd([
-        "rename", str(pkg / "models.py"),
-        "--to", "resolution_models",
-        "--project", str(tmp_path),
-        "--apply",
-    ])
-    assert result.returncode == 0
-
-    assert (pkg / "resolution_models.py").exists()
-    assert not (pkg / "models.py").exists()
-
-    init_content = (pkg / "__init__.py").read_text()
-    # The __all__ string entry for the module name should be updated
-    assert (
-        '"resolution_models"' in init_content
-        or "'resolution_models'" in init_content
-    ), (
-        f"__all__ entry was not updated. __init__.py content:\n{init_content}"
-    )
-    # Old module name string should not remain in __all__
-    assert '"models"' not in init_content and "'models'" not in init_content, (
-        f"Old __all__ entry still present. __init__.py content:\n{init_content}"
-    )
-
-
-def test_rename_module_importlib_dynamic(tmp_path, run_emend_cmd):
-    """Dynamic importlib.import_module() calls should be updated on module rename.
-
-    GitHub issue #135: When renaming pkg/models.py to pkg/resolution_models.py,
-    ``importlib.import_module("pkg.models")`` is not updated.
-    """
-    pkg = tmp_path / "pkg"
-    pkg.mkdir()
-
     (pkg / "__init__.py").write_text("")
     (pkg / "models.py").write_text("VALUE = 42\n")
+    consumer = tmp_path / consumer_path
+    consumer.parent.mkdir(parents=True, exist_ok=True)
+    if consumer.parent.name == "sub":
+        (consumer.parent / "__init__.py").write_text("")
+    consumer.write_text(source)
 
-    loader = tmp_path / "loader.py"
-    loader.write_text(
-        "import importlib\n"
-        'mod = importlib.import_module("pkg.models")\n'
-    )
-
-    result = run_emend_cmd([
-        "rename", str(pkg / "models.py"),
-        "--to", "resolution_models",
-        "--project", str(tmp_path),
-        "--apply",
+    run_emend_cmd([
+        "rename", str(pkg / "models.py"), "--to", "resolution_models",
+        "--project", str(tmp_path), "--apply",
     ])
-    assert result.returncode == 0
 
-    assert (pkg / "resolution_models.py").exists()
+    assert (pkg / "resolution_models.py").read_text() == "VALUE = 42\n"
     assert not (pkg / "models.py").exists()
-
-    loader_content = loader.read_text()
-    assert 'importlib.import_module("pkg.resolution_models")' in loader_content, (
-        f"Dynamic import was not updated. loader.py content:\n{loader_content}"
-    )
-    assert '"pkg.models"' not in loader_content, (
-        f"Old dynamic import still present. loader.py content:\n{loader_content}"
-    )
+    assert consumer.read_text() == expected
 
 
-def test_rename_module_bare_relative_import_in_init(tmp_path, run_emend_cmd):
-    """``from . import models`` in __init__.py should be updated on module rename.
-
-    GitHub issue #135 (additional sub-issue): When renaming pkg/models.py to
-    pkg/resolution_models.py, a bare relative import ``from . import models``
-    in __init__.py is not updated.  This is different from the
-    ``from .models import VALUE`` form (which was already fixed).
-
-    Root cause: the Rust scope resolver emits QN ``..models`` (two dots) for
-    ``from . import models`` in __init__.py because __init__.py IS the package.
-    ``_resolve_relative_import_qn`` miscounts the levels and resolves to just
-    ``models`` instead of ``pkg.models``, so the comparison against the old
-    module name fails.
-    """
+@pytest.mark.parametrize(
+    "import_line,call,expected_import",
+    [
+        ("from .helpers import do_thing", "do_thing()", "from pkg.helpers import do_thing"),
+        ("from . import helpers", "helpers.do_thing()", "from pkg import helpers"),
+    ],
+    ids=["relative-symbol", "relative-module"],
+)
+def test_move_symbol_resolves_relative_imports(
+    tmp_path, run_emend_cmd, import_line, call, expected_import,
+):
+    """Moving out of a package must leave executable absolute imports."""
     pkg = tmp_path / "pkg"
     pkg.mkdir()
-
-    (pkg / "__init__.py").write_text(
-        "from . import models\n"
-        "__all__ = ['models']\n"
-    )
-    (pkg / "models.py").write_text(
-        "VALUE = 42\n"
-    )
-
-    result = run_emend_cmd([
-        "rename", str(pkg / "models.py"),
-        "--to", "resolution_models",
-        "--project", str(tmp_path),
-        "--apply",
-    ])
-    assert result.returncode == 0
-
-    assert (pkg / "resolution_models.py").exists()
-    assert not (pkg / "models.py").exists()
-
-    init_content = (pkg / "__init__.py").read_text()
-    # The bare relative import should have been updated
-    assert "from . import resolution_models" in init_content, (
-        f"Bare relative import was not updated. __init__.py content:\n{init_content}"
-    )
-    assert "from . import models" not in init_content, (
-        f"Old bare relative import still present. __init__.py content:\n{init_content}"
-    )
-
-
-def test_rename_module_bare_relative_import_attribute_access(tmp_path, run_emend_cmd):
-    """``models.VALUE`` should become ``resolution_models.VALUE`` after rename.
-
-    When a sibling module uses ``from . import models`` and then accesses
-    ``models.VALUE``, renaming the module should update both the import and
-    all attribute-access references to the old module name.
-    """
-    pkg = tmp_path / "pkg"
-    pkg.mkdir()
-
     (pkg / "__init__.py").write_text("")
-    (pkg / "models.py").write_text("VALUE = 42\n")
-    (pkg / "consumer.py").write_text(
-        "from . import models\n"
-        "\n"
-        "def use_it():\n"
-        "    return models.VALUE\n"
-    )
-
-    result = run_emend_cmd([
-        "rename", str(pkg / "models.py"),
-        "--to", "resolution_models",
-        "--project", str(tmp_path),
-        "--apply",
-    ])
-    assert result.returncode == 0
-
-    consumer_content = (pkg / "consumer.py").read_text()
-    assert "from . import resolution_models" in consumer_content, (
-        f"Import not updated. consumer.py:\n{consumer_content}"
-    )
-    assert "resolution_models.VALUE" in consumer_content, (
-        f"Attribute access not updated. consumer.py:\n{consumer_content}"
-    )
-    # Check no bare "models.VALUE" remains (but "resolution_models.VALUE" is OK).
-    lines = consumer_content.splitlines()
-    for line_text in lines:
-        if "models.VALUE" in line_text:
-            # Only flag if the match is NOT part of "resolution_models.VALUE"
-            stripped = line_text.replace("resolution_models.VALUE", "")
-            assert "models.VALUE" not in stripped, (
-                f"Old attribute access still present. consumer.py:\n{consumer_content}"
-            )
-
-
-def test_rename_module_bare_relative_import_in_sibling(tmp_path, run_emend_cmd):
-    """``from . import models`` in a sibling module should be updated on rename.
-
-    Same root cause as the __init__.py variant: the Rust resolver adds an extra
-    separator dot for ``from . import X`` style imports, producing QN ``..models``
-    instead of ``.models``.  ``_resolve_relative_import_qn`` must compensate
-    regardless of whether the file is __init__.py.
-    """
-    pkg = tmp_path / "pkg"
-    pkg.mkdir()
-
-    (pkg / "__init__.py").write_text("")
-    (pkg / "models.py").write_text("VALUE = 42\n")
-    (pkg / "consumer.py").write_text(
-        "from . import models\n"
-        "\n"
-        "def use_it():\n"
-        "    return models.VALUE\n"
-    )
-
-    result = run_emend_cmd([
-        "rename", str(pkg / "models.py"),
-        "--to", "resolution_models",
-        "--project", str(tmp_path),
-        "--apply",
-    ])
-    assert result.returncode == 0
-
-    assert (pkg / "resolution_models.py").exists()
-    assert not (pkg / "models.py").exists()
-
-    consumer_content = (pkg / "consumer.py").read_text()
-    assert "from . import resolution_models" in consumer_content, (
-        f"Bare relative import not updated. consumer.py:\n{consumer_content}"
-    )
-    assert "from . import models" not in consumer_content, (
-        f"Old import still present. consumer.py:\n{consumer_content}"
-    )
-
-
-def test_rename_module_parent_relative_import(tmp_path, run_emend_cmd):
-    """``from .. import models`` in a sub-package should be updated on rename.
-
-    The Rust resolver produces QN ``...models`` (three dots) for
-    ``from .. import models``.  Resolution must handle this correctly.
-    """
-    pkg = tmp_path / "pkg"
-    sub = pkg / "sub"
-    sub.mkdir(parents=True)
-
-    (pkg / "__init__.py").write_text("")
-    (pkg / "models.py").write_text("VALUE = 42\n")
-    (sub / "__init__.py").write_text("")
-    (sub / "consumer.py").write_text(
-        "from .. import models\n"
-        "\n"
-        "def use_it():\n"
-        "    return models.VALUE\n"
-    )
-
-    result = run_emend_cmd([
-        "rename", str(pkg / "models.py"),
-        "--to", "resolution_models",
-        "--project", str(tmp_path),
-        "--apply",
-    ])
-    assert result.returncode == 0
-
-    assert (pkg / "resolution_models.py").exists()
-    assert not (pkg / "models.py").exists()
-
-    consumer_content = (sub / "consumer.py").read_text()
-    assert "from .. import resolution_models" in consumer_content, (
-        f"Parent relative import not updated. consumer.py:\n{consumer_content}"
-    )
-    assert "from .. import models" not in consumer_content, (
-        f"Old import still present. consumer.py:\n{consumer_content}"
-    )
-
-
-def test_move_symbol_resolves_relative_imports(tmp_path, emend_cmd):
-    """Moving a symbol out of a package should convert relative imports to absolute.
-
-    When source is ``pkg/source.py`` with ``from .helpers import do_thing``
-    and the symbol is moved to ``dest.py`` (outside the package), the
-    relative import must become ``from pkg.helpers import do_thing``.
-    """
-    pkg = tmp_path / "pkg"
-    pkg.mkdir()
-
-    (pkg / "__init__.py").write_text("")
-    (pkg / "helpers.py").write_text(
-        "def do_thing():\n"
-        "    return 42\n"
-    )
+    (pkg / "helpers.py").write_text("def do_thing():\n    return 42\n")
     (pkg / "source.py").write_text(
-        "from .helpers import do_thing\n"
-        "\n"
-        "def my_func():\n"
-        "    return do_thing()\n"
+        f"{import_line}\n\ndef my_func():\n    return {call}\n"
     )
-
     dest = tmp_path / "dest.py"
-    dest.write_text(
-        "def existing():\n"
-        "    return 0\n"
-    )
-
-    result = subprocess.run(
-        [
-            emend_cmd,
-            "move",
-            f"{pkg / 'source.py'}::my_func",
-            str(dest),
-            "--project", str(tmp_path),
-            "--apply",
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, (
-        f"Command failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    )
-
-    dest_content = dest.read_text()
-    assert "def my_func" in dest_content, (
-        f"my_func should have been moved to dest.py:\n{dest_content}"
-    )
-    # The relative import must be resolved to absolute
-    assert "from pkg.helpers import do_thing" in dest_content, (
-        f"Relative import should be resolved to absolute.\n"
-        f"dest.py content:\n{dest_content}"
-    )
-    # Must NOT contain the broken relative import
-    assert "from .helpers import" not in dest_content, (
-        f"Relative import should not appear in dest.py:\n{dest_content}"
-    )
-    assert "from  import" not in dest_content, (
-        f"Broken empty-module import in dest.py:\n{dest_content}"
-    )
-
-
-def test_move_symbol_resolves_bare_relative_import(tmp_path, emend_cmd):
-    """``from . import helpers`` should become ``from pkg import helpers``.
-
-    Same as above but for the bare-name relative import form.
-    """
-    pkg = tmp_path / "pkg"
-    pkg.mkdir()
-
-    (pkg / "__init__.py").write_text("")
-    (pkg / "helpers.py").write_text(
-        "def do_thing():\n"
-        "    return 42\n"
-    )
-    (pkg / "source.py").write_text(
-        "from . import helpers\n"
-        "\n"
-        "def my_func():\n"
-        "    return helpers.do_thing()\n"
-    )
-
-    dest = tmp_path / "dest.py"
-    dest.write_text(
-        "def existing():\n"
-        "    return 0\n"
-    )
-
-    result = subprocess.run(
-        [
-            emend_cmd,
-            "move",
-            f"{pkg / 'source.py'}::my_func",
-            str(dest),
-            "--project", str(tmp_path),
-            "--apply",
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, (
-        f"Command failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    )
-
-    dest_content = dest.read_text()
-    assert "def my_func" in dest_content, (
-        f"my_func should have been moved to dest.py:\n{dest_content}"
-    )
-    # The bare relative import must be resolved to absolute
-    assert "from pkg import helpers" in dest_content, (
-        f"Bare relative import should be resolved to 'from pkg import helpers'.\n"
-        f"dest.py content:\n{dest_content}"
-    )
-    assert "from  import" not in dest_content, (
-        f"Broken empty-module import in dest.py:\n{dest_content}"
+    dest.write_text("def existing():\n    return 0\n")
+    run_emend_cmd([
+        "move", f"{pkg / 'source.py'}::my_func", str(dest),
+        "--project", str(tmp_path), "--apply",
+    ])
+    content = dest.read_text()
+    assert expected_import in content
+    assert "from ." not in content
+    assert "def my_func" not in (pkg / "source.py").read_text()
+    subprocess.run(
+        [sys.executable, "-c", "import dest; assert dest.my_func() == 42; assert dest.existing() == 0"],
+        cwd=tmp_path, check=True, capture_output=True, text=True,
     )
 
 

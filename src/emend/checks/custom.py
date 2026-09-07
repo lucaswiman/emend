@@ -6,8 +6,10 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from emend.checks.violations import PolicyViolation
+
 if TYPE_CHECKING:
-    from emend.policy import Policy, PolicyViolation
+    from emend.policy import Policy
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +34,6 @@ def run_custom_check(
     of dicts with at least ``line``, ``col``, ``message`` keys.
     """
     from emend.transform import find_pattern
-    from emend.policy import PolicyViolation
 
     local_ns: dict[str, Any] = {
         "find_pattern": find_pattern,

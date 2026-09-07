@@ -56,10 +56,10 @@ class TestMappings:
             source_project="a", source_identifier="x",
             target_project="b", target_identifier="y",
         ))
-        assert store.delete_mapping("x") is True
+        assert store.delete_mapping("x", source_project="b") is False
+        assert store.delete_mapping("x", target_identifier="z") is False
+        assert store.delete_mapping("x", source_project="a", target_identifier="y") is True
         assert store.search_mappings("x") == []
-
-    def test_delete_nonexistent(self, store):
         assert store.delete_mapping("nonexistent") is False
 
     def test_search_substring(self, store):
@@ -94,7 +94,7 @@ class TestMappings:
         ))
 
         results = store.search_mappings("", source_project="alpha", relationship="calls")
-        assert all(m.relationship == "calls" for m in results)
+        assert [(m.source_identifier, m.relationship) for m in results] == [("foo", "calls")]
 
     def test_find_mappings_for(self, store):
         store.add_mapping(IdentifierMapping(
@@ -137,6 +137,8 @@ class TestMappings:
         results = store.find_mappings_for("X", project="a", direction="source")
         assert len(results) == 1
         assert results[0].target_identifier == "Y"
+        assert store.find_mappings_for("Y", project="a") == []
+        assert store.find_mappings_for("Y", project="b", direction="target") == results
 
     def test_list_mappings(self, store):
         for i in range(5):

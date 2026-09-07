@@ -557,14 +557,12 @@ def _file_to_module(file_path: str, project_path: str | None) -> str:
 # Python and Rust always agree.
 _SKIP_DIRS = frozenset(_rust.skip_dirs())
 
-# Module-level file-list cache: maps (resolved project root, language) to (mtime_ns, file_list)
 from emend.file_collection import (
     collect_source_files as _collect_source_files,
     collect_source_files_scandir as _collect_source_files_scandir,
     collect_all_source_files as _collect_all_source_files,
     collect_git_tracked_source_files as _collect_git_tracked_source_files,
     detect_project_languages,
-    _file_list_cache,
 )
 
 

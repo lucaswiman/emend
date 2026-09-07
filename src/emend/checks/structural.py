@@ -6,8 +6,10 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from emend.checks.violations import PolicyViolation
+
 if TYPE_CHECKING:
-    from emend.policy import Policy, PolicyViolation
+    from emend.policy import Policy
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +32,6 @@ def run_structural_check(
 ) -> "list[PolicyViolation]":
     """Run a structural pattern check using transform.find_pattern."""
     from emend.transform import find_pattern
-    from emend.policy import PolicyViolation
 
     matches = find_pattern(
         check.pattern,

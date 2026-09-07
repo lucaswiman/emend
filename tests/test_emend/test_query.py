@@ -13,6 +13,32 @@ from emend.cli import app
 
 runner = CliRunner()
 
+
+@pytest.mark.parametrize("count", [False, True])
+def test_lookup_streaming_preserves_stdout(tmp_path, monkeypatch, count):
+    import io
+    import sys
+    from emend import query
+    from emend.transform import dispatch
+
+    for name in ("a", "b"):
+        (tmp_path / f"{name}.py").write_text("def f(): pass\n")
+    stdout, collect = sys.stdout, query.query_symbols
+
+    def checked_collect(*args, **kwargs):
+        assert sys.stdout is stdout
+        return collect(*args, **kwargs)
+
+    monkeypatch.setattr(query, "query_symbols", checked_collect)
+    monkeypatch.setattr(dispatch, "query_symbols", checked_collect, raising=False)
+    output = io.StringIO()
+    options = dict(kind=["function"], paths_only=True, count=count)
+    buffered = dispatch.cmd_lookup(str(tmp_path), **options)
+    returned = dispatch.cmd_lookup(str(tmp_path), out=output, **options)
+    assert returned + output.getvalue() == buffered
+    assert buffered == "2\n" if count else len(buffered.splitlines()) == 2
+
+
 SAMPLE_SOURCE = '''\
 import os
 from typing import Optional

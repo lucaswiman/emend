@@ -701,7 +701,7 @@ class TestFindDeadCode:
             TypeBinding,
             TypeDescriptor,
             _TypeOracleDiskCache,
-            _content_hash,
+            _file_cache_key,
         )
 
         project = make_project_dir(tmp_path)
@@ -726,7 +726,7 @@ class TestFindDeadCode:
         )])
         file_types.build_index()
         cache = _TypeOracleDiskCache(str(_cache_db_dir(project) / "parse.db"))
-        cache.put(_content_hash(module), file_types)
+        cache.put(_file_cache_key(module), file_types)
 
         names = {
             result.name

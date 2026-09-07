@@ -294,12 +294,18 @@ class TestTypesAtCursor:
 class TestImpact:
     def test_impact_mode(self, engine):
         eng, proj = engine
+        for filename, name in (("caller.py", "caller"), ("test_app.py", "test_parse")):
+            (proj / filename).write_text(
+                f"from app import parse_request\ndef {name}():\n    return parse_request('x')\n"
+            )
+        eng.reindex()
         result = _dispatch(eng, "impact", {
             "qualified_name": "parse_request",
             "file": str(proj / "app.py"),
         })
         assert result["mode"] == "impact"
-        assert isinstance(result["items"], list)
+        assert {item["name"] for item in result["items"]} == {"caller", "test_parse"}
+        assert {Path(item["file_path"]).name for item in result["items"]} == {"caller.py", "test_app.py"}
 
     def test_impact_unknown_method(self, engine):
         eng, proj = engine

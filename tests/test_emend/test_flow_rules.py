@@ -10,9 +10,19 @@ from emend.lint import (
     load_rules,
     run_lint,
     _assignments_from_cfgs,
-    _check_flow_rule,
     _extract_names_from_text,
 )
+
+
+@pytest.fixture
+def sql_rule():
+    def make_rule(message="SQL injection", not_through=None):
+        return LintRule(
+            name="sql-injection", find="", message=message,
+            flows_from="request.args.get($X)", flows_to="cursor.execute($QUERY)",
+            not_through=not_through,
+        )
+    return make_rule
 
 
 def _write_config(tmp_path, config_dict):
@@ -81,7 +91,7 @@ class TestFindAssignments:
 # ---------------------------------------------------------------------------
 
 
-def test_flow_basic_detection(tmp_path):
+def test_flow_basic_detection(tmp_path, sql_rule):
     """Flow rule detects taint flowing from source to sink within a function."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -90,15 +100,7 @@ def test_flow_basic_detection(tmp_path):
         "    cursor.execute(user_input)\n"
     )
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="User input may flow to SQL execution",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
-    ]
+    rules = [sql_rule(message="User input may flow to SQL execution")]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) >= 1
@@ -108,7 +110,7 @@ def test_flow_basic_detection(tmp_path):
     assert v.file_path == str(test_file)
 
 
-def test_flow_taint_through_assignment(tmp_path):
+def test_flow_taint_through_assignment(tmp_path, sql_rule):
     """Taint propagates through variable assignments."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -118,21 +120,13 @@ def test_flow_taint_through_assignment(tmp_path):
         "    cursor.execute(query)\n"
     )
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
-    ]
+    rules = [sql_rule()]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) >= 1
 
 
-def test_flow_taint_through_function_call(tmp_path):
+def test_flow_taint_through_function_call(tmp_path, sql_rule):
     """Taint propagates through function calls in assignments: y = f(tainted)."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -142,15 +136,7 @@ def test_flow_taint_through_function_call(tmp_path):
         "    cursor.execute(prepared)\n"
     )
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection via function",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
-    ]
+    rules = [sql_rule(message="SQL injection via function")]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) >= 1
@@ -161,7 +147,7 @@ def test_flow_taint_through_function_call(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_flow_not_through_sanitizer_suppresses(tmp_path):
+def test_flow_not_through_sanitizer_suppresses(tmp_path, sql_rule):
     """A sanitizer (not-through) between source and sink prevents reporting."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -171,22 +157,13 @@ def test_flow_not_through_sanitizer_suppresses(tmp_path):
         "    cursor.execute(safe)\n"
     )
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-            not_through="sanitize($Y)",
-        ),
-    ]
+    rules = [sql_rule(not_through="sanitize($Y)")]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) == 0
 
 
-def test_flow_not_through_absent_still_reports(tmp_path):
+def test_flow_not_through_absent_still_reports(tmp_path, sql_rule):
     """Without the sanitizer pattern present, violation is still reported."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -195,22 +172,13 @@ def test_flow_not_through_absent_still_reports(tmp_path):
         "    cursor.execute(raw)\n"
     )
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-            not_through="sanitize($Y)",
-        ),
-    ]
+    rules = [sql_rule(not_through="sanitize($Y)")]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) >= 1
 
 
-def test_flow_any_not_through_alternative_blocks(tmp_path):
+def test_flow_any_not_through_alternative_blocks(tmp_path, sql_rule):
     """Either configured sanitizer alternative blocks the source-to-sink flow."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -226,14 +194,7 @@ def test_flow_any_not_through_alternative_blocks(tmp_path):
         "    raw = request.args.get('q')\n"
         "    cursor.execute(raw)\n"
     )
-    rules = [LintRule(
-        name="sql-injection",
-        find="",
-        message="SQL injection",
-        flows_from="request.args.get($X)",
-        flows_to="cursor.execute($QUERY)",
-        not_through=["escape($X)", "sanitize($X)"],
-    )]
+    rules = [sql_rule(not_through=["escape($X)", "sanitize($X)"])]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) == 1
@@ -244,7 +205,7 @@ def test_flow_any_not_through_alternative_blocks(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_flow_across_functions_not_detected(tmp_path):
+def test_flow_across_functions_not_detected(tmp_path, sql_rule):
     """Taint in one function does not bleed to another function."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -256,15 +217,7 @@ def test_flow_across_functions_not_detected(tmp_path):
         "    cursor.execute(query)\n"
     )
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
-    ]
+    rules = [sql_rule()]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) == 0
@@ -351,7 +304,7 @@ def test_flow_rule_with_macros(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_mixed_pattern_and_flow_rules(tmp_path):
+def test_mixed_pattern_and_flow_rules(tmp_path, sql_rule):
     """Pattern rules and flow rules both produce violations in one lint run."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -367,13 +320,7 @@ def test_mixed_pattern_and_flow_rules(tmp_path):
             find="print($X)",
             message="Use logging",
         ),
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
+        sql_rule(),
     ]
 
     violations = run_lint(rules, [str(test_file)])
@@ -387,7 +334,7 @@ def test_mixed_pattern_and_flow_rules(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_flow_violation_has_witness(tmp_path):
+def test_flow_violation_has_witness(tmp_path, sql_rule):
     """Flow violations include a FlowWitness with source/sink info."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -396,15 +343,7 @@ def test_flow_violation_has_witness(tmp_path):
         "    cursor.execute(raw)\n"
     )
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
-    ]
+    rules = [sql_rule()]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) >= 1
@@ -417,7 +356,7 @@ def test_flow_violation_has_witness(tmp_path):
     assert len(v.witness.taint_chain) >= 1
 
 
-def test_flow_match_text_format(tmp_path):
+def test_flow_match_text_format(tmp_path, sql_rule):
     """Flow violation match_text shows source -> sink."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -426,15 +365,7 @@ def test_flow_match_text_format(tmp_path):
         "    cursor.execute(raw)\n"
     )
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
-    ]
+    rules = [sql_rule()]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) >= 1
@@ -502,7 +433,7 @@ def test_flow_unsafe_logging_with_redact(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_flow_no_source_match(tmp_path):
+def test_flow_no_source_match(tmp_path, sql_rule):
     """No violation when source pattern is absent."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -510,21 +441,13 @@ def test_flow_no_source_match(tmp_path):
         "    cursor.execute('SELECT 1')\n"
     )
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
-    ]
+    rules = [sql_rule()]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) == 0
 
 
-def test_flow_no_sink_match(tmp_path):
+def test_flow_no_sink_match(tmp_path, sql_rule):
     """No violation when sink pattern is absent."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -533,21 +456,13 @@ def test_flow_no_sink_match(tmp_path):
         "    print(raw)\n"
     )
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
-    ]
+    rules = [sql_rule()]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) == 0
 
 
-def test_flow_sink_before_source_not_detected(tmp_path):
+def test_flow_sink_before_source_not_detected(tmp_path, sql_rule):
     """Sink appearing before source in the same function is not a violation."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -556,21 +471,13 @@ def test_flow_sink_before_source_not_detected(tmp_path):
         "    raw = request.args.get('q')\n"
     )
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
-    ]
+    rules = [sql_rule()]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) == 0
 
 
-def test_flow_multiple_functions_only_tainted_reports(tmp_path):
+def test_flow_multiple_functions_only_tainted_reports(tmp_path, sql_rule):
     """Only the function with both source and sink reports a violation."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -582,22 +489,14 @@ def test_flow_multiple_functions_only_tainted_reports(tmp_path):
         "    cursor.execute(raw)\n"
     )
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
-    ]
+    rules = [sql_rule()]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) == 1
     assert violations[0].line >= 4  # in the unsafe function
 
 
-def test_flow_method_in_class(tmp_path):
+def test_flow_method_in_class(tmp_path, sql_rule):
     """Flow detection works for methods inside classes."""
     test_file = tmp_path / "views.py"
     test_file.write_text(
@@ -607,21 +506,13 @@ def test_flow_method_in_class(tmp_path):
         "        cursor.execute(raw)\n"
     )
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
-    ]
+    rules = [sql_rule()]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) >= 1
 
 
-def test_flow_rule_filter(tmp_path):
+def test_flow_rule_filter(tmp_path, sql_rule):
     """rule_filter restricts which flow rules are checked."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -631,13 +522,7 @@ def test_flow_rule_filter(tmp_path):
     )
 
     rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
+        sql_rule(),
         LintRule(
             name="other-flow",
             find="",
@@ -651,26 +536,18 @@ def test_flow_rule_filter(tmp_path):
     assert all(v.rule_name == "sql-injection" for v in violations)
 
 
-def test_flow_empty_file(tmp_path):
+def test_flow_empty_file(tmp_path, sql_rule):
     """Flow rules on empty files produce no violations."""
     test_file = tmp_path / "empty.py"
     test_file.write_text("")
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
-    ]
+    rules = [sql_rule()]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) == 0
 
 
-def test_flow_multiline_chain(tmp_path):
+def test_flow_multiline_chain(tmp_path, sql_rule):
     """Taint propagates through a chain of assignments."""
     test_file = tmp_path / "app.py"
     test_file.write_text(
@@ -682,15 +559,7 @@ def test_flow_multiline_chain(tmp_path):
         "    cursor.execute(step3)\n"
     )
 
-    rules = [
-        LintRule(
-            name="sql-injection",
-            find="",
-            message="SQL injection",
-            flows_from="request.args.get($X)",
-            flows_to="cursor.execute($QUERY)",
-        ),
-    ]
+    rules = [sql_rule()]
 
     violations = run_lint(rules, [str(test_file)])
     assert len(violations) >= 1
