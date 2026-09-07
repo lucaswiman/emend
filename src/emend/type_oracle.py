@@ -487,8 +487,14 @@ class TypeOracle(ABC):
         cache = getattr(self, "_cache", None)
         namespace = getattr(cache, "namespace", "")
         _old_context, separator, engine_context = namespace.partition("|")
-        if separator:
-            cache.namespace = f"{_type_shared_context(project_root)}|{engine_context}"
+        engine = getattr(self, "_cache_engine", None)
+        if engine is not None:
+            engine_context = _type_engine_context(
+                engine, getattr(self, "_cache_engine_options", {}),
+            )
+        elif not separator:
+            return
+        cache.namespace = f"{_type_shared_context(project_root)}|{engine_context}"
 
     def _current_file_key(
         self, path: Path, project_root: Path | None = None
@@ -1190,7 +1196,8 @@ def _type_engine_context(engine: str, options: dict[str, Any]) -> str:
     }
     option_name, default_name = executable_options[engine]
     configured = options.get(option_name)
-    executable = str(configured or shutil.which(default_name) or default_name)
+    requested = str(configured or default_name)
+    executable = str(shutil.which(requested) or requested)
     try:
         stat = Path(executable).resolve().stat()
         executable_identity: object = (
@@ -1315,6 +1322,11 @@ class PyreflyAdapter(TypeOracle):
         self._pyrefly = pyrefly_path or shutil.which("pyrefly") or "pyrefly"
         self._cache = _FileTypeCache(max_entries=cache_size, db_path=db_path)
         self._extra_args = extra_args or []
+        self._cache_engine = "pyrefly"
+        self._cache_engine_options = {
+            "pyrefly_path": self._pyrefly,
+            "extra_args": tuple(self._extra_args),
+        }
 
     def is_available(self) -> bool:
         try:
@@ -1510,6 +1522,8 @@ class _LSPTypeOracle(TypeOracle):
     _tool_name: str = ""  # For logging and error messages
     _language_id: str = "python"  # LSP languageId for textDocument/didOpen
     _uses_overlay_source = True
+    _cache_engine_name: str = ""
+    _cache_path_option: str = ""
 
     def __init__(
         self,
@@ -1521,6 +1535,12 @@ class _LSPTypeOracle(TypeOracle):
         self._tool = tool_path
         self._cache = _FileTypeCache(max_entries=cache_size, db_path=db_path)
         self._extra_args = extra_args or []
+        if self._cache_engine_name:
+            self._cache_engine = self._cache_engine_name
+            self._cache_engine_options = {
+                self._cache_path_option: tool_path,
+                "extra_args": tuple(self._extra_args),
+            }
         self._lsp: LSPClient | None = None
         self._lsp_lock = threading.Lock()
         self._open_documents: dict[str, tuple[str, int]] = {}
@@ -1567,6 +1587,7 @@ class _LSPTypeOracle(TypeOracle):
 
     def infer_file(self, path: Path, project_root: Path | None = None) -> FileTypes:
         path = path.resolve()
+        self._refresh_cache_context(project_root or path.parent)
         prepared_sources = getattr(self, "_prepared_source_texts", {})
         project_paths = getattr(self, "_prepared_project_paths", set())
         source = prepared_sources.get(str(path))
@@ -1727,6 +1748,8 @@ class PyrightAdapter(_LSPTypeOracle):
     """
 
     _tool_name = "pyright"
+    _cache_engine_name = "pyright"
+    _cache_path_option = "pyright_path"
 
     def __init__(
         self,
@@ -1767,6 +1790,8 @@ class TyAdapter(_LSPTypeOracle):
     """
 
     _tool_name = "ty"
+    _cache_engine_name = "ty"
+    _cache_path_option = "ty_path"
 
     def __init__(
         self,
@@ -1894,6 +1919,11 @@ class TypeScriptAdapter(TypeOracle):
         self._node = node_path or shutil.which("node") or "node"
         self._cache = _FileTypeCache(max_entries=cache_size, db_path=db_path)
         self._extra_args = extra_args or []
+        self._cache_engine = "typescript"
+        self._cache_engine_options = {
+            "node_path": self._node,
+            "extra_args": tuple(self._extra_args),
+        }
         self._script_path: str | None = None
 
     def is_available(self) -> bool:
@@ -1986,6 +2016,8 @@ class RustAnalyzerAdapter(_LSPTypeOracle):
 
     _tool_name = "rust-analyzer"
     _language_id = "rust"
+    _cache_engine_name = "rust-analyzer"
+    _cache_path_option = "rust_analyzer_path"
 
     def __init__(
         self,
@@ -2162,9 +2194,10 @@ def create_type_oracle(
             f"Supported engines: {', '.join(_ENGINE_NAMES)}"
         ) from None
 
+    cache_options = dict(kwargs)
     cache_context = (
         f"{_type_shared_context(project_root)}|"
-        f"{_type_engine_context(engine, kwargs)}"
+        f"{_type_engine_context(engine, cache_options)}"
     )
 
     # Inject disk cache path when not explicitly provided
@@ -2172,6 +2205,8 @@ def create_type_oracle(
         kwargs["db_path"] = _type_cache_db_path(project_root)
 
     oracle = adapter(**kwargs)
+    oracle._cache_engine = engine
+    oracle._cache_engine_options = cache_options
     cache = getattr(oracle, "_cache", None)
     if isinstance(cache, _FileTypeCache):
         cache.namespace = cache_context

@@ -78,6 +78,18 @@ def test_get_extensions_typescript():
     assert "jsx" in exts
 
 
+def test_load_config_tracks_exact_file_revision(tmp_path, monkeypatch):
+    import emend.language_registry as registry
+
+    config = tmp_path / "config.toml"
+    monkeypatch.setattr(registry, "_config_path", lambda _language: config)
+    registry.load_config.cache_clear()
+    config.write_text('[qualified_names]\nmodule_separator = "."\n')
+    assert registry.load_config("scratch")["qualified_names"]["module_separator"] == "."
+    config.write_text('[qualified_names]\nmodule_separator = "::"\n')
+    assert registry.load_config("scratch")["qualified_names"]["module_separator"] == "::"
+
+
 def test_get_extensions_unknown():
     assert get_extensions("cobol") == []
 

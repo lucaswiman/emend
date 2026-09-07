@@ -344,6 +344,24 @@ def test_type_identity_resolves_relative_typescript_dependency(tmp_path, specifi
     assert store.type_file_identity(target) != initial
 
 
+def test_type_identity_resolves_typescript_path_alias(tmp_path):
+    from emend.analysis_store import AnalysisStore
+
+    (tmp_path / "tsconfig.json").write_text(
+        '{\n// aliases\n"compilerOptions": '
+        '{"baseUrl": ".", "paths": {"@lib/*": ["lib/*"]},},\n}\n'
+    )
+    (tmp_path / "lib").mkdir()
+    dependency = tmp_path / "lib" / "dep.ts"
+    target = tmp_path / "app.ts"
+    dependency.write_text("export const value: number = 1;\n")
+    target.write_text('import { value } from "@lib/dep";\n')
+    store = AnalysisStore.open(tmp_path)
+    initial = store.type_file_identity(target)
+    dependency.write_text("export const value: string = 'changed';\n")
+    assert store.type_file_identity(target) != initial
+
+
 def test_typescript_ambient_declarations_participate_in_type_identity(tmp_path):
     from emend.analysis_store import AnalysisStore
 
@@ -826,6 +844,18 @@ def test_build_from_project_adapts_owned_facts_without_owning_the_owner(
     assert [symbol.name for symbol in owner_graph.symbols()] == ["live"]
 
 
+def test_explicit_language_build_finds_deep_source_without_project_marker(tmp_path):
+    from emend.fact_graph import FactGraph
+
+    source = tmp_path / "src" / "package" / "app.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("def live():\n    return 1\n")
+    graph = FactGraph.build_from_project(
+        str(tmp_path), language="python", include_types=False
+    )
+    assert [symbol.name for symbol in graph.symbols()] == ["live"]
+
+
 def test_legacy_filtered_build_cannot_overwrite_owner_generation(tmp_path):
     from emend.analysis_store import AnalysisStore
     from emend.fact_graph import FactGraph
@@ -946,7 +976,7 @@ def test_trace_reads_overlay_only_file_from_selected_snapshot(tmp_path):
     from emend.analysis_store import AnalysisStore
     from emend.trace import TraceConfig, TraceSink, TraceSource, run_trace_analysis
 
-    path = tmp_path / "new.py"
+    path = tmp_path / "newdir" / "new.py"
     store = AnalysisStore.open(tmp_path)
     store.update_overlay(
         path, "def f():\n    x = source()\n    sink(x)\n", 1,
@@ -958,7 +988,6 @@ def test_trace_reads_overlay_only_file_from_selected_snapshot(tmp_path):
             sources=[TraceSource("source()", "value")],
             sinks=[TraceSink("sink($X)", "value", "unsafe")],
         ),
-        project_path=str(tmp_path),
     )
     assert [(violation.file_path, violation.line) for violation in violations] == [
         (str(path), 3)

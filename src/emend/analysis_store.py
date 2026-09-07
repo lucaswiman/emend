@@ -85,6 +85,22 @@ class AnalysisStore:
                 cls._instances[root] = store
             return store
 
+    @classmethod
+    def existing_for_path(cls, path: str | Path) -> "AnalysisStore" | None:
+        """Return the most specific open owner containing *path*, if any."""
+        resolved = Path(path).resolve()
+        with cls._instances_lock:
+            candidates = [
+                store for store in cls._instances.values()
+                if resolved == store.project_root
+                or store.project_root in resolved.parents
+            ]
+        return max(
+            candidates,
+            key=lambda store: len(store.project_root.parts),
+            default=None,
+        )
+
     def connection(
         self,
         schema_initializer: Callable[[sqlite3.Connection], None] | None = None,
@@ -248,7 +264,7 @@ class AnalysisStore:
     def _scan_disk(self) -> _DiskScan:
         """Read the current source inventory, hashing only stat changes."""
         from emend.file_collection import collect_all_source_files
-        from emend.language_registry import detect_language
+        from emend.language_registry import detect_language, get_all_languages
         from emend.project_config import find_source_root
 
         self._load_observed_files()
@@ -259,7 +275,9 @@ class AnalysisStore:
         previous = self._observed_files
         files = sorted(
             str(Path(path).resolve())
-            for path in collect_all_source_files(str(self.project_root))
+            for path in collect_all_source_files(
+                str(self.project_root), languages=get_all_languages()
+            )
         )
         contents: dict[str, str] = {}
         revisions: list[FileRevision] = []
@@ -1119,15 +1137,71 @@ class AnalysisStore:
             for revision in revisions.values()
         }
 
+        suffix_to_revisions: dict[str, list[FileRevision]] = {}
+        for module, revision in module_to_revision.items():
+            parts = module.split(".")
+            for index in range(len(parts)):
+                suffix_to_revisions.setdefault(".".join(parts[index:]), []).append(
+                    revision
+                )
+
         def module_revision(name: str):
             exact = module_to_revision.get(name)
             if exact is not None:
                 return exact
-            matches = [
-                candidate for module, candidate in module_to_revision.items()
-                if module.endswith(f".{name}") or name.endswith(f".{module}")
-            ]
+            matches = list(suffix_to_revisions.get(name, ()))
+            parts = name.split(".")
+            matches.extend(
+                candidate
+                for index in range(1, len(parts))
+                if (candidate := module_to_revision.get(".".join(parts[index:])))
+                is not None
+            )
+            matches = list({
+                candidate.file_path: candidate for candidate in matches
+            }.values())
             return matches[0] if len(matches) == 1 else None
+
+        from emend.project_config import load_jsonc
+
+        try:
+            compiler_options = load_jsonc(
+                self.project_root / "tsconfig.json"
+            ).get("compilerOptions", {})
+        except (OSError, ValueError, TypeError, AttributeError):
+            compiler_options = {}
+        ts_base = (
+            self.project_root / compiler_options.get("baseUrl", ".")
+        ).resolve()
+        ts_paths = compiler_options.get("paths", {})
+
+        def typescript_aliases(name: str) -> list[Path]:
+            aliases: list[Path] = []
+            for pattern, replacements in ts_paths.items():
+                prefix, wildcard, suffix = str(pattern).partition("*")
+                if wildcard:
+                    if not name.startswith(prefix) or not name.endswith(suffix):
+                        continue
+                    captured = name[len(prefix):len(name) - len(suffix) or None]
+                elif name == prefix:
+                    captured = ""
+                else:
+                    continue
+                for replacement in (
+                    replacements if isinstance(replacements, list) else [replacements]
+                ):
+                    aliases.append(
+                        (ts_base / str(replacement).replace("*", captured)).resolve()
+                    )
+            return aliases
+
+        def source_candidates(base: Path, language: str) -> list[Path]:
+            extensions = get_extensions(language)
+            candidates = [base]
+            candidates.extend(base.with_suffix(f".{ext}") for ext in extensions)
+            if not base.suffix:
+                candidates.extend(base / f"index.{ext}" for ext in extensions)
+            return candidates
 
         dependencies: dict[str, set[str]] = {}
         ambient_typescript = {
@@ -1165,23 +1239,17 @@ class AnalysisStore:
                         ))
                 elif name.startswith("."):
                     base = (Path(revision.file_path).parent / name).resolve()
-                    extensions = get_extensions(revision.language)
-                    paths = [base]
-                    if base.suffix:
-                        # TypeScript commonly imports emitted ``.js`` names
-                        # whose source dependency is ``.ts``/``.tsx``.
-                        paths.extend(
-                            base.with_suffix(f".{ext}") for ext in extensions
-                        )
-                    else:
-                        paths.extend(
-                            base.with_suffix(f".{ext}") for ext in extensions
-                        )
-                        paths.extend(
-                            base / f"index.{ext}" for ext in extensions
-                        )
+                    # TypeScript commonly imports emitted ``.js`` names whose
+                    # source dependency is ``.ts``/``.tsx``.
+                    paths = source_candidates(base, revision.language)
                     candidates.extend(revisions.get(str(path)) for path in paths)
                 else:
+                    if revision.language == "typescript" and ts_paths:
+                        candidates.extend(
+                            revisions.get(str(path))
+                            for base in typescript_aliases(name)
+                            for path in source_candidates(base, revision.language)
+                        )
                     normalized = name.replace("::", ".").replace("/", ".")
                     candidates.append(module_revision(normalized))
                 resolved_dependencies.update(

@@ -21,6 +21,16 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def load_jsonc(path: Path) -> dict[str, Any]:
+    """Load a JSON-with-comments configuration file."""
+    import json
+    import re
+
+    raw = path.read_text()
+    raw = re.sub(r"//[^\n]*|/\*.*?\*/", "", raw, flags=re.DOTALL)
+    return json.loads(re.sub(r",\s*([}\]])", r"\1", raw))
+
+
 def find_project_root(start: str | Path = ".") -> Path:
     """Return the nearest configured project boundary."""
     path = Path(start).resolve()
@@ -99,13 +109,7 @@ def find_source_root(project_root: str, language: str = "python") -> Path:
         tsconfig = root / "tsconfig.json"
         if tsconfig.is_file():
             try:
-                import json
-                import re
-
-                raw = tsconfig.read_text()
-                raw = re.sub(r"//[^\n]*|/\*.*?\*/", "", raw, flags=re.DOTALL)
-                raw = re.sub(r",\s*([}\]])", r"\1", raw)
-                compiler = json.loads(raw).get("compilerOptions", {})
+                compiler = load_jsonc(tsconfig).get("compilerOptions", {})
                 root_dir = compiler.get("rootDir")
                 if root_dir and (root / root_dir).is_dir():
                     return (root / root_dir).resolve()

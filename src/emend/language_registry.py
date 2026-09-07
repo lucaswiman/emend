@@ -263,16 +263,21 @@ def get_comment_prefix(language: str) -> str:
     return config.get("language", {}).get("comment_prefix", "#")
 
 
-@lru_cache(maxsize=16)
 def load_config(language: str) -> dict:
     """Load the full TOML configuration for *language*.
 
     Returns an empty dict if the language or config file is not found.
     Checks built-in languages first, then entry-point plugins.
     """
-    import sys
-
     config_path = _config_path(language)
+
+    return _load_config(language, config_identity(language), config_path)
+
+
+@lru_cache(maxsize=32)
+def _load_config(language: str, _identity: str, config_path: Path | None) -> dict:
+    """Parse one exact config revision, reusing unchanged revisions."""
+    import sys
 
     if config_path is None:
         return {}
@@ -293,6 +298,10 @@ def load_config(language: str) -> dict:
         # TOMLDecodeError subclasses ValueError in both tomllib and tomli.
         logger.debug("Could not parse %s", config_path, exc_info=True)
         return {}
+
+
+# Preserve the cache-management hook exposed by the formerly decorated loader.
+load_config.cache_clear = _load_config.cache_clear  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

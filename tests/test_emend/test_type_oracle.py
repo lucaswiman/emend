@@ -747,6 +747,39 @@ class TestFileTypeCache:
         assert lsp.opened[str(dependency)] == "value = bytes\n"
         assert lsp.changed == {str(dependency): 2, str(leaf): 2}
 
+    def test_long_lived_lsp_refreshes_config_and_engine_namespace(
+        self, tmp_path, monkeypatch
+    ):
+        source = tmp_path / "app.py"
+        source.write_text("value = 1\n")
+        config = tmp_path / "pyproject.toml"
+        config.write_text("[tool.pyright]\ntypeCheckingMode = 'basic'\n")
+
+        class FakeLsp:
+            calls = 0
+
+            def did_open(self, *_args, **_kwargs):
+                pass
+
+            def did_change_watched_files(self, **_kwargs):
+                pass
+
+            def hover(self, *_args):
+                self.calls += 1
+                return "```python\n(variable) value: int\n```"
+
+        lsp = FakeLsp()
+        adapter = PyrightAdapter(pyright_path="pyright", db_path=None)
+        monkeypatch.setattr(adapter, "_get_lsp", lambda _root: lsp)
+        adapter.infer_file(source, tmp_path)
+        config.write_text("[tool.pyright]\ntypeCheckingMode = 'strict'\n")
+        adapter.infer_file(source, tmp_path)
+        monkeypatch.setattr(
+            "emend.type_oracle._type_engine_context", lambda *_args: "new-engine"
+        )
+        adapter.infer_file(source, tmp_path)
+        assert lsp.calls == 3
+
 
 # ---------------------------------------------------------------------------
 # create_type_oracle factory

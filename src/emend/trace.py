@@ -735,11 +735,20 @@ def run_trace_analysis(
         if not paths:
             return []
 
-    _proj = (project_path or str(Path(paths[0]).resolve().parent)) if paths else ""
-    if not Path(_proj).is_dir():
+    if not paths:
         return []
     from emend.analysis_store import AnalysisStore
-    graph = AnalysisStore.open(_proj).query_facts()
+    if project_path is not None:
+        store = AnalysisStore.open(project_path)
+    else:
+        path = Path(paths[0]).resolve()
+        store = AnalysisStore.existing_for_path(path)
+        if store is None:
+            if not path.parent.is_dir():
+                return []
+            store = AnalysisStore.open(path.parent)
+    _proj = str(store.project_root)
+    graph = store.query_facts()
     snapshot_paths = {revision.file_path for revision in graph.snapshot.files}
     paths = [
         path for path in paths

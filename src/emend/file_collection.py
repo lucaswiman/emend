@@ -89,14 +89,15 @@ def collect_all_source_files(
     """
     if languages is None:
         languages = detect_project_languages(root_path)
-    all_files: list[str] = []
-    seen: set[str] = set()
-    for lang in languages:
-        for f in collect_source_files_scandir(root_path, language=lang):
-            if f not in seen:
-                seen.add(f)
-                all_files.append(f)
-    return all_files
+    from emend import emend_core as _rust
+    from emend.language_registry import get_extensions
+
+    extensions = sorted({
+        extension
+        for language in languages
+        for extension in get_extensions(language)
+    })
+    return _rust.collect_files(root_path, extensions) if extensions else []
 
 
 def collect_git_tracked_source_files(
