@@ -447,7 +447,6 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<scope_py::PyScopeResolver>()?;
     m.add_class::<transform_py::PyFileTransform>()?;
     m.add_class::<cozo_db::PyCozoDb>()?;
-    m.add_class::<cozo_db::PyCozoTransaction>()?;
     m.add_class::<cfg_py::PyCfg>()?;
     m.add_function(wrap_pyfunction!(cfg_py::build_cfgs, m)?)?;
     m.add_class::<tree_py::PyTree>()?;

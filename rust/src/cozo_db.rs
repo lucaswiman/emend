@@ -118,63 +118,6 @@ fn named_rows_to_py(py: Python<'_>, result: NamedRows) -> PyResult<PyObject> {
     Ok(dict.into_any().unbind())
 }
 
-#[pyclass]
-pub struct PyCozoTransaction {
-    transaction: Option<MultiTransaction>,
-}
-
-#[pymethods]
-impl PyCozoTransaction {
-    #[pyo3(signature = (query, params=None))]
-    fn run(
-        &self,
-        py: Python<'_>,
-        query: &str,
-        params: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyObject> {
-        let transaction = self.transaction.as_ref().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("CozoDB transaction is closed")
-        })?;
-        let result = transaction
-            .run_script(query, py_params(params)?)
-            .map_err(|error| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "CozoDB transaction error: {error}"
-                ))
-            })?;
-        named_rows_to_py(py, result)
-    }
-
-    fn commit(&mut self) -> PyResult<()> {
-        let transaction = self.transaction.take().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("CozoDB transaction is closed")
-        })?;
-        transaction.commit().map_err(|error| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "CozoDB transaction commit error: {error}"
-            ))
-        })
-    }
-
-    fn abort(&mut self) -> PyResult<()> {
-        let transaction = self.transaction.take().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("CozoDB transaction is closed")
-        })?;
-        transaction.abort().map_err(|error| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "CozoDB transaction abort error: {error}"
-            ))
-        })
-    }
-}
-
-impl Drop for PyCozoTransaction {
-    fn drop(&mut self) {
-        if let Some(transaction) = self.transaction.take() {
-            let _ = transaction.abort();
-        }
-    }
-}
 
 #[pymethods]
 impl PyCozoDb {
@@ -213,12 +156,6 @@ impl PyCozoDb {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("CozoDB query error: {}", e))
             })?;
         named_rows_to_py(py, result)
-    }
-
-    fn write_transaction(&self) -> PyCozoTransaction {
-        PyCozoTransaction {
-            transaction: Some(self.db.multi_transaction(true)),
-        }
     }
 
     /// Close the database (no-op for in-memory).

@@ -418,11 +418,6 @@ class FactGraph:
             raise FileNotFoundError(resolved)
         raise RuntimeError(f"source no longer matches snapshot: {resolved}")
 
-    def preserve_source_texts(self, sources: dict[str, str]) -> None:
-        """Keep prior disk bytes stable after a newer snapshot is published."""
-        for path, content in sources.items():
-            self._source_overrides.setdefault(str(Path(path).resolve()), content)
-
     def stored_path(self, file_path: str | Path) -> str:
         """Return the canonical fact path for this graph's project."""
         resolved = Path(file_path).resolve()
@@ -652,23 +647,15 @@ class FactGraph:
     def _run_mutations(
         self, operations: list[tuple[str, dict[str, Any]]]
     ) -> None:
-        """Commit related Cozo mutations once, or use the compatibility path."""
-        write_transaction = getattr(self._client, "write_transaction", None)
-        if write_transaction is None:
-            for query, params in operations:
-                self._client.run(query, params)
-            return
-        transaction = write_transaction()
-        try:
-            for query, params in operations:
-                transaction.run(query, params)
-            transaction.commit()
-        except BaseException:
-            try:
-                transaction.abort()
-            except RuntimeError:
-                pass
-            raise
+        """Run generated mutations in Cozo's synchronous atomic script."""
+        queries, bindings = [], {}
+        for index, (query, params) in enumerate(operations):
+            # These internal statements contain only parameter uses of '$'.
+            prefix = f"mutation_{index}_"
+            queries.append("{" + query.replace("$", "$" + prefix) + "}")
+            bindings.update((prefix + key, value) for key, value in params.items())
+        if queries:
+            self._client.run("\n".join(queries), bindings)
 
     def add_symbols_batch(self, facts: list[SymbolFact]) -> None:
         """Bulk-insert symbol facts."""

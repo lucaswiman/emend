@@ -34,8 +34,9 @@ from emend.fact_graph import (
 )
 
 
-def test_batched_fact_mutations_abort_as_one_transaction(request):
-    graph = FactGraph()
+@pytest.mark.parametrize("persistent", [False, True])
+def test_batched_fact_mutations_abort_as_one_transaction(tmp_path, request, persistent):
+    graph = FactGraph(db_path=str(tmp_path / "facts.db") if persistent else None)
     request.addfinalizer(graph.close)
     graph.add_symbol(SymbolFact("a.py", "before", "a.before", "function", 1, 1))
     put = (
@@ -43,10 +44,10 @@ def test_batched_fact_mutations_abort_as_one_transaction(request):
         ":put symbol {qualified_name => file_path, name, kind, line, end_line, parent}"
     )
 
-    with pytest.raises(RuntimeError, match="transaction"):
+    with pytest.raises(RuntimeError, match="CozoDB query error"):
         graph._run_mutations([
             (put, {"rows": [["a.after", "a.py", "after", "function", 2, 2, ""]]}),
-            ("this is not CozoScript", {}),
+            ("?[x] := *missing_relation[x]", {}),
         ])
 
     assert [symbol.name for symbol in graph.symbols()] == ["before"]

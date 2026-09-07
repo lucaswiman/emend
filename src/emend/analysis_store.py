@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 import hashlib
 import importlib.util
@@ -62,8 +62,6 @@ class AnalysisStore:
         self._disk_path: Path | None = None
         self._overlay_graph: object | None = None
         self._overlay_path: Path | None = None
-        self._overlay_base_id: str | None = None
-        self._overlay_applied: dict[str, tuple[int, str]] = {}
         self._overlays: dict[str, tuple[object | None, int, str]] = {}
         # Type bindings are an optional derived view.  Keep each one on its
         # own immutable graph so asking for types never mutates the fast base
@@ -504,32 +502,19 @@ class AnalysisStore:
             conn.close()
         return result
 
-    def _revision_sources(
-        self, revisions: Iterable[FileRevision]
-    ) -> dict[str, str]:
-        """Load exact prior source bytes for snapshots surviving a refresh."""
-        revisions = tuple(revisions)
-        if not revisions or not self.artifact_path.is_file():
-            return {}
-        conn = sqlite3.connect(str(self.artifact_path))
+    def _revision_source(self, revision: FileRevision) -> str | None:
+        """Load exact source bytes lazily for a reader of an older snapshot."""
+        if not self.artifact_path.is_file():
+            return None
         try:
-            sources = {}
-            for revision in revisions:
+            with closing(sqlite3.connect(self.artifact_path)) as conn:
                 row = conn.execute(
                     "SELECT payload FROM source_artifact WHERE content_hash = ?",
                     (revision.content_hash,),
                 ).fetchone()
-                if row is not None:
-                    sources[revision.file_path] = zlib.decompress(row[0]).decode()
-            return sources
+            return zlib.decompress(row[0]).decode() if row is not None else None
         except sqlite3.Error:
-            return {}
-        finally:
-            conn.close()
-
-    def _revision_source(self, revision: FileRevision) -> str | None:
-        """Load one exact source artifact by immutable revision identity."""
-        return self._revision_sources([revision]).get(revision.file_path)
+            return None
 
     @staticmethod
     def _language_config_id(language: str) -> str:
@@ -556,8 +541,8 @@ class AnalysisStore:
     def _copy_sqlite(source_path: Path, destination_path: Path) -> None:
         """Copy a coherent SQLite generation, including uncheckpointed WAL."""
         with (
-            sqlite3.connect(source_path) as source,
-            sqlite3.connect(destination_path) as destination,
+            closing(sqlite3.connect(source_path)) as source,
+            closing(sqlite3.connect(destination_path)) as destination,
         ):
             source.backup(destination)
 
@@ -584,154 +569,93 @@ class AnalysisStore:
             except OSError:
                 pass
 
+    def _updated_graph(self, previous, snapshot: AnalysisSnapshot, contents):
+        """Apply one revision delta, equally for disk and overlay generations."""
+        from emend.fact_graph import FactGraph
+
+        if previous is None:
+            fd, name = tempfile.mkstemp(
+                prefix="facts-next-", suffix=".db", dir=self.cache_dir
+            )
+            os.close(fd)
+            path = Path(name)
+            graph = FactGraph(db_path=str(path))
+            before = {}
+        else:
+            graph, path = self._clone_graph(Path(previous._db_path), snapshot)
+            before = {revision.file_path: revision for revision in previous.snapshot.files}
+            if previous.snapshot.analysis_context_id != snapshot.analysis_context_id:
+                before = {}
+        graph.bind_snapshot(snapshot)
+        after = {revision.file_path: revision for revision in snapshot.files}
+        changed = [revision for file_path, revision in after.items()
+                   if before.get(file_path) != revision]
+        removed = ({revision.file_path for revision in previous.snapshot.files}
+                   if previous is not None else set()) - after.keys()
+        try:
+            graph.clear_snapshot_marker()
+            graph.replace_extracted(
+                self._extract_revisions(changed, contents),
+                stored_paths=[graph.stored_path(file_path)
+                              for file_path in [*(r.file_path for r in changed), *removed]],
+            )
+            graph._resolve_builtin_refs()
+            graph.publish_snapshot(snapshot)
+            graph.bind_snapshot(
+                snapshot,
+                source_overrides={r.file_path: contents[r.file_path]
+                                  for r in snapshot.files if r.origin == "overlay"},
+                source_loader=self._revision_source,
+            )
+            return graph, path
+        except BaseException:
+            graph.close()
+            path.unlink(missing_ok=True)
+            raise
+
     def _ensure_disk_facts(self, scan: _DiskScan):
         from emend.fact_graph import FactGraph
 
         graph = self._disk_graph
-        graph_path = self._disk_path
-        transient_graph = None
-        transient_path = None
-        if graph is not None and graph.snapshot.snapshot_id == scan.snapshot.snapshot_id:
-            return graph
-        if self.facts_path.is_file():
-            stable_path = None
+        if graph is None and self.facts_path.is_file():
+            path = candidate = None
             try:
-                stable_path = self._snapshot_copy(self.facts_path, "facts-open-")
-                candidate = FactGraph(db_path=str(stable_path))
-            except BaseException as exc:
-                if stable_path is not None:
-                    stable_path.unlink(missing_ok=True)
-                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                    raise
-                candidate = None
-            if candidate is not None:
+                path = self._snapshot_copy(self.facts_path, "facts-open-")
+                candidate = FactGraph(db_path=str(path))
                 published = candidate.published_snapshot(self.project_root)
                 if published is not None:
-                    candidate.bind_snapshot(
-                        published, source_loader=self._revision_source
-                    )
-                    if published.snapshot_id == scan.snapshot.snapshot_id:
-                        self._set_disk_graph(candidate, stable_path)
-                        return candidate
-                    if (
-                        graph is None
-                        or graph.snapshot.snapshot_id != published.snapshot_id
-                    ):
-                        graph = candidate
-                        graph_path = stable_path
-                        transient_graph = candidate
-                        transient_path = stable_path
-                    else:
+                    candidate.bind_snapshot(published, source_loader=self._revision_source)
+                    self._set_disk_graph(candidate, path)
+                    graph = candidate
+            except (OSError, RuntimeError, sqlite3.Error):
+                logger.debug("Could not reuse published facts", exc_info=True)
+            finally:
+                if graph is not candidate or graph is None:
+                    if candidate is not None:
                         candidate.close()
-                        stable_path.unlink(missing_ok=True)
-                else:
-                    candidate.close()
-                    stable_path.unlink(missing_ok=True)
-
-        current_by_path = {
-            revision.file_path: revision for revision in scan.snapshot.files
-        }
-        previous_by_path = {
-            revision.file_path: revision
-            for revision in graph.snapshot.files
-        } if graph is not None else {}
-        changed_paths = tuple(
-            path for path, revision in current_by_path.items()
-            if previous_by_path.get(path) != revision
-        )
-        if graph is not None and (
-            graph.snapshot.analysis_context_id != scan.snapshot.analysis_context_id
-        ):
-            # The files are unchanged but their extraction schema or language
-            # configuration changed. Rebuild every affected artifact rather
-            # than merely republishing a new marker over stale rows.
-            changed_paths = tuple(current_by_path)
-        deleted_paths = tuple(set(previous_by_path) - set(current_by_path))
-        self.ensure_cache_directory()
-        fd, candidate_name = tempfile.mkstemp(
-            prefix="facts-next-", suffix=".db", dir=self.cache_dir
-        )
-        os.close(fd)
-        candidate_path = Path(candidate_name)
-        candidate_path.unlink()
-        candidate = None
+                    if path is not None:
+                        path.unlink(missing_ok=True)
+        if graph is not None and graph.snapshot.snapshot_id == scan.snapshot.snapshot_id:
+            return graph
+        candidate, path = self._updated_graph(graph, scan.snapshot, scan.contents)
         publish_path = None
         try:
-            if graph is not None:
-                old_snapshot = graph.snapshot
-                prior_revisions = (
-                    previous_by_path[path]
-                    for path in (*changed_paths, *deleted_paths)
-                    if path in previous_by_path
-                )
-                prior_sources = self._revision_sources(prior_revisions)
-                graph.preserve_source_texts(prior_sources)
-                if self._overlay_graph is not None:
-                    self._overlay_graph.preserve_source_texts(prior_sources)
-                assert graph_path is not None
-                self._copy_sqlite(graph_path, candidate_path)
-                if transient_graph is not None:
-                    transient_graph.close()
-                    transient_graph = None
-                    assert transient_path is not None
-                    transient_path.unlink(missing_ok=True)
-                    transient_path = None
-                candidate = FactGraph(db_path=str(candidate_path))
-                candidate.bind_snapshot(old_snapshot)
-                changed_revisions = [
-                    revision for revision in scan.snapshot.files
-                    if revision.file_path in changed_paths
-                ]
-                stored_paths = [
-                    candidate.stored_path(path)
-                    for path in (*changed_paths, *deleted_paths)
-                ]
-                candidate.clear_snapshot_marker()
-                candidate.replace_extracted(
-                    self._extract_revisions(changed_revisions, scan.contents),
-                    stored_paths=stored_paths,
-                )
-                candidate._resolve_builtin_refs()
-                candidate.publish_snapshot(scan.snapshot)
-            else:
-                candidate = FactGraph(db_path=str(candidate_path))
-                candidate.replace_extracted(
-                    self._extract_revisions(scan.snapshot.files, scan.contents),
-                    stored_paths=[],
-                )
-                candidate._resolve_builtin_refs()
-                candidate.publish_snapshot(scan.snapshot)
-            candidate.close()
-            publish_path = self._snapshot_copy(candidate_path, "facts-publish-")
+            publish_path = self._snapshot_copy(path, "facts-publish-")
             os.replace(publish_path, self.facts_path)
-            publish_path = None
-            new_graph = FactGraph(db_path=str(candidate_path))
-            new_graph.bind_snapshot(
-                scan.snapshot, source_loader=self._revision_source
-            )
         except BaseException:
-            if candidate is not None:
-                candidate.close()
-            try:
-                candidate_path.unlink()
-            except FileNotFoundError:
-                pass
+            candidate.close()
+            path.unlink(missing_ok=True)
+            raise
+        finally:
             if publish_path is not None:
                 publish_path.unlink(missing_ok=True)
-            if transient_graph is not None:
-                transient_graph.close()
-            if transient_path is not None:
-                transient_path.unlink(missing_ok=True)
-            raise
-        self._set_disk_graph(new_graph, candidate_path)
-        return new_graph
+        self._set_disk_graph(candidate, path)
+        return candidate
 
     def _discard_overlay_graph(self, *, close: bool = False) -> None:
         graph, path = self._overlay_graph, self._overlay_path
         self._overlay_graph = None
         self._overlay_path = None
-        self._overlay_base_id = None
-        self._overlay_applied = {}
         if close and graph is not None:
             graph.close()
         if path is not None:
@@ -860,88 +784,19 @@ class AnalysisStore:
         )
 
     def _ensure_overlay_facts(self, disk_graph):
-        disk_snapshot = disk_graph.snapshot
-        desired = {
-            path: (version, hashlib.sha256(content.encode()).hexdigest())
-            for path, (_owner, version, content) in self._overlays.items()
-        }
-        snapshot = self._overlay_snapshot(disk_snapshot)
-        if (
-            self._overlay_graph is not None
-            and self._overlay_base_id == disk_snapshot.snapshot_id
-            and self._overlay_graph.snapshot.snapshot_id == snapshot.snapshot_id
-        ):
+        snapshot = self._overlay_snapshot(disk_graph.snapshot)
+        if (self._overlay_graph is not None
+                and self._overlay_graph.snapshot.snapshot_id == snapshot.snapshot_id):
             return self._overlay_graph
-        previous_graph = self._overlay_graph
         previous_path = self._overlay_path
-        same_base = (
-            previous_graph is not None
-            and previous_path is not None
-            and self._overlay_base_id == disk_snapshot.snapshot_id
+        graph, path = self._updated_graph(
+            self._overlay_graph or disk_graph, snapshot,
+            {path: value[2] for path, value in self._overlays.items()},
         )
-        graph = None
-        graph_path = None
-        try:
-            if same_base:
-                graph, graph_path = self._clone_graph(
-                    previous_path, previous_graph.snapshot
-                )
-                changed_paths = [
-                    path
-                    for path, identity in desired.items()
-                    if self._overlay_applied.get(path) != identity
-                ]
-                removed_paths = set(self._overlay_applied) - set(desired)
-            else:
-                assert self._disk_path is not None
-                graph, graph_path = self._clone_graph(
-                    self._disk_path, disk_snapshot
-                )
-                changed_paths = list(self._overlays)
-                removed_paths = set()
-            graph.clear_snapshot_marker()
-            restored_paths = [path for path in removed_paths if Path(path).is_file()]
-            deleted_paths = removed_paths - set(restored_paths)
-            changed_paths.extend(restored_paths)
-            revision_by_path = {
-                revision.file_path: revision for revision in snapshot.files
-            }
-            overlay_contents = {
-                path: value[2] for path, value in self._overlays.items()
-            }
-            graph.replace_extracted(
-                self._extract_revisions(
-                    [revision_by_path[path] for path in changed_paths],
-                    overlay_contents,
-                ),
-                stored_paths=[
-                    graph.stored_path(path)
-                    for path in (*changed_paths, *deleted_paths)
-                ],
-            )
-            if changed_paths:
-                graph._resolve_builtin_refs()
-            graph.publish_snapshot(snapshot)
-            graph.bind_snapshot(
-                snapshot,
-                source_overrides={
-                    path: value[2] for path, value in self._overlays.items()
-                },
-                source_loader=self._revision_source,
-            )
-        except BaseException:
-            if graph is not None:
-                graph.close()
-            if graph_path is not None:
-                graph_path.unlink(missing_ok=True)
-            raise
-        self._overlay_graph = graph
-        self._overlay_path = graph_path
-        self._overlay_base_id = disk_snapshot.snapshot_id
-        self._overlay_applied = desired
+        self._overlay_graph, self._overlay_path = graph, path
         if previous_path is not None:
             try:
-                previous_path.unlink()
+                previous_path.unlink(missing_ok=True)
             except OSError:
                 pass
         return graph

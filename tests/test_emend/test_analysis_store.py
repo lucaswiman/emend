@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from emend.analysis_store import AnalysisStore
 from emend.type_oracle import (
     FileTypes,
     TypeBinding,
@@ -29,6 +30,10 @@ def _symbol_paths(db_path: Path, name: str) -> set[str]:
                 "SELECT file_path FROM symbol_index WHERE name = ?", (name,)
             )
         }
+
+
+def _names(facts):
+    return [fact.name for fact in facts]
 
 
 @pytest.fixture
@@ -108,7 +113,6 @@ class _TypedOracle(TypeOracle):
 
 
 def test_identical_content_files_keep_distinct_rows_and_survive_removal(tmp_path):
-    from emend.analysis_store import AnalysisStore
     from emend.transform import _ensure_index_fresh, warm_caches
 
     source = "def shared():\n    return 1\n"
@@ -177,7 +181,7 @@ def test_analysis_owner_and_graph_dependency_direction():
 
 
 def test_project_stores_and_disk_caches_are_scoped(tmp_path):
-    from emend.analysis_store import AnalysisStore, find_project_root
+    from emend.analysis_store import find_project_root
     from emend.transform.cache import _get_disk_cache
 
     left, right = tmp_path / "left", tmp_path / "right"
@@ -199,7 +203,6 @@ def test_project_stores_and_disk_caches_are_scoped(tmp_path):
 
 
 def test_editor_and_type_cache_borrow_store_connection(tmp_path):
-    from emend.analysis_store import AnalysisStore
     from emend.editor_search import EditorSearchEngine
     from emend.type_oracle import _TypeOracleDiskCache
 
@@ -295,6 +298,26 @@ def test_long_lived_type_oracle_refreshes_config_namespace(tmp_path):
     assert _FakeTypeOracle.calls == 2
 
 
+def _assert_relative_dependency_identity(
+    tmp_path, extension, statement, dependency_source, changed_source
+):
+    for package in ("alpha", "beta"):
+        root = tmp_path / package
+        root.mkdir()
+        (root / "__init__.py").write_text("")
+        (root / f"dep.{extension}").write_text(
+            dependency_source.format(package=package)
+        )
+    target = tmp_path / "beta" / f"use.{extension}"
+    target.write_text(statement)
+    store = AnalysisStore.open(tmp_path)
+    initial = store.type_file_identity(target)
+    (tmp_path / "alpha" / f"dep.{extension}").write_text(changed_source)
+    assert store.type_file_identity(target) == initial
+    (tmp_path / "beta" / f"dep.{extension}").write_text(changed_source)
+    assert store.type_file_identity(target) != initial
+
+
 @pytest.mark.parametrize(
     "statement",
     [
@@ -305,49 +328,24 @@ def test_long_lived_type_oracle_refreshes_config_namespace(tmp_path):
 def test_type_identity_resolves_relative_dependency_in_its_package(
     tmp_path, statement
 ):
-    from emend.analysis_store import AnalysisStore
-
-    for package in ("alpha", "beta"):
-        root = tmp_path / package
-        root.mkdir()
-        (root / "__init__.py").write_text("")
-        (root / "dep.py").write_text(f"value = {package!r}\n")
-    target = tmp_path / "beta" / "use.py"
-    target.write_text(statement)
-    store = AnalysisStore.open(tmp_path)
-    initial = store.type_file_identity(target)
-    (tmp_path / "alpha" / "dep.py").write_text("value = 'unrelated'\n")
-    assert store.type_file_identity(target) == initial
-    (tmp_path / "beta" / "dep.py").write_text("value = 'changed'\n")
-    assert store.type_file_identity(target) != initial
+    _assert_relative_dependency_identity(
+        tmp_path, "py", statement, "value = {package!r}\n", "value = 'changed'\n"
+    )
 
 
 @pytest.mark.parametrize("specifier", ["./dep", "./dep.js"])
 def test_type_identity_resolves_relative_typescript_dependency(tmp_path, specifier):
-    from emend.analysis_store import AnalysisStore
-
-    for package in ("alpha", "beta"):
-        (tmp_path / package).mkdir()
-        (tmp_path / package / "dep.ts").write_text(
-            "export const value: number = 1;\n"
-        )
-    dependency = tmp_path / "beta" / "dep.ts"
-    target = tmp_path / "beta" / "use.ts"
-    target.write_text(f"import {{ value }} from '{specifier}';\nconst result = value;\n")
-    store = AnalysisStore.open(tmp_path)
-    initial = store.type_file_identity(target)
-    (tmp_path / "alpha" / "dep.ts").write_text(
-        "export const value: string = 'unrelated';\n"
+    _assert_relative_dependency_identity(
+        tmp_path,
+        "ts",
+        f"import {{ value }} from '{specifier}';\nconst result = value;\n",
+        "export const value: number = 1;\n",
+        "export const value: string = 'changed';\n",
     )
-    assert store.type_file_identity(target) == initial
-    dependency.write_text("export const value: string = 'changed';\n")
-    assert store.type_file_identity(target) != initial
 
 
 @pytest.mark.parametrize("inherited", [False, True])
 def test_type_identity_resolves_typescript_path_alias(tmp_path, inherited):
-    from emend.analysis_store import AnalysisStore
-
     options = (
         '{\n"$schema": "https://example.com/a//schema.json",\n// aliases\n'
         '"compilerOptions": '
@@ -371,8 +369,6 @@ def test_type_identity_resolves_typescript_path_alias(tmp_path, inherited):
 
 
 def test_typescript_ambient_declarations_participate_in_type_identity(tmp_path):
-    from emend.analysis_store import AnalysisStore
-
     target = tmp_path / "app.ts"
     ambient = tmp_path / "globals.d.ts"
     target.write_text("const value = window.projectValue;\n")
@@ -384,7 +380,6 @@ def test_typescript_ambient_declarations_participate_in_type_identity(tmp_path):
 
 
 def test_deadcode_computes_type_snapshot_context_once(tmp_path, monkeypatch):
-    from emend.analysis_store import AnalysisStore
     from emend.transform import find_dead_code, warm_caches
     import emend.type_oracle as type_oracle
 
@@ -423,7 +418,6 @@ def test_deadcode_computes_type_snapshot_context_once(tmp_path, monkeypatch):
 
 
 def test_editor_overlay_owner_cannot_remove_a_newer_session(tmp_path):
-    from emend.analysis_store import AnalysisStore
     from emend.editor_search import EditorSearchEngine
 
     source = tmp_path / "app.py"
@@ -434,19 +428,14 @@ def test_editor_overlay_owner_cannot_remove_a_newer_session(tmp_path):
         first.buffer_open(str(source), "def first():\n    return 1\n", version=1)
         second.buffer_open(str(source), "def second():\n    return 2\n", version=2)
         first.close()
-        assert [fact.name for fact in AnalysisStore.open(tmp_path).query_facts().symbols()] == [
-            "second"
-        ]
+        assert _names(AnalysisStore.open(tmp_path).query_facts().symbols()) == ["second"]
     finally:
         first.close()
         second.close()
-    assert [fact.name for fact in AnalysisStore.open(tmp_path).query_facts().symbols()] == [
-        "disk"
-    ]
+    assert _names(AnalysisStore.open(tmp_path).query_facts().symbols()) == ["disk"]
 
 
 def test_query_facts_reuses_generation_and_incrementally_matches_full_build(tmp_path):
-    from emend.analysis_store import AnalysisStore
     from emend.fact_graph import FactGraph
 
     first, second = tmp_path / "first.py", tmp_path / "second.py"
@@ -462,14 +451,14 @@ def test_query_facts_reuses_generation_and_incrementally_matches_full_build(tmp_
     assert cold is warm and cold.snapshot is warm.snapshot
     assert cache_mtimes == {path: path.stat().st_mtime_ns for path in cache_mtimes}
     assert cold.snapshot.snapshot_id == cold.published_snapshot_id()
-    assert [fact.name for fact in cold.symbols()] == ["first", "second"]
+    assert _names(cold.symbols()) == ["first", "second"]
 
     first.write_text("def changed():\n    return 2\n")
     second.unlink()
     assert cold.source_text(first).startswith("def first")
     assert cold.source_text(second).startswith("def second")
     incremental = store.query_facts()
-    assert [fact.name for fact in cold.symbols()] == ["first", "second"]
+    assert _names(cold.symbols()) == ["first", "second"]
     assert cold.source_text(first).startswith("def first")
     assert cold.source_text(second).startswith("def second")
     rebuilt = FactGraph()
@@ -496,16 +485,12 @@ def test_query_facts_reuses_generation_and_incrementally_matches_full_build(tmp_
     original = same_size.stat()
     same_size.write_text("def after_():\n    return 2\n")
     os.utime(same_size, ns=(original.st_atime_ns, original.st_mtime_ns))
-    assert [fact.name for fact in store.query_facts().symbols(file_path="same_size.py")] == [
-        "after_"
-    ]
+    assert _names(store.query_facts().symbols(file_path="same_size.py")) == ["after_"]
 
 
 def test_reopened_store_reuses_revision_identity_without_hiding_same_stat_edits(
     tmp_path, monkeypatch
 ):
-    from emend.analysis_store import AnalysisStore
-
     source = tmp_path / "app.py"
     source.write_text("value = 1\n")
     before = AnalysisStore(tmp_path).disk_snapshot().files[0]
@@ -530,8 +515,6 @@ def test_reopened_store_reuses_revision_identity_without_hiding_same_stat_edits(
 
 
 def test_extraction_artifacts_reuse_across_content_revert(tmp_path, extracted_files):
-    from emend.analysis_store import AnalysisStore
-
     source = tmp_path / "app.py"
     first_content = "def first():\n    return 1\n"
     source.write_text(first_content)
@@ -549,8 +532,6 @@ def test_extraction_artifacts_reuse_across_content_revert(tmp_path, extracted_fi
 def test_language_config_identity_invalidates_published_and_shared_facts(
     tmp_path, extracted_files, monkeypatch,
 ):
-    from emend.analysis_store import AnalysisStore
-
     source = tmp_path / "app.py"
     source.write_text("value = 1\n")
     store = AnalysisStore.open(tmp_path)
@@ -564,8 +545,6 @@ def test_language_config_identity_invalidates_published_and_shared_facts(
 
 
 def test_reopened_store_refreshes_only_the_changed_revision(tmp_path, monkeypatch):
-    from emend.analysis_store import AnalysisStore
-
     first, second = tmp_path / "first.py", tmp_path / "second.py"
     first.write_text("def first():\n    return 1\n")
     second.write_text("def second():\n    return 2\n")
@@ -591,8 +570,6 @@ def test_reopened_store_refreshes_only_the_changed_revision(tmp_path, monkeypatc
 
 
 def test_extraction_artifacts_are_shared_by_linked_worktrees(tmp_path, extracted_files):
-    from emend.analysis_store import AnalysisStore
-
     main, linked = _linked_worktrees(tmp_path)
     main, linked = main / "packages" / "pkg", linked / "packages" / "pkg"
     content = "def shared():\n    return 1\n"
@@ -608,13 +585,12 @@ def test_extraction_artifacts_are_shared_by_linked_worktrees(tmp_path, extracted
     assert main_store.facts_path.is_file() and linked_store.facts_path.is_file()
     assert len(extracted_files) == 1
     (linked / "app.py").write_text("def linked_only():\n    return 2\n")
-    assert [fact.name for fact in linked_store.query_facts().symbols()] == ["linked_only"]
-    assert [fact.name for fact in main_store.query_facts().symbols()] == ["shared"]
+    assert _names(linked_store.query_facts().symbols()) == ["linked_only"]
+    assert _names(main_store.query_facts().symbols()) == ["shared"]
     assert len(extracted_files) == 2
 
 
 def test_fact_refresh_is_atomic_and_probes_do_not_hide_new_content(tmp_path, monkeypatch):
-    from emend.analysis_store import AnalysisStore
     from emend.fact_graph import FactGraph
 
     source = tmp_path / "app.py"
@@ -637,12 +613,10 @@ def test_fact_refresh_is_atomic_and_probes_do_not_hide_new_content(tmp_path, mon
     assert graph.published_snapshot_id() == published
     assert graph.snapshot.snapshot_id == published
     monkeypatch.setattr(FactGraph, "replace_extracted", replace_extracted)
-    assert [fact.name for fact in store.query_facts().symbols()] == ["after"]
+    assert _names(store.query_facts().symbols()) == ["after"]
 
 
 def test_sqlite_snapshot_copy_includes_live_wal(tmp_path):
-    from emend.analysis_store import AnalysisStore
-
     source, copied = tmp_path / "source.db", tmp_path / "copied.db"
     connection = sqlite3.connect(source)
     try:
@@ -660,8 +634,6 @@ def test_sqlite_snapshot_copy_includes_live_wal(tmp_path):
 
 
 def test_concurrent_process_publications_bind_matching_snapshots(tmp_path):
-    from emend.analysis_store import AnalysisStore
-
     source = tmp_path / "app.py"
     source.write_text("def first():\n    return 1\n")
     marker, release = tmp_path / "scanned", tmp_path / "release"
@@ -718,14 +690,10 @@ print(json.dumps([
     assert results[1][0] == results[1][1]
     assert results[0][2] == ["first"]
     assert results[1][2] == ["second"]
-    assert [fact.name for fact in AnalysisStore(tmp_path).query_facts().symbols()] == [
-        "second"
-    ]
+    assert _names(AnalysisStore(tmp_path).query_facts().symbols()) == ["second"]
 
 
 def test_query_facts_overlay_is_versioned_and_source_consistent(tmp_path):
-    from emend.analysis_store import AnalysisStore
-
     source = tmp_path / "app.py"
     source.write_text("def disk_name():\n    return 1\n")
     store = AnalysisStore.open(tmp_path)
@@ -736,19 +704,17 @@ def test_query_facts_overlay_is_versioned_and_source_consistent(tmp_path):
     assert accepted.accepted is True and stale.accepted is False
     assert overlay is not disk
     assert overlay.source_text(str(source)).startswith("def overlay_name")
-    assert [fact.name for fact in overlay.symbols()] == ["overlay_name"]
+    assert _names(overlay.symbols()) == ["overlay_name"]
     store.update_overlay(source, "def newest_name():\n    return 3\n", 3)
     newest = store.query_facts()
     assert newest is not overlay
-    assert [fact.name for fact in overlay.symbols()] == ["overlay_name"]
-    assert [fact.name for fact in newest.symbols()] == ["newest_name"]
+    assert _names(overlay.symbols()) == ["overlay_name"]
+    assert _names(newest.symbols()) == ["newest_name"]
     store.remove_overlay(source)
     assert store.query_facts() is disk
 
 
 def test_overlay_clones_the_bound_disk_generation_not_latest_publication(tmp_path):
-    from emend.analysis_store import AnalysisStore
-
     source = tmp_path / "app.py"
     other = tmp_path / "other.py"
     source.write_text("def original():\n    return 1\n")
@@ -778,7 +744,6 @@ def test_overlay_clones_the_bound_disk_generation_not_latest_publication(tmp_pat
 
 
 def test_fact_consumers_reuse_one_generation_without_ad_hoc_graphs(tmp_path, monkeypatch):
-    from emend.analysis_store import AnalysisStore
     from emend.component_selector import ExtendedSelector
     from emend.fact_graph import FactGraph
     from emend.trace import TraceConfig, TraceSink, TraceSource, run_trace_analysis
@@ -828,7 +793,6 @@ def test_build_from_project_adapts_owned_facts_without_owning_the_owner(
     tmp_path, monkeypatch
 ):
     """The legacy builder delegates collection/typing and returns a safe copy."""
-    from emend.analysis_store import AnalysisStore
     from emend.fact_graph import FactGraph
 
     source = tmp_path / "app.py"
@@ -845,11 +809,11 @@ def test_build_from_project_adapts_owned_facts_without_owning_the_owner(
     monkeypatch.setattr(store, "query_facts", tracked)
     legacy_graph = FactGraph.build_from_project(str(tmp_path), include_types=True)
     assert calls[0] == (True, "auto")
-    assert [symbol.name for symbol in legacy_graph.symbols()] == ["live"]
+    assert _names(legacy_graph.symbols()) == ["live"]
 
     # Closing a compatibility result must not close the shared owner view.
     legacy_graph.close()
-    assert [symbol.name for symbol in owner_graph.symbols()] == ["live"]
+    assert _names(owner_graph.symbols()) == ["live"]
 
 
 def test_explicit_language_build_finds_deep_source_without_project_marker(tmp_path):
@@ -861,11 +825,10 @@ def test_explicit_language_build_finds_deep_source_without_project_marker(tmp_pa
     graph = FactGraph.build_from_project(
         str(tmp_path), language="python", include_types=False
     )
-    assert [symbol.name for symbol in graph.symbols()] == ["live"]
+    assert _names(graph.symbols()) == ["live"]
 
 
 def test_legacy_filtered_build_cannot_overwrite_owner_generation(tmp_path):
-    from emend.analysis_store import AnalysisStore
     from emend.fact_graph import FactGraph
 
     (tmp_path / "app.py").write_text("def python_symbol():\n    pass\n")
@@ -877,7 +840,7 @@ def test_legacy_filtered_build_cannot_overwrite_owner_generation(tmp_path):
         include_types=False,
     )
     try:
-        assert [symbol.name for symbol in detached.symbols()] == ["python_symbol"]
+        assert _names(detached.symbols()) == ["python_symbol"]
     finally:
         detached.close()
     reopened = AnalysisStore(tmp_path).query_facts()
@@ -889,8 +852,6 @@ def test_legacy_filtered_build_cannot_overwrite_owner_generation(tmp_path):
 def test_type_batch_uses_one_snapshot_and_reuses_linked_worktree_payload(
     tmp_path, monkeypatch
 ):
-    from emend.analysis_store import AnalysisStore
-
     main, linked = _linked_worktrees(tmp_path)
     for root in (main, linked):
         (root / "one.py").write_text("value = 1\n")
@@ -927,8 +888,6 @@ def test_type_batch_uses_one_snapshot_and_reuses_linked_worktree_payload(
 
 
 def test_typed_fact_view_is_lazy_cached_and_snapshot_bound(tmp_path, monkeypatch):
-    from emend.analysis_store import AnalysisStore
-
     source = tmp_path / "app.py"
     source.write_text("value = 1\n")
     _TypedOracle.calls = 0
@@ -958,8 +917,6 @@ def test_typed_fact_view_is_lazy_cached_and_snapshot_bound(tmp_path, monkeypatch
 
 
 def test_typed_fact_view_refreshes_when_engine_identity_changes(tmp_path, monkeypatch):
-    from emend.analysis_store import AnalysisStore
-
     (tmp_path / "app.py").write_text("value = 1\n")
     version = ["engine-v1"]
 
@@ -981,7 +938,6 @@ def test_typed_fact_view_refreshes_when_engine_identity_changes(tmp_path, monkey
 
 
 def test_trace_reads_overlay_only_file_from_selected_snapshot(tmp_path):
-    from emend.analysis_store import AnalysisStore
     from emend.trace import TraceConfig, TraceSink, TraceSource, run_trace_analysis
 
     path = tmp_path / "newdir" / "new.py"
@@ -1024,7 +980,6 @@ def test_cli_and_mcp_type_queries_use_the_typed_owner_view(tmp_path, monkeypatch
 
 
 def test_disk_type_engine_returns_empty_overlay_view(tmp_path, monkeypatch):
-    from emend.analysis_store import AnalysisStore
     from emend.type_oracle import TypeOracle
 
     class DiskOracle(TypeOracle):
