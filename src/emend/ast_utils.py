@@ -1,6 +1,5 @@
 """AST utilities for traversing and finding symbols in Python code."""
 
-import ast
 import fnmatch
 import logging
 from pathlib import Path
@@ -30,32 +29,21 @@ def get_imports(filepath: str) -> list[dict]:
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             source = f.read()
-        tree = ast.parse(source, filename=filepath)
-    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+    except (OSError, UnicodeDecodeError):
         logger.debug("Could not parse imports from %s", filepath, exc_info=True)
         return []
 
-    imports = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                imports.append({
-                    "module": alias.name,
-                    "name": None,
-                    "asname": alias.asname,
-                    "level": 0
-                })
-        elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            level = node.level
-            for alias in node.names:
-                imports.append({
-                    "module": module,
-                    "name": alias.name,
-                    "asname": alias.asname,
-                    "level": level
-                })
-    return imports
+    resolver = emend_core.PyScopeResolver(".", extension="py")
+    return [
+        {
+            "module": name if imp["is_plain"] else imp["module"],
+            "name": None if imp["is_plain"] else name,
+            "asname": alias,
+            "level": imp["level"],
+        }
+        for imp in resolver.collect_structured_imports_from_source(source, ext="py")
+        for name, alias in imp["names"]
+    ]
 
 
 def resolve_through_reexports(

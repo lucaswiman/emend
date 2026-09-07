@@ -545,7 +545,9 @@ class TreeSitterPatternCompiler(PatternCompiler):
     def compile(self, pattern_str: str) -> dict | None:
         from emend import emend_core
         from emend.language_registry import get_extensions
-        from emend.pattern import parse_pattern, MetaVar
+        from emend.pattern import (
+            MetaVar, _build_metavar_map_and_replace, is_oracle_type_constraint, parse_pattern,
+        )
 
         # 1. Parse metavariables using existing Lark grammar
         try:
@@ -556,36 +558,32 @@ class TreeSitterPatternCompiler(PatternCompiler):
             logger.debug("parse_pattern failed for %r", pattern_str, exc_info=True)
             return None
 
-        # 2. Replace metavariables with placeholders
-        # We use _build_metavar_map_and_replace logic but we need the map
-        # to fixup the result.
-        metavar_map: dict[str, MetaVar] = {}
-        temp_code = pattern_str
+        for mv in pattern.metavars:
+            constraint = mv.type_constraint
+            if (constraint and not is_oracle_type_constraint(constraint)
+                    and constraint.removeprefix("!") not in
+                    ("int", "str", "call", "float", "identifier", "attr", "stmt")):
+                return None
 
-        # Sort by length descending to avoid partial matches
-        sorted_mvs = sorted(pattern.metavars, key=lambda mv: (
-            -len(f"$...{mv.name}:{mv.type_constraint or ''}"),
-            -len(f"$...{mv.name}"),
-            -len(f"${mv.name}:{mv.type_constraint or ''}"),
-            -len(f"${mv.name}")
-        ))
-
-        for mv in sorted_mvs:
-            placeholder = f"_META_{mv.name}_"
-            metavar_map[placeholder] = mv
-
-            if mv.name == "_":
-                pattern_str_meta = "$_"
-            elif mv.ellipsis and mv.type_constraint:
-                pattern_str_meta = f"$...{mv.name}:{mv.type_constraint}"
-            elif mv.ellipsis:
-                pattern_str_meta = f"$...{mv.name}"
-            elif mv.type_constraint:
-                pattern_str_meta = f"${mv.name}:{mv.type_constraint}"
-            else:
-                pattern_str_meta = f"${mv.name}"
-
-            temp_code = temp_code.replace(pattern_str_meta, placeholder)
+        temp_code, metavar_map = _build_metavar_map_and_replace(pattern, self.language)
+        glob_name = None
+        if self.language == "python":
+            # Globs are emend syntax, so shield them before parsing Python.
+            match = re.match(r"^(\s*(?:async\s+)?(?:def|class)\s+)([\w*?]+)", temp_code)
+            if match:
+                prefix, name = match.groups()
+                rest = temp_code[match.end():]
+                if "*" in name or "?" in name:
+                    glob_name = name
+                    name = "__GLOB_NAME__"
+                    if not rest.lstrip().startswith("("):
+                        rest = "(__META__GLOB_ELLIPSIS__)" + rest
+                        metavar_map["__META__GLOB_ELLIPSIS__"] = MetaVar(
+                            name="_GLOB_ELLIPSIS", ellipsis=True
+                        )
+                temp_code = prefix + name + rest
+                if not temp_code.rstrip().endswith(":") and "\n" not in rest:
+                    temp_code = temp_code.rstrip() + ":"
 
         # 3. Parse with tree-sitter via emend_core
         exts = get_extensions(self.language)
@@ -593,12 +591,16 @@ class TreeSitterPatternCompiler(PatternCompiler):
 
         try:
             ir = emend_core.compile_pattern_treesitter(temp_code, ext)
+            ir = self._fixup_ir(ir, metavar_map)
+        except BUG_EXCEPTIONS:
+            raise
         except Exception:
             logger.debug("compile_pattern_treesitter failed for %r", pattern_str, exc_info=True)
             return None
 
-        # 4. Recursively replace placeholder nodes with Metavar/Ellipsis nodes
-        return self._fixup_ir(ir, metavar_map)
+        if ir is not None and glob_name is not None:
+            ir["name"] = {"type": "name_glob", "value": glob_name}
+        return ir
 
     def _fixup_ir(self, ir: dict | list | str, metavar_map: dict[str, MetaVar]):
         if isinstance(ir, list):
@@ -610,34 +612,39 @@ class TreeSitterPatternCompiler(PatternCompiler):
             return ir
         if not isinstance(ir, dict):
             return ir
+        if ir.get("type") == "unsupported":
+            raise ValueError("Unsupported pattern syntax")
+        if self.language == "python" and ir.get("type") in ("integer", "float"):
+            value = ir["value"]
+            return {**ir, "value": str(int(value, 0) if ir["type"] == "integer" else float(value))}
 
         # If it's a name node, check if it's a placeholder
         if ir.get("type") == "name":
             val = ir.get("value")
+            if val == "__EMEND_SPREAD__":
+                return {"type": "ellipsis"}
             if isinstance(val, str) and val in metavar_map:
                 mv = metavar_map[val]
                 if mv.name == "_":
                     return {"type": "any_expr"}
 
                 tc = mv.type_constraint
-                if tc in ("int", "str", "call", "float", "identifier", "attr", "stmt"):
+                if tc and tc.removeprefix("!") in ("int", "str", "call", "float", "identifier", "attr", "stmt"):
                     return {"type": "type_constraint", "kind": tc, "name": mv.name}
-                if tc and tc.startswith("!"):
-                    inner = tc[1:]
-                    if inner in ("int", "str", "call", "float", "identifier", "attr", "stmt"):
-                        return {"type": "type_constraint", "kind": tc, "name": mv.name}
-
-                if mv.ellipsis:
-                    return {"type": "ellipsis", "name": mv.name}
-                else:
-                    return {"type": "metavar", "name": mv.name}
+                return {"type": "ellipsis" if mv.ellipsis else "metavar", "name": mv.name}
 
         # Recursively fixup all fields
         new_ir = {}
         for k, v in ir.items():
-            if k in ("name", "module", "asname") and isinstance(v, str) and v in metavar_map:
+            if k == "names" and ir.get("type") in ("global", "nonlocal"):
+                new_ir[k] = [
+                    {"type": "metavar", "name": metavar_map[name].name}
+                    if name in metavar_map else name for name in v
+                ]
+            elif k in ("name", "module", "asname") and isinstance(v, str) and v in metavar_map:
                 # Fields that expect a name string but got a placeholder
-                new_ir[k] = metavar_map[v].name
+                new_ir[k] = (metavar_map[v].name if ir.get("type") in ("star", "double_star")
+                             else {"type": "metavar", "name": metavar_map[v].name})
             elif k == "value" and isinstance(v, str) and v in metavar_map:
                 # 'value' usually expects an IR dict, but might have got a placeholder string
                 # We fix it up by treating it as a Name node and then fixing that
@@ -645,24 +652,35 @@ class TreeSitterPatternCompiler(PatternCompiler):
             else:
                 new_ir[k] = self._fixup_ir(v, metavar_map)
 
+        if new_ir.get("type") in ("pair", "spread"):
+            value = new_ir.get("key" if new_ir["type"] == "pair" else "value")
+            if isinstance(value, dict) and value.get("type") == "ellipsis":
+                return value
+
+        if new_ir.get("type") in ("funcdef", "lambda"):
+            # Parameters use ParamPattern rather than expression captures.
+            for index, param in enumerate(new_ir["params"]):
+                kind = param.get("type")
+                keyword_name = ir["params"][index].get("keyword_only_name")
+                param.pop("keyword_only_name", None)
+                if keyword_name in metavar_map:
+                    kind = "ellipsis" if metavar_map[keyword_name].ellipsis else "any_expr"
+                if new_ir["type"] == "funcdef" and kind in ("star", "double_star"):
+                    mv = metavar_map.get(ir["params"][index].get("name"))
+                    kind = "ellipsis" if mv and mv.ellipsis else "any_expr"
+                elif kind in ("star", "double_star") and ir["params"][index].get("name") not in metavar_map:
+                    param.pop("name", None)
+                if kind in ("metavar", "any_expr", "ellipsis"):
+                    new_ir["params"][index] = {
+                        "type": "ellipsis" if kind == "ellipsis" else "any"
+                    }
+
         # Post-process call args for ellipsis
         if new_ir.get("type") == "call" and "args" in new_ir:
-            processed_args = []
-            for arg in new_ir["args"]:
-                if isinstance(arg, dict) and arg.get("type") == "arg":
-                    val = arg.get("value")
-                    if isinstance(val, dict) and val.get("type") == "ellipsis":
-                        processed_args.append(val)
-                        continue
-                processed_args.append(arg)
-            new_ir["args"] = processed_args
-
-            has_ellipsis = any(
+            new_ir["exact_args"] = not any(
                 isinstance(arg, dict) and arg.get("type") == "ellipsis"
                 for arg in new_ir["args"]
             )
-            # In our Rust IR, call has "exact_args" field
-            new_ir["exact_args"] = not has_ellipsis
 
         return new_ir
 

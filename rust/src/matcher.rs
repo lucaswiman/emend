@@ -252,6 +252,12 @@ pub enum PatternNode {
     },
     /// Match any of these node kinds (used for constraint matching).
     NodeKindMatch(Vec<String>),
+    /// Exact CST structure for constructs without a specialized semantic IR.
+    Syntax {
+        kind: String,
+        text: Option<String>,
+        children: Vec<PatternNode>,
+    },
 }
 
 /// Name in global/nonlocal statement: either literal or metavar.
@@ -1295,6 +1301,19 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             Ok(PatternNode::ExceptHandler { exception_type: exc_type, name })
         }
 
+        "syntax" => {
+            let kind = d.get_item("kind")?
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("Syntax missing kind"))?
+                .extract()?;
+            let text = d.get_item("text")?.map(|v| v.extract()).transpose()?;
+            let children = d.get_item("children")?.map(|items| {
+                items.downcast::<PyList>()?.iter()
+                    .map(|item| deserialize_pattern(&item))
+                    .collect::<PyResult<Vec<_>>>()
+            }).transpose()?.unwrap_or_default();
+            Ok(PatternNode::Syntax { kind, text, children })
+        }
+
         "node_kind_match" => {
             let kinds_obj = d.get_item("kinds")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("NodeKindMatch missing 'kinds'")
@@ -1407,7 +1426,10 @@ fn matches_node<'a>(
         }
 
         PatternNode::Name(s) => {
-            if node.kind() == config.pattern_matching.identifier && node_text(node, source) == s.as_str() {
+            if (node.kind() == config.pattern_matching.identifier
+                || config.pattern_matching.extra_identifiers.iter().any(|k| k == node.kind()))
+                && node_text(node, source) == s.as_str()
+            {
                 Some(node)
             } else {
                 None
@@ -2389,16 +2411,16 @@ fn matches_node<'a>(
         }
 
         PatternNode::ImportFrom { module, names } => {
-            if node.kind() != config.pattern_matching.import_from_stmt.as_str() {
+            let fixed_module = config.imports.fixed_modules.get(node.kind());
+            if node.kind() != config.pattern_matching.import_from_stmt.as_str() && fixed_module.is_none() {
                 return None;
             }
             // Check module name if specified
             if let Some(mod_ref) = module {
-                let mod_node = match node.child_by_field_name("module_name") {
-                    Some(n) => n,
-                    None => return None,
-                };
-                let actual_mod = node_text(mod_node, source);
+                let actual_mod = fixed_module.map(String::as_str).or_else(|| {
+                    node.child_by_field_name(&config.imports.module_field)
+                        .map(|n| node_text(n, source))
+                })?;
                 match mod_ref {
                     NameOrMetavar::Literal(expected) => {
                         if actual_mod != expected.as_str() {
@@ -2587,27 +2609,33 @@ fn matches_node<'a>(
             }
         }
 
+        PatternNode::Syntax { kind, text, children } => {
+            if node.kind() != kind.as_str() {
+                return None;
+            }
+            if let Some(text) = text {
+                return (node_text(node, source) == text.as_str()).then_some(node);
+            }
+            let actual: Vec<_> = node.children(&mut node.walk())
+                .filter(|n| !n.is_extra()).collect();
+            match_sequence(children, &actual, source, captures, config).then_some(node)
+        }
+
         PatternNode::ExceptHandler { exception_type, name } => {
             if node.kind() != config.pattern_matching.except_handler.as_str() {
                 return None;
             }
-            let mut cursor = node.walk();
-            let named_children: Vec<Node> = node.children(&mut cursor)
-                .filter(|n| n.is_named())
-                .collect();
+            let value = node.named_child(0).filter(|n| n.kind() != "block");
+            let as_pattern = value.filter(|n| n.kind() == config.pattern_matching.as_pattern);
+            let type_node = as_pattern.and_then(|n| n.named_child(0)).or(value);
+            let alias_node = as_pattern.and_then(|n| n.child_by_field_name("alias"));
             if let Some(type_pattern) = exception_type {
-                if named_children.is_empty() {
-                    return None;
-                }
-                if matches_node(named_children[0], source, type_pattern, captures, config).is_none() {
+                if matches_node(type_node?, source, type_pattern, captures, config).is_none() {
                     return None;
                 }
             }
             if let Some(name_pattern) = name {
-                if named_children.len() < 2 {
-                    return None;
-                }
-                if matches_node(named_children[1], source, name_pattern, captures, config).is_none() {
+                if matches_node(alias_node?, source, name_pattern, captures, config).is_none() {
                     return None;
                 }
             }
@@ -2946,6 +2974,10 @@ fn match_sequence(
     true
 }
 
+fn fstring_text(text: &str) -> String {
+    text.replace("{{", "{").replace("}}", "}")
+}
+
 fn match_fstring(
     parts: &[FStringPart],
     node: Node,
@@ -2973,7 +3005,7 @@ fn match_fstring(
                 if actual.kind() != "string_content" {
                     return false;
                 }
-                if node_text(actual, source) != t.as_str() {
+                if fstring_text(node_text(actual, source)) != *t {
                     return false;
                 }
             }
@@ -3518,22 +3550,70 @@ pub fn compile_pattern_treesitter(
     let config = LanguageConfig::load_for_extension(extension, root)
         .unwrap_or_else(|_| LanguageConfig::python_default());
 
+    // An exception clause is a valid pattern fragment, but requires a try
+    // statement as its parse context. Keep that context out of the pattern IR.
+    let except_fragment = config.pattern_matching.except_handler == "except_clause"
+        && source
+            .trim_start()
+            .strip_prefix("except")
+            .is_some_and(|s| s.starts_with(':') || s.starts_with(char::is_whitespace));
+    let wrapped;
+    let source = if except_fragment {
+        wrapped = format!("try:\n    pass\n{}\n    pass", source.trim());
+        wrapped.as_str()
+    } else if config.pattern_matching.try_stmt == "try_statement" && source.trim() == "try:" {
+        wrapped = "try:\n    pass\nexcept:\n    pass".to_owned();
+        wrapped.as_str()
+    } else {
+        source
+    };
     let tree = crate::pattern::parse_by_extension(source, extension).ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyValueError, _>("Failed to parse pattern source")
     })?;
-
+    // Some grammars require a terminator for standalone expression patterns.
+    let terminated;
+    let (source, tree) = if tree.root_node().has_error() {
+        terminated = format!("{source};");
+        let tree = crate::pattern::parse_by_extension(&terminated, extension).unwrap();
+        (terminated.as_str(), tree)
+    } else {
+        (source, tree)
+    };
     let root_node = tree.root_node();
+    if root_node.has_error() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Invalid pattern syntax",
+        ));
+    }
+    if except_fragment {
+        if let Some(statement) = root_node.named_child(0) {
+            if let Some(clause) = statement
+                .named_children(&mut statement.walk())
+                .find(|n| n.kind() == config.pattern_matching.except_handler)
+            {
+                return Ok(node_to_ir(py, clause, source.as_bytes(), &config).into());
+            }
+        }
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Invalid exception pattern",
+        ));
+    }
     // Usually patterns are single expressions or statements.
     // We want to find the first meaningful node.
     let mut pattern_node = None;
     for i in 0..root_node.named_child_count() {
         let child = root_node.named_child(i).unwrap();
-        if config.pattern_matching.statement_nodes.iter().any(|s| s == child.kind()) {
+        if config
+            .pattern_matching
+            .statement_nodes
+            .iter()
+            .any(|s| s == child.kind())
+        {
             pattern_node = Some(child);
             break;
         }
     }
-    
+
     if pattern_node.is_none() {
         pattern_node = root_node.named_child(0);
     }
@@ -3545,6 +3625,65 @@ pub fn compile_pattern_treesitter(
     Ok(node_to_ir(py, pattern_node, source.as_bytes(), &config).into())
 }
 
+fn parameter_to_ir<'a>(
+    py: Python<'a>,
+    node: Node,
+    source: &[u8],
+    config: &LanguageConfig,
+) -> Bound<'a, PyDict> {
+    let dict = PyDict::new(py);
+    if let Some(default) = node.child_by_field_name("value") {
+        dict.set_item("type", "with_default").unwrap();
+        dict.set_item("default_value", node_to_ir(py, default, source, config))
+            .unwrap();
+    } else if node.kind().contains("splat") {
+        dict.set_item(
+            "type",
+            if node_text(node, source).starts_with("**") {
+                "double_star"
+            } else {
+                "star"
+            },
+        )
+        .unwrap();
+        if let Some(name) = node.named_child(0) {
+            dict.set_item("name", node_text(name, source)).unwrap();
+        }
+    } else {
+        let name = node
+            .child_by_field_name(config.symbols.name_field())
+            .or_else(|| node.named_child(0))
+            .unwrap_or(node);
+        if name.kind().contains("splat") {
+            return parameter_to_ir(py, name, source, config);
+        }
+        return node_to_ir(py, name, source, config);
+    }
+    dict
+}
+
+fn string_content(py: Python, node: Node, source: &[u8], raw: bool) -> Option<String> {
+    let mut value = String::new();
+    let mut start = node.start_byte();
+    for escape in node
+        .named_children(&mut node.walk())
+        .filter(|n| !raw && n.kind() == "escape_sequence")
+    {
+        value.push_str(std::str::from_utf8(&source[start..escape.start_byte()]).ok()?);
+        let bytes = pyo3::types::PyBytes::new(py, &source[escape.byte_range()]);
+        value.push_str(
+            &bytes
+                .call_method1("decode", ("unicode_escape",))
+                .ok()?
+                .extract::<String>()
+                .ok()?,
+        );
+        start = escape.end_byte();
+    }
+    value.push_str(std::str::from_utf8(&source[start..node.end_byte()]).ok()?);
+    Some(value)
+}
+
 fn node_to_ir<'a>(
     py: Python<'a>,
     node: Node,
@@ -3553,9 +3692,353 @@ fn node_to_ir<'a>(
 ) -> Bound<'a, PyDict> {
     let dict = PyDict::new(py);
     let kind = node.kind();
+    let pm = &config.pattern_matching;
+    let children: Vec<_> = node
+        .named_children(&mut node.walk())
+        .filter(|n| n.kind() != "comment")
+        .collect();
+    let ir = |child| node_to_ir(py, child, source, config);
+    let set_node = |key: &str, child| {
+        if let Some(child) = child {
+            dict.set_item(key, ir(child)).unwrap();
+        } else {
+            dict.set_item(key, py.None()).unwrap();
+        }
+    };
+
+    // These wrappers have no semantic significance in a pattern.
+    if kind == pm.decorated_def {
+        if let Some(definition) = node
+            .child_by_field_name("definition")
+            .or_else(|| children.last().copied())
+        {
+            let result = ir(definition);
+            let decorators = PyList::empty(py);
+            for decorator in &children {
+                if *decorator != definition {
+                    if let Some(expression) = decorator.named_child(0) {
+                        decorators.append(ir(expression)).unwrap();
+                    }
+                }
+            }
+            result.set_item("decorators", decorators).unwrap();
+            return result;
+        }
+    }
+    if [
+        "type",
+        "as_pattern_target",
+        "expression_list",
+        "pattern_list",
+    ]
+    .contains(&kind)
+        && children.len() == 1
+    {
+        return ir(children[0]);
+    }
+    if kind == "ellipsis" {
+        dict.set_item("type", "ellipsis_literal").unwrap();
+        return dict;
+    }
+    if kind == pm.list_splat || kind == pm.dictionary_splat {
+        dict.set_item(
+            "type",
+            if kind == pm.list_splat {
+                "star"
+            } else {
+                "spread"
+            },
+        )
+        .unwrap();
+        set_node("value", children.first().copied());
+        return dict;
+    }
+    if kind == pm.set || kind == pm.dict || kind == "pattern_list" || kind == "expression_list" {
+        dict.set_item(
+            "type",
+            if kind == pm.set {
+                "set"
+            } else if kind == pm.dict {
+                "dict"
+            } else {
+                "tuple"
+            },
+        )
+        .unwrap();
+        let elements = PyList::empty(py);
+        for child in &children {
+            elements.append(ir(*child)).unwrap();
+        }
+        dict.set_item("elements", elements).unwrap();
+        return dict;
+    }
+    if kind == pm.pair || kind == pm.keyword_argument {
+        dict.set_item(
+            "type",
+            if kind == pm.pair {
+                "pair"
+            } else {
+                "keyword_arg"
+            },
+        )
+        .unwrap();
+        if kind == pm.pair {
+            set_node("key", node.child_by_field_name("key"));
+        } else {
+            dict.set_item(
+                "key",
+                node.child_by_field_name("name")
+                    .map(|n| node_text(n, source)),
+            )
+            .unwrap();
+        }
+        set_node("value", node.child_by_field_name(&pm.value_field));
+        return dict;
+    }
+    if kind == pm.dict_comprehension || children.iter().any(|n| n.kind() == pm.for_in_clause) {
+        dict.set_item(
+            "type",
+            if kind == pm.dict_comprehension {
+                "dict_comprehension"
+            } else {
+                "comprehension"
+            },
+        )
+        .unwrap();
+        if kind == pm.dict_comprehension {
+            if let Some(pair) = children.first() {
+                set_node("key", pair.child_by_field_name("key"));
+                set_node("value", pair.child_by_field_name(&pm.value_field));
+            }
+        } else {
+            dict.set_item("kind", kind).unwrap();
+            set_node("elt", children.first().copied());
+        }
+        let generators = PyList::empty(py);
+        let mut filters = PyList::empty(py);
+        for child in &children {
+            if child.kind() == pm.for_in_clause {
+                let generator = PyDict::new(py);
+                let (Some(target), Some(iter)) = (
+                    child.child_by_field_name(&pm.target_field),
+                    child.child_by_field_name(&pm.iter_field),
+                ) else {
+                    dict.set_item("type", "unsupported").unwrap();
+                    return dict;
+                };
+                generator.set_item("target", ir(target)).unwrap();
+                generator.set_item("iter", ir(iter)).unwrap();
+                filters = PyList::empty(py);
+                generator.set_item("ifs", &filters).unwrap();
+                generators.append(generator).unwrap();
+            } else if child.kind() == pm.if_clause {
+                if let Some(condition) = child.named_child(0) {
+                    filters.append(ir(condition)).unwrap();
+                }
+            }
+        }
+        dict.set_item("generators", generators).unwrap();
+        return dict;
+    }
+    let string_prefix = if kind == pm.string {
+        node_text(node, source)
+            .split(['\'', '"'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+    } else {
+        String::new()
+    };
+    if kind == pm.string && string_prefix.contains('f') {
+        dict.set_item("type", "fstring").unwrap();
+        let parts = PyList::empty(py);
+        for child in &children {
+            let part = PyDict::new(py);
+            if child.kind() == "string_content" {
+                part.set_item("type", "fstring_text").unwrap();
+                part.set_item("value", fstring_text(node_text(*child, source)))
+                    .unwrap();
+            } else if child.kind() == "interpolation" {
+                part.set_item("type", "fstring_expr").unwrap();
+                if let Some(expression) = child.named_child(0) {
+                    part.set_item("value", ir(expression)).unwrap();
+                }
+            } else {
+                continue;
+            }
+            parts.append(part).unwrap();
+        }
+        dict.set_item("parts", parts).unwrap();
+        return dict;
+    }
+    if kind == pm.lambda {
+        dict.set_item("type", "lambda").unwrap();
+        let params = PyList::empty(py);
+        if let Some(parameters) = node.child_by_field_name(config.symbols.parameters_field()) {
+            let positional_end = parameters
+                .named_children(&mut parameters.walk())
+                .position(|n| n.kind() == "positional_separator");
+            let mut keyword_only = false;
+            for (index, child) in parameters
+                .named_children(&mut parameters.walk())
+                .enumerate()
+            {
+                if positional_end.is_some_and(|end| index <= end) {
+                    continue;
+                }
+                let splat = child.kind().contains("splat");
+                if child.kind() != "keyword_separator" && (!keyword_only || splat) {
+                    params
+                        .append(parameter_to_ir(py, child, source, config))
+                        .unwrap();
+                }
+                if child.kind() == "keyword_separator" || splat {
+                    keyword_only = true;
+                }
+            }
+        }
+        dict.set_item("params", params).unwrap();
+        set_node(
+            "body",
+            node.child_by_field_name(config.symbols.body_field()),
+        );
+        return dict;
+    }
+    if kind == pm.conditional_expression {
+        dict.set_item("type", "ifexp").unwrap();
+        for (key, index) in [("body", 0), ("test", 1), ("orelse", 2)] {
+            set_node(key, children.get(index).copied());
+        }
+        return dict;
+    }
+    if kind == pm.named_expr
+        || kind == pm.augmented_assignment
+        || kind == pm.annotated_assignment
+        || (kind == pm.assignment && node.child_by_field_name(&pm.annotation_field).is_some())
+    {
+        let annotated = node.child_by_field_name(&pm.annotation_field);
+        dict.set_item(
+            "type",
+            if kind == pm.named_expr {
+                "named_expr"
+            } else if annotated.is_some() {
+                "ann_assign"
+            } else {
+                "aug_assign"
+            },
+        )
+        .unwrap();
+        set_node(
+            "target",
+            node.child_by_field_name(&pm.left_field)
+                .or_else(|| node.child_by_field_name("name")),
+        );
+        set_node(
+            "value",
+            node.child_by_field_name(&pm.right_field)
+                .or_else(|| node.child_by_field_name(&pm.value_field)),
+        );
+        if annotated.is_some() {
+            set_node("annotation", annotated);
+        }
+        if let Some(operator) = node.child_by_field_name(&pm.operator_field) {
+            dict.set_item("op", node_text(operator, source)).unwrap();
+        }
+        return dict;
+    }
+    if kind == pm.for_stmt {
+        dict.set_item("type", "for_stmt").unwrap();
+        set_node("target", node.child_by_field_name(&pm.target_field));
+        set_node("iter", node.child_by_field_name(&pm.iter_field));
+        dict.set_item(
+            "is_async",
+            node.child(0).map(|c| c.kind() == "async").unwrap_or(false),
+        )
+        .unwrap();
+        return dict;
+    }
+    if kind == pm.with_stmt {
+        dict.set_item("type", "with_stmt").unwrap();
+        let item = children.first().and_then(|n| n.named_child(0));
+        let value = item.and_then(|n| n.child_by_field_name(&pm.value_field));
+        let as_pattern = value.filter(|n| n.kind() == pm.as_pattern);
+        set_node(
+            "context",
+            as_pattern.and_then(|n| n.named_child(0)).or(value),
+        );
+        set_node(
+            "var",
+            as_pattern.and_then(|n| n.child_by_field_name("alias")),
+        );
+        dict.set_item(
+            "is_async",
+            node.child(0).map(|c| c.kind() == "async").unwrap_or(false),
+        )
+        .unwrap();
+        return dict;
+    }
+    if kind == pm.try_stmt {
+        dict.set_item("type", "try_stmt").unwrap();
+        return dict;
+    }
+    if kind == pm.except_handler {
+        dict.set_item("type", "except_handler").unwrap();
+        let value = children.first().copied().filter(|n| n.kind() != "block");
+        let as_pattern = value.filter(|n| n.kind() == pm.as_pattern);
+        set_node(
+            "exception_type",
+            as_pattern.and_then(|n| n.named_child(0)).or(value),
+        );
+        set_node(
+            "name",
+            as_pattern.and_then(|n| n.child_by_field_name("alias")),
+        );
+        return dict;
+    }
+    if kind == pm.await_expr || kind == pm.delete_stmt {
+        dict.set_item(
+            "type",
+            if kind == pm.await_expr {
+                "await"
+            } else {
+                "delete"
+            },
+        )
+        .unwrap();
+        set_node(
+            if kind == pm.await_expr {
+                "value"
+            } else {
+                "target"
+            },
+            children.first().copied(),
+        );
+        return dict;
+    }
+    if kind == pm.global_stmt || kind == pm.nonlocal_stmt {
+        dict.set_item(
+            "type",
+            if kind == pm.global_stmt {
+                "global"
+            } else {
+                "nonlocal"
+            },
+        )
+        .unwrap();
+        dict.set_item(
+            "names",
+            children
+                .iter()
+                .map(|n| node_text(*n, source))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        return dict;
+    }
 
     // Identifier
-    if kind == config.pattern_matching.identifier {
+    if kind == config.pattern_matching.identifier || pm.extra_identifiers.iter().any(|k| k == kind)
+    {
         dict.set_item("type", "name").unwrap();
         dict.set_item("value", node_text(node, source)).unwrap();
         return dict;
@@ -3570,6 +4053,11 @@ fn node_to_ir<'a>(
         }
         let args = PyList::empty(py);
         if let Some(arg_list) = node.child_by_field_name(&config.pattern_matching.args_field) {
+            if arg_list.kind() == "generator_expression" {
+                args.append(ir(arg_list)).unwrap();
+                dict.set_item("args", args).unwrap();
+                return dict;
+            }
             let mut cursor = arg_list.walk();
             for child in arg_list.children(&mut cursor).filter(|n| n.is_named()) {
                 let arg_ir = node_to_ir(py, child, source, config);
@@ -3580,26 +4068,35 @@ fn node_to_ir<'a>(
                     arg_dict.set_item("type", "star").unwrap();
                     let inner = child.children(&mut child.walk()).find(|n| n.is_named());
                     if let Some(in_node) = inner {
-                        arg_dict.set_item("value", node_to_ir(py, in_node, source, config)).unwrap();
+                        arg_dict
+                            .set_item("value", node_to_ir(py, in_node, source, config))
+                            .unwrap();
                     }
                 } else if ck == config.pattern_matching.dictionary_splat {
                     arg_dict.set_item("type", "double_star").unwrap();
                     let inner = child.children(&mut child.walk()).find(|n| n.is_named());
                     if let Some(in_node) = inner {
-                        arg_dict.set_item("value", node_to_ir(py, in_node, source, config)).unwrap();
+                        arg_dict
+                            .set_item("value", node_to_ir(py, in_node, source, config))
+                            .unwrap();
                     }
                 } else if ck == config.pattern_matching.keyword_argument {
                     arg_dict.set_item("type", "keyword_arg").unwrap();
-                    let key = child.child_by_field_name(config.symbols.name_field.as_deref().unwrap_or("name")).map(|n| node_text(n, source)).unwrap_or("");
-                    let val = child.child_by_field_name(config.pattern_matching.value_field.as_str()).map(|n| node_to_ir(py, n, source, config));
+                    let key = child
+                        .child_by_field_name(config.symbols.name_field.as_deref().unwrap_or("name"))
+                        .map(|n| node_text(n, source))
+                        .unwrap_or("");
+                    let val = child
+                        .child_by_field_name(config.pattern_matching.value_field.as_str())
+                        .map(|n| node_to_ir(py, n, source, config));
                     arg_dict.set_item("key", key).unwrap();
                     if let Some(v) = val {
                         arg_dict.set_item("value", v).unwrap();
                     }
                 } else {
                     // Regular arg
-                    arg_dict.set_item("type", "arg").unwrap();
-                    arg_dict.set_item("value", arg_ir).unwrap();
+                    args.append(arg_ir).unwrap();
+                    continue;
                 }
                 args.append(arg_dict).unwrap();
             }
@@ -3634,7 +4131,61 @@ fn node_to_ir<'a>(
     }
     if kind == config.pattern_matching.string {
         dict.set_item("type", "string").unwrap();
-        dict.set_item("value", node_text(node, source)).unwrap();
+        if !children.iter().any(|n| n.kind() == "string_start") {
+            dict.set_item("value", node_text(node, source)).unwrap();
+            return dict;
+        }
+        // Decode only CST string-content and escape nodes, never executable
+        // source. This retains literal normalization without a second parser.
+        if string_prefix.contains('b') {
+            dict.set_item("type", "unsupported").unwrap();
+        } else {
+            let value: Option<String> = children
+                .iter()
+                .filter(|n| n.kind() == "string_content")
+                .map(|n| string_content(py, *n, source, string_prefix.contains('r')))
+                .collect();
+            if let Some(value) = value {
+                dict.set_item(
+                    "value",
+                    pyo3::types::PyString::new(py, &value).repr().unwrap(),
+                )
+                .unwrap();
+            } else {
+                dict.set_item("type", "unsupported").unwrap();
+            }
+        }
+        return dict;
+    }
+    if kind == "concatenated_string" {
+        let mut value = String::new();
+        for child in &children {
+            let prefix = node_text(*child, source)
+                .split(['\'', '"'])
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if prefix.contains('b') || prefix.contains('f') {
+                dict.set_item("type", "unsupported").unwrap();
+                return dict;
+            }
+            for content in child
+                .named_children(&mut child.walk())
+                .filter(|n| n.kind() == "string_content")
+            {
+                let Some(part) = string_content(py, content, source, prefix.contains('r')) else {
+                    dict.set_item("type", "unsupported").unwrap();
+                    return dict;
+                };
+                value.push_str(&part);
+            }
+        }
+        dict.set_item("type", "string").unwrap();
+        dict.set_item(
+            "value",
+            pyo3::types::PyString::new(py, &value).repr().unwrap(),
+        )
+        .unwrap();
         return dict;
     }
     if kind == config.pattern_matching.true_literal {
@@ -3654,6 +4205,10 @@ fn node_to_ir<'a>(
 
     // Collections
     if kind == config.pattern_matching.list {
+        if children.is_empty() {
+            dict.set_item("type", "empty_list").unwrap();
+            return dict;
+        }
         dict.set_item("type", "list").unwrap();
         let elems = PyList::empty(py);
         let mut cursor = node.walk();
@@ -3678,39 +4233,55 @@ fn node_to_ir<'a>(
     if kind == config.pattern_matching.subscript {
         dict.set_item("type", "subscript").unwrap();
         // Try value_field first (Python: "value"), then object_field (TypeScript: "object")
-        let obj_node = node.child_by_field_name(&config.pattern_matching.value_field)
+        let obj_node = node
+            .child_by_field_name(&config.pattern_matching.value_field)
             .or_else(|| node.child_by_field_name(&config.pattern_matching.object_field));
         if let Some(obj) = obj_node {
-            dict.set_item("value", node_to_ir(py, obj, source, config)).unwrap();
+            dict.set_item("value", node_to_ir(py, obj, source, config))
+                .unwrap();
         }
         let slices = PyList::empty(py);
         // Try language-specific field names: "subscript" (Python), "index" (TypeScript/Rust)
-        let index_node = node.child_by_field_name("subscript")
-            .or_else(|| node.child_by_field_name("index"));
-        if let Some(index) = index_node {
-             slices.append(node_to_ir(py, index, source, config)).unwrap();
+        let indices: Vec<_> = node
+            .children_by_field_name("subscript", &mut node.walk())
+            .collect();
+        if !indices.is_empty() {
+            for index in indices {
+                slices.append(ir(index)).unwrap();
+            }
+        } else if let Some(index) = node.child_by_field_name("index") {
+            slices.append(ir(index)).unwrap();
         } else {
-             // Fallback: look for named children after the object/value child
-             let mut cursor = node.walk();
-             let named_children: Vec<_> = node.children(&mut cursor).filter(|n| n.is_named()).collect();
-             if named_children.len() > 1 {
-                 for child in &named_children[1..] {
-                     slices.append(node_to_ir(py, *child, source, config)).unwrap();
-                 }
-             }
+            // Fallback: look for named children after the object/value child
+            let mut cursor = node.walk();
+            let named_children: Vec<_> = node
+                .children(&mut cursor)
+                .filter(|n| n.is_named())
+                .collect();
+            if named_children.len() > 1 {
+                for child in &named_children[1..] {
+                    slices
+                        .append(node_to_ir(py, *child, source, config))
+                        .unwrap();
+                }
+            }
         }
         dict.set_item("slices", slices).unwrap();
         return dict;
     }
 
     // Binary / Boolean Ops
-    if kind == config.pattern_matching.binary_operator || kind == config.pattern_matching.boolean_operator {
+    if kind == config.pattern_matching.binary_operator
+        || kind == config.pattern_matching.boolean_operator
+    {
         dict.set_item("type", "binary_op").unwrap();
         if let Some(left) = node.child_by_field_name(&config.pattern_matching.left_field) {
-            dict.set_item("left", node_to_ir(py, left, source, config)).unwrap();
+            dict.set_item("left", node_to_ir(py, left, source, config))
+                .unwrap();
         }
         if let Some(right) = node.child_by_field_name(&config.pattern_matching.right_field) {
-            dict.set_item("right", node_to_ir(py, right, source, config)).unwrap();
+            dict.set_item("right", node_to_ir(py, right, source, config))
+                .unwrap();
         }
         if let Some(op) = node.child_by_field_name(&config.pattern_matching.operator_field) {
             dict.set_item("op", node_text(op, source)).unwrap();
@@ -3719,18 +4290,24 @@ fn node_to_ir<'a>(
     }
 
     // Unary Ops
-    if kind == config.pattern_matching.unary_operator {
+    if kind == config.pattern_matching.unary_operator
+        || kind == config.pattern_matching.not_operator
+    {
         dict.set_item("type", "unary_op").unwrap();
         if let Some(operand) = node.child_by_field_name("argument") {
-             dict.set_item("operand", node_to_ir(py, operand, source, config)).unwrap();
+            dict.set_item("operand", node_to_ir(py, operand, source, config))
+                .unwrap();
         } else {
-             let mut cursor = node.walk();
-             let named = node.children(&mut cursor).find(|n| n.is_named());
-             if let Some(n) = named {
-                 dict.set_item("operand", node_to_ir(py, n, source, config)).unwrap();
-             }
+            let mut cursor = node.walk();
+            let named = node.children(&mut cursor).find(|n| n.is_named());
+            if let Some(n) = named {
+                dict.set_item("operand", node_to_ir(py, n, source, config))
+                    .unwrap();
+            }
         }
         if let Some(op) = node.child_by_field_name(&config.pattern_matching.operator_field) {
+            dict.set_item("op", node_text(op, source)).unwrap();
+        } else if let Some(op) = node.child(0) {
             dict.set_item("op", node_text(op, source)).unwrap();
         }
         return dict;
@@ -3740,22 +4317,24 @@ fn node_to_ir<'a>(
     if kind == config.pattern_matching.comparison_operator {
         dict.set_item("type", "compare").unwrap();
         let mut cursor = node.walk();
-        let named_children: Vec<_> = node.children(&mut cursor).filter(|n| n.is_named()).collect();
+        let named_children: Vec<_> = node
+            .children(&mut cursor)
+            .filter(|n| n.is_named() && !n.is_extra())
+            .collect();
         if !named_children.is_empty() {
-             dict.set_item("left", node_to_ir(py, named_children[0], source, config)).unwrap();
-             let ops = PyList::empty(py);
-             // Children alternate between operators and operands
-             // but tree-sitter-python has comparison_operator as a single node
-             // with children: expr, operator, expr, [operator, expr]*
-             let mut i = 1;
-             while i + 1 < named_children.len() {
-                 let pair = PyDict::new(py);
-                 pair.set_item("op", node_text(named_children[i], source)).unwrap();
-                 pair.set_item("comparator", node_to_ir(py, named_children[i+1], source, config)).unwrap();
-                 ops.append(pair).unwrap();
-                 i += 2;
-             }
-             dict.set_item("ops", ops).unwrap();
+            dict.set_item("left", node_to_ir(py, named_children[0], source, config))
+                .unwrap();
+            let ops = PyList::empty(py);
+            let operators: Vec<_> = node.children(&mut node.walk())
+                .filter(|n| !n.is_named() && !n.is_extra())
+                .collect();
+            for (operator, comparator) in operators.iter().zip(&named_children[1..]) {
+                let pair = PyDict::new(py);
+                pair.set_item("op", operator.kind()).unwrap();
+                pair.set_item("comparator", ir(*comparator)).unwrap();
+                ops.append(pair).unwrap();
+            }
+            dict.set_item("ops", ops).unwrap();
         }
         return dict;
     }
@@ -3764,10 +4343,12 @@ fn node_to_ir<'a>(
     if kind == config.pattern_matching.assignment {
         dict.set_item("type", "assign").unwrap();
         if let Some(left) = node.child_by_field_name(&config.pattern_matching.left_field) {
-            dict.set_item("target", node_to_ir(py, left, source, config)).unwrap();
+            dict.set_item("target", node_to_ir(py, left, source, config))
+                .unwrap();
         }
         if let Some(right) = node.child_by_field_name(&config.pattern_matching.right_field) {
-            dict.set_item("value", node_to_ir(py, right, source, config)).unwrap();
+            dict.set_item("value", node_to_ir(py, right, source, config))
+                .unwrap();
         }
         return dict;
     }
@@ -3781,31 +4362,62 @@ fn node_to_ir<'a>(
 
     // Function Definition
     if kind == config.pattern_matching.function_def {
-        dict.set_item("type", "func_def").unwrap();
+        dict.set_item("type", "funcdef").unwrap();
+        dict.set_item("decorators", PyList::empty(py)).unwrap();
+        dict.set_item(
+            "is_async",
+            node.child(0).map(|c| c.kind() == "async").unwrap_or(false),
+        )
+        .unwrap();
         if let Some(name) = node.child_by_field_name(config.symbols.name_field()) {
-            dict.set_item("name", node_to_ir(py, name, source, config)).unwrap();
+            dict.set_item("name", node_to_ir(py, name, source, config))
+                .unwrap();
         }
         let params = PyList::empty(py);
         if let Some(param_list) = node.child_by_field_name(config.symbols.parameters_field()) {
+            let mut keyword_only = false;
+            let positional_end = param_list
+                .named_children(&mut param_list.walk())
+                .position(|n| n.kind() == "positional_separator")
+                .unwrap_or(0);
             for i in 0..param_list.named_child_count() {
                 if let Some(child) = param_list.named_child(i) {
-                    params.append(node_to_ir(py, child, source, config)).unwrap();
+                    if child.kind() == "keyword_separator" {
+                        keyword_only = true;
+                    }
+                    if child.kind() != "positional_separator" && child.kind() != "keyword_separator"
+                    {
+                        let parameter = if i < positional_end {
+                            ir(child.child_by_field_name("name").unwrap_or(child))
+                        } else {
+                            parameter_to_ir(py, child, source, config)
+                        };
+                        if keyword_only && child.child_by_field_name("value").is_some() {
+                            if let Some(name) = child.child_by_field_name("name") {
+                                parameter
+                                    .set_item("keyword_only_name", node_text(name, source))
+                                    .unwrap();
+                            }
+                        }
+                        params.append(parameter).unwrap();
+                    }
+                    if child.kind().contains("splat") {
+                        keyword_only = true;
+                    }
                 }
             }
         }
         dict.set_item("params", params).unwrap();
-        if let Some(body) = node.child_by_field_name(config.symbols.body_field())
-            .or_else(|| node.named_child(node.named_child_count() - 1)) {
-             dict.set_item("body", node_to_ir(py, body, source, config)).unwrap();
-        }
         return dict;
     }
 
     // Class Definition
     if kind == config.pattern_matching.class_def {
-        dict.set_item("type", "class_def").unwrap();
+        dict.set_item("type", "classdef").unwrap();
+        dict.set_item("decorators", PyList::empty(py)).unwrap();
         if let Some(name) = node.child_by_field_name(config.symbols.name_field()) {
-            dict.set_item("name", node_to_ir(py, name, source, config)).unwrap();
+            dict.set_item("name", node_to_ir(py, name, source, config))
+                .unwrap();
         }
         let bases = PyList::empty(py);
         if let Some(base_list) = node.child_by_field_name(config.symbols.superclasses_field()) {
@@ -3816,10 +4428,6 @@ fn node_to_ir<'a>(
             }
         }
         dict.set_item("bases", bases).unwrap();
-        if let Some(body) = node.child_by_field_name(config.symbols.body_field())
-            .or_else(|| node.named_child(node.named_child_count() - 1)) {
-             dict.set_item("body", node_to_ir(py, body, source, config)).unwrap();
-        }
         return dict;
     }
 
@@ -3834,15 +4442,8 @@ fn node_to_ir<'a>(
     if kind == config.pattern_matching.if_stmt {
         dict.set_item("type", "if_stmt").unwrap();
         if let Some(cond) = node.child_by_field_name(&config.pattern_matching.condition_field) {
-            dict.set_item("test", node_to_ir(py, cond, source, config)).unwrap();
-        }
-        if let Some(body) = node.child_by_field_name("consequent") {
-             dict.set_item("body", node_to_ir(py, body, source, config)).unwrap();
-        } else if let Some(body) = node.child_by_field_name("body") {
-             dict.set_item("body", node_to_ir(py, body, source, config)).unwrap();
-        }
-        if let Some(alternative) = node.child_by_field_name("alternative") {
-             dict.set_item("orelse", node_to_ir(py, alternative, source, config)).unwrap();
+            dict.set_item("test", node_to_ir(py, cond, source, config))
+                .unwrap();
         }
         return dict;
     }
@@ -3851,22 +4452,31 @@ fn node_to_ir<'a>(
     if kind == config.pattern_matching.while_stmt {
         dict.set_item("type", "while_stmt").unwrap();
         if let Some(cond) = node.child_by_field_name(&config.pattern_matching.condition_field) {
-            dict.set_item("test", node_to_ir(py, cond, source, config)).unwrap();
-        }
-        if let Some(body) = node.child_by_field_name("body") {
-             dict.set_item("body", node_to_ir(py, body, source, config)).unwrap();
+            dict.set_item("test", node_to_ir(py, cond, source, config))
+                .unwrap();
         }
         return dict;
     }
 
     // Return Statement
-    if kind == config.pattern_matching.return_stmt || (kind == config.symbols.expression_statement_node() && node.named_child(0).map_or(false, |c| c.kind() == config.pattern_matching.return_stmt)) {
-        let real_node = if kind == config.pattern_matching.return_stmt { node } else { node.named_child(0).unwrap() };
+    if kind == config.pattern_matching.return_stmt
+        || (kind == config.symbols.expression_statement_node()
+            && node
+                .named_child(0)
+                .map_or(false, |c| c.kind() == config.pattern_matching.return_stmt))
+    {
+        let real_node = if kind == config.pattern_matching.return_stmt {
+            node
+        } else {
+            node.named_child(0).unwrap()
+        };
         dict.set_item("type", "return").unwrap();
-        let val_node = real_node.child_by_field_name(&config.pattern_matching.value_field)
+        let val_node = real_node
+            .child_by_field_name(&config.pattern_matching.value_field)
             .or_else(|| real_node.named_child(0));
         if let Some(val) = val_node {
-            dict.set_item("value", node_to_ir(py, val, source, config)).unwrap();
+            dict.set_item("value", node_to_ir(py, val, source, config))
+                .unwrap();
         }
         return dict;
     }
@@ -3876,77 +4486,82 @@ fn node_to_ir<'a>(
         dict.set_item("type", "raise").unwrap();
         let exc_node = node.named_child(0);
         if let Some(exc) = exc_node {
-            dict.set_item("exc", node_to_ir(py, exc, source, config)).unwrap();
+            dict.set_item("exc", node_to_ir(py, exc, source, config))
+                .unwrap();
         }
         return dict;
     }
 
     // Assert Statement
-    if !config.pattern_matching.assert_stmt.is_empty() && kind == config.pattern_matching.assert_stmt {
+    if !config.pattern_matching.assert_stmt.is_empty()
+        && kind == config.pattern_matching.assert_stmt
+    {
         dict.set_item("type", "assert").unwrap();
-        let test_node = node.child_by_field_name("test")
+        let test_node = node
+            .child_by_field_name("test")
             .or_else(|| node.named_child(0));
         if let Some(tn) = test_node {
-            dict.set_item("test", node_to_ir(py, tn, source, config)).unwrap();
+            dict.set_item("test", node_to_ir(py, tn, source, config))
+                .unwrap();
         }
-        let msg_node = node.child_by_field_name("message")
+        let msg_node = node
+            .child_by_field_name("message")
             .or_else(|| node.named_child(1));
         if let Some(mn) = msg_node {
-            dict.set_item("msg", node_to_ir(py, mn, source, config)).unwrap();
+            dict.set_item("msg", node_to_ir(py, mn, source, config))
+                .unwrap();
         }
         return dict;
     }
 
-    // Import Statement
-    if kind == config.pattern_matching.import_stmt {
-        dict.set_item("type", "import").unwrap();
-        let names = PyList::empty(py);
-        let mut cursor = node.walk();
-        for child in node.children_by_field_name(&config.imports.name_field, &mut cursor) {
-             let pair = PyDict::new(py);
-             let text = node_text(child, source);
-             if child.kind() == config.imports.aliased_import.as_deref().unwrap_or("aliased_import") {
-                 if let Some(pos) = text.find(" as ") {
-                     pair.set_item("name", &text[..pos]).unwrap();
-                     pair.set_item("asname", &text[pos+4..]).unwrap();
-                 } else {
-                     pair.set_item("name", text).unwrap();
-                     pair.set_item("asname", py.None()).unwrap();
-                 }
-             } else {
-                 pair.set_item("name", text).unwrap();
-                 pair.set_item("asname", py.None()).unwrap();
-             }
-             names.append(pair).unwrap();
-        }
-        dict.set_item("names", names).unwrap();
-        return dict;
-    }
-
-    // Import From Statement
-    if kind == config.pattern_matching.import_from_stmt {
-        dict.set_item("type", "import_from").unwrap();
-        if let Some(module) = node.child_by_field_name(&config.imports.module_field) {
-            dict.set_item("module", node_text(module, source)).unwrap();
+    if kind == pm.import_stmt
+        || kind == pm.import_from_stmt
+        || config.imports.fixed_modules.contains_key(kind)
+    {
+        dict.set_item(
+            "type",
+            if kind == pm.import_stmt {
+                "import"
+            } else {
+                "import_from"
+            },
+        )
+        .unwrap();
+        if kind != pm.import_stmt {
+            let module = config
+                .imports
+                .fixed_modules
+                .get(kind)
+                .map(String::as_str)
+                .or_else(|| {
+                    node.child_by_field_name(&config.imports.module_field)
+                        .map(|n| node_text(n, source).trim_start_matches('.'))
+                        .filter(|s| !s.is_empty())
+                });
+            dict.set_item("module", module).unwrap();
         }
         let names = PyList::empty(py);
         let mut cursor = node.walk();
         for child in node.children_by_field_name(&config.imports.name_field, &mut cursor) {
-             let pair = PyDict::new(py);
-             let text = node_text(child, source);
-             if child.kind() == config.imports.aliased_import.as_deref().unwrap_or("aliased_import") {
-                 if let Some(pos) = text.find(" as ") {
-                     pair.set_item("name", &text[..pos]).unwrap();
-                     pair.set_item("asname", &text[pos+4..]).unwrap();
-                 } else {
-                     pair.set_item("name", text).unwrap();
-                     pair.set_item("asname", py.None()).unwrap();
-                 }
-             } else {
-                 pair.set_item("name", text).unwrap();
-                 pair.set_item("asname", py.None()).unwrap();
-             }
-             names.append(pair).unwrap();
+            let pair = PyDict::new(py);
+            let name = child
+                .child_by_field_name(&config.imports.name_field)
+                .unwrap_or(child);
+            pair.set_item("name", node_text(name, source)).unwrap();
+            pair.set_item(
+                "asname",
+                child
+                    .child_by_field_name("alias")
+                    .map(|n| node_text(n, source)),
+            )
+            .unwrap();
+            names.append(pair).unwrap();
+        }
+        if names.is_empty() && children.iter().any(|n| n.kind() == "wildcard_import") {
+            let pair = PyDict::new(py);
+            pair.set_item("name", "*").unwrap();
+            pair.set_item("asname", py.None()).unwrap();
+            names.append(pair).unwrap();
         }
         dict.set_item("names", names).unwrap();
         return dict;
@@ -3954,21 +4569,25 @@ fn node_to_ir<'a>(
 
     // Block (unwrap it)
     if kind == "block" {
-        if node.named_child_count() == 1 {
-            if let Some(child) = node.named_child(0) {
-                return node_to_ir(py, child, source, config);
-            }
-        } else {
-            // For multiple statements in a block, just return the first one for now.
-            if let Some(child) = node.named_child(0) {
-                return node_to_ir(py, child, source, config);
-            }
+        if let Some(child) = node.named_child(0) {
+            return node_to_ir(py, child, source, config);
         }
     }
 
-    // Fallback: treat as a generic node kind match if we don't know it
-    // Actually, for patterns, we probably want to report an error or treat as "any"
-    dict.set_item("type", "name").unwrap();
-    dict.set_item("value", node_text(node, source)).unwrap();
+    dict.set_item("type", "syntax").unwrap();
+    dict.set_item("kind", kind).unwrap();
+    let children: Vec<_> = node
+        .children(&mut node.walk())
+        .filter(|n| !n.is_extra())
+        .collect();
+    if children.is_empty() {
+        dict.set_item("text", node_text(node, source)).unwrap();
+    } else {
+        let patterns = PyList::empty(py);
+        for child in children {
+            patterns.append(ir(child)).unwrap();
+        }
+        dict.set_item("children", patterns).unwrap();
+    }
     dict
 }
