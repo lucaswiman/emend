@@ -3404,6 +3404,102 @@ fn find_pattern_in_source(
     find_pattern_in_tree(&tree, source.as_bytes(), file_path, pattern, inside, not_inside, config)
 }
 
+#[derive(Debug)]
+struct PatternSpanHit {
+    file: String,
+    line: usize,
+    column: usize,
+    end_line: usize,
+    end_column: usize,
+    start_byte: usize,
+    end_byte: usize,
+    text: String,
+    captures: HashMap<String, (String, Vec<(usize, usize, usize, usize, usize, usize)>)>,
+}
+
+fn exact_capture_ranges(
+    root: Node,
+    text: &str,
+    source: &[u8],
+) -> Vec<(usize, usize, usize, usize, usize, usize)> {
+    fn walk(
+        node: Node,
+        text: &str,
+        source: &[u8],
+        out: &mut Vec<(usize, usize, usize, usize, usize, usize)>,
+    ) {
+        if node_text(node, source) == text {
+            let start = node.start_position();
+            let end = node.end_position();
+            out.push((node.start_byte(), node.end_byte(), start.row + 1,
+                      start.column, end.row + 1, end.column));
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            walk(child, text, source, out);
+        }
+    }
+    let mut ranges = Vec::new();
+    walk(root, text, source, &mut ranges);
+    if ranges.is_empty() {
+        // Import aliases and similar captures may be token substrings rather
+        // than named nodes. Their exact byte occurrence is still recoverable.
+        let full = node_text(root, source);
+        let mut offset = 0;
+        while let Some(relative) = full[offset..].find(text) {
+            let start_byte = root.start_byte() + offset + relative;
+            let end_byte = start_byte + text.len();
+            let prefix = &source[..start_byte];
+            let start_line = prefix.iter().filter(|&&b| b == b'\n').count() + 1;
+            let start_col = prefix.iter().rev().take_while(|&&b| b != b'\n').count();
+            let captured = &source[start_byte..end_byte];
+            let lines = captured.iter().filter(|&&b| b == b'\n').count();
+            let end_col = if lines == 0 { start_col + captured.len() }
+                else { captured.iter().rev().take_while(|&&b| b != b'\n').count() };
+            ranges.push((start_byte, end_byte, start_line, start_col,
+                         start_line + lines, end_col));
+            offset += relative + text.len().max(1);
+        }
+    }
+    ranges
+}
+
+fn find_pattern_spans_in_tree(
+    tree: &tree_sitter::Tree,
+    source: &[u8],
+    file: &str,
+    pattern: &PatternNode,
+    inside: Option<&PatternNode>,
+    not_inside: Option<&PatternNode>,
+    config: &LanguageConfig,
+) -> Vec<PatternSpanHit> {
+    let mut results = Vec::new();
+    let mut ancestors = Vec::new();
+    walk_with_ancestors(tree.root_node(), source, &mut ancestors, &mut |node, ancs| {
+        let mut captures = HashMap::new();
+        let Some(matched) = matches_node(node, source, pattern, &mut captures, config) else { return };
+        if inside.is_some_and(|p| !any_ancestor_matches(ancs, source, p, config)) { return; }
+        if not_inside.is_some_and(|p| any_ancestor_matches(ancs, source, p, config)) { return; }
+        if results.iter().any(|hit: &PatternSpanHit| {
+            hit.start_byte == matched.start_byte() && hit.end_byte == matched.end_byte()
+        }) { return; }
+        let start = matched.start_position();
+        let end = matched.end_position();
+        let captures = captures.into_iter().map(|(name, text)| {
+            let ranges = exact_capture_ranges(matched, &text, source);
+            (name, (text, ranges))
+        }).collect();
+        results.push(PatternSpanHit {
+            file: file.into(), line: start.row + 1, column: start.column,
+            end_line: end.row + 1, end_column: end.column,
+            start_byte: matched.start_byte(), end_byte: matched.end_byte(),
+            text: node_text(matched, source).into(), captures,
+        });
+    });
+    results
+}
+
 #[pyfunction]
 #[pyo3(signature = (file_contents, pattern_ir, inside_ir=None, not_inside_ir=None, extension=None))]
 pub fn find_pattern_in_files(
@@ -3453,6 +3549,68 @@ pub fn find_pattern_in_files(
 
         Ok(results.into_iter().flatten().collect())
     })
+}
+
+/// Range-rich companion to ``find_pattern_in_files``. The legacy tuple API is
+/// unchanged; this returns exact match byte ranges and capture range lists.
+#[pyfunction]
+#[pyo3(signature = (file_contents, pattern_ir, inside_ir=None, not_inside_ir=None, extension=None))]
+pub fn find_pattern_spans_in_files(
+    py: Python,
+    file_contents: Vec<(String, String)>,
+    pattern_ir: Bound<'_, PyAny>,
+    inside_ir: Option<Bound<'_, PyAny>>,
+    not_inside_ir: Option<Bound<'_, PyAny>>,
+    extension: Option<&str>,
+) -> PyResult<PyObject> {
+    let pattern = deserialize_pattern(&pattern_ir)?;
+    let inside = inside_ir.as_ref().map(|ir| deserialize_pattern(ir)).transpose()?;
+    let not_inside = not_inside_ir.as_ref().map(|ir| deserialize_pattern(ir)).transpose()?;
+    let config = extension.and_then(|ext| {
+        LanguageConfig::load_for_extension(ext, std::path::Path::new(".")).ok()
+    }).unwrap_or_else(LanguageConfig::python_default);
+    let hits: Vec<PatternSpanHit> = py.allow_threads(|| {
+        file_contents.par_iter().flat_map(|(file, source)| {
+            let path = std::path::PathBuf::from(file);
+            let ext = extension.unwrap_or_else(|| path.extension().and_then(|e| e.to_str()).unwrap_or(""));
+            let Some(tree) = crate::pattern::parse_by_extension(source, ext) else { return Vec::new() };
+            find_pattern_spans_in_tree(&tree, source.as_bytes(), file, &pattern,
+                                       inside.as_ref(), not_inside.as_ref(), &config)
+        }).collect()
+    });
+    let output = PyList::empty(py);
+    for hit in hits {
+        let row = PyDict::new(py);
+        row.set_item("file", hit.file)?;
+        row.set_item("line", hit.line)?;
+        row.set_item("column", hit.column)?;
+        row.set_item("end_line", hit.end_line)?;
+        row.set_item("end_column", hit.end_column)?;
+        row.set_item("start_byte", hit.start_byte)?;
+        row.set_item("end_byte", hit.end_byte)?;
+        row.set_item("matched_text", hit.text)?;
+        let capture_rows = PyDict::new(py);
+        for (name, (text, ranges)) in hit.captures {
+            let capture = PyDict::new(py);
+            capture.set_item("text", text)?;
+            let positions = PyList::empty(py);
+            for (sb, eb, sl, sc, el, ec) in ranges {
+                let position = PyDict::new(py);
+                position.set_item("start_byte", sb)?;
+                position.set_item("end_byte", eb)?;
+                position.set_item("start_line", sl)?;
+                position.set_item("start_column", sc)?;
+                position.set_item("end_line", el)?;
+                position.set_item("end_column", ec)?;
+                positions.append(position)?;
+            }
+            capture.set_item("ranges", positions)?;
+            capture_rows.set_item(name, capture)?;
+        }
+        row.set_item("captures", capture_rows)?;
+        output.append(row)?;
+    }
+    Ok(output.into())
 }
 
 #[pyfunction]
@@ -3682,6 +3840,32 @@ fn string_content(py: Python, node: Node, source: &[u8], raw: bool) -> Option<St
     }
     value.push_str(std::str::from_utf8(&source[start..node.end_byte()]).ok()?);
     Some(value)
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::*;
+
+    #[test]
+    fn exact_match_and_capture_ranges_are_retained() {
+        let source = "sink(user.value)\n";
+        let tree = crate::pattern::parse_by_extension(source, "py").unwrap();
+        let pattern = PatternNode::Call {
+            func: Box::new(PatternNode::Name("sink".into())),
+            args: vec![ArgPattern::Pattern(PatternNode::Metavar("VALUE".into()))],
+            exact_args: true,
+        };
+        let hits = find_pattern_spans_in_tree(
+            &tree, source.as_bytes(), "sample.py", &pattern, None, None,
+            crate::scope::config_for_ext("py"),
+        );
+        assert_eq!(hits.len(), 1);
+        assert_eq!(&source[hits[0].start_byte..hits[0].end_byte], "sink(user.value)");
+        let capture = &hits[0].captures["VALUE"];
+        assert_eq!(capture.0, "user.value");
+        assert_eq!(capture.1.len(), 1);
+        assert_eq!(&source[capture.1[0].0..capture.1[0].1], "user.value");
+    }
 }
 
 fn node_to_ir<'a>(

@@ -4,8 +4,8 @@
 //! Language-specific tree-sitter node types and field names are driven by
 //! the `[cfg]` section of the language config TOML (see [`CfgSection`]).
 
-use std::collections::{HashMap, HashSet};
-use crate::scope::{config_for_ext, CfgSection};
+use std::collections::{HashMap, HashSet, VecDeque};
+use crate::scope::{config_for_ext, CfgSection, LanguageConfig};
 
 // ---------------------------------------------------------------------------
 // Data model
@@ -86,6 +86,42 @@ pub struct FunctionCfg {
     pub exit: BlockId,
     pub blocks: Vec<BasicBlock>,
     pub edges: Vec<CfgEdge>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowEvent {
+    pub id: u32,
+    pub func_id: String,
+    pub func_name: String,
+    pub func_start: usize,
+    pub role: String,
+    pub var: Option<String>,
+    pub access_path: Option<String>,
+    pub block: u32,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub start_line: u32,
+    pub start_col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+    pub ordinal: u32,
+    pub call_id: Option<u32>,
+    pub arg_index: Option<u32>,
+    pub arg_name: Option<String>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FlowEdge {
+    pub from: u32,
+    pub to: u32,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FlowFacts {
+    pub events: Vec<FlowEvent>,
+    pub edges: Vec<FlowEdge>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1594,6 +1630,10 @@ fn collect_functions(
     // Is this a function node?
     if cfg_sec.function_nodes.iter().any(|n| n == kind) {
         cfgs.push(build_cfg(node, source, cfg_sec));
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            collect_functions(child, source, cfg_sec, cfgs);
+        }
         return;
     }
 
@@ -1621,10 +1661,443 @@ fn collect_functions(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Exact occurrence/value graph
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct FlowScope<'a> {
+    node: tree_sitter::Node<'a>,
+    body: tree_sitter::Node<'a>,
+}
+
+#[derive(Debug)]
+struct CallRecord {
+    result: u32,
+    callee: String,
+    args: Vec<u32>,
+}
+
+fn flow_scopes<'a>(node: tree_sitter::Node<'a>, cfg: &CfgSection, out: &mut Vec<FlowScope<'a>>) {
+    if cfg.function_nodes.iter().any(|kind| kind == node.kind()) {
+        if let Some(body) = node.child_by_field_name(&cfg.body_field) {
+            out.push(FlowScope { node, body });
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        flow_scopes(child, cfg, out);
+    }
+}
+
+fn module_cfg(root: tree_sitter::Node, source: &[u8], cfg: &CfgSection) -> FunctionCfg {
+    let mut builder = CfgBuilder::new(source, cfg);
+    let entry = BlockId(0);
+    builder.update_block_range(entry, root);
+    if let Some(end) = builder.walk_body(root, entry) {
+        builder.add_edge(end, builder.exit_block, EdgeKind::Fallthrough);
+    }
+    FunctionCfg {
+        func_name: "<module>".into(),
+        func_start_line: 0,
+        func_end_line: root.end_position().row as u32,
+        entry,
+        exit: builder.exit_block,
+        blocks: builder.blocks,
+        edges: builder.edges,
+    }
+}
+
+struct FlowExtractor<'a> {
+    source: &'a [u8],
+    lang: &'a LanguageConfig,
+    cfg: &'a FunctionCfg,
+    func_id: String,
+    func_name: String,
+    func_start: usize,
+    next_id: &'a mut u32,
+    ordinal: u32,
+    events: Vec<FlowEvent>,
+    edges: Vec<FlowEdge>,
+    calls: Vec<CallRecord>,
+}
+
+impl<'a> FlowExtractor<'a> {
+    fn text(&self, node: tree_sitter::Node) -> &'a str {
+        node.utf8_text(self.source).unwrap_or("")
+    }
+
+    fn children(node: tree_sitter::Node) -> Vec<tree_sitter::Node> {
+        let mut cursor = node.walk();
+        node.children(&mut cursor).filter(|child| child.is_named()).collect()
+    }
+
+    fn is_function(&self, node: tree_sitter::Node) -> bool {
+        self.lang.cfg.function_nodes.iter().any(|kind| kind == node.kind())
+    }
+
+    fn path(&self, node: tree_sitter::Node) -> Option<String> {
+        let pm = &self.lang.pattern_matching;
+        if node.kind() == pm.identifier || pm.extra_identifiers.iter().any(|k| k == node.kind()) {
+            let name = self.text(node);
+            return (!self.lang.cfg.skip_identifiers.iter().any(|s| s == name)).then(|| name.into());
+        }
+        if !pm.attribute.is_empty() && node.kind() == pm.attribute {
+            let object = node.child_by_field_name(&pm.object_field)?;
+            let attr = node.child_by_field_name(&pm.attr_field)?;
+            return Some(format!("{}.{}", self.path(object)?, self.text(attr)));
+        }
+        if !pm.subscript.is_empty() && node.kind() == pm.subscript {
+            let object = node.child_by_field_name(&pm.value_field)
+                .or_else(|| node.child_by_field_name(&pm.object_field))?;
+            let index = node.child_by_field_name("subscript")
+                .or_else(|| node.child_by_field_name("index"))?;
+            return Some(format!("{}[{}]", self.path(object)?, self.text(index)));
+        }
+        None
+    }
+
+    fn block(&self, node: tree_sitter::Node) -> u32 {
+        let (start, end) = (node.start_byte(), node.end_byte());
+        let statement = self.cfg.blocks.iter().flat_map(|block| {
+            block.statements.iter().map(move |&(s, e)| (e.saturating_sub(s), block.id.0, s, e))
+        }).filter(|(_, _, s, e)| *s <= start && end <= *e).min_by_key(|row| row.0);
+        if let Some((_, id, _, _)) = statement { return id; }
+        if let Some(edge) = self.cfg.edges.iter().find(|edge| {
+            edge.condition.is_some_and(|(s, e)| s <= start && end <= e)
+        }) { return edge.from.0; }
+        self.cfg.blocks.iter()
+            .filter(|block| block.start_byte <= start && end <= block.end_byte)
+            .min_by_key(|block| block.end_byte.saturating_sub(block.start_byte))
+            .map(|block| block.id.0).unwrap_or(self.cfg.entry.0)
+    }
+
+    fn emit(&mut self, node: tree_sitter::Node, role: &str, path: Option<String>, call_id: Option<u32>, arg_index: Option<u32>) -> u32 {
+        let id = *self.next_id;
+        *self.next_id += 1;
+        let start = node.start_position();
+        let end = node.end_position();
+        let var = path.as_deref().map(|p| p.split(['.', '[']).next().unwrap_or(p).to_string());
+        self.events.push(FlowEvent {
+            id,
+            func_id: self.func_id.clone(),
+            func_name: self.func_name.clone(),
+            func_start: self.func_start,
+            role: role.into(),
+            var,
+            access_path: path,
+            block: self.block(node),
+            start_byte: node.start_byte(),
+            end_byte: node.end_byte(),
+            start_line: start.row as u32,
+            start_col: start.column as u32,
+            end_line: end.row as u32,
+            end_col: end.column as u32,
+            ordinal: self.ordinal,
+            call_id,
+            arg_index,
+            arg_name: None,
+            text: self.text(node).into(),
+        });
+        self.ordinal += 1;
+        id
+    }
+
+    fn edge(&mut self, from: u32, to: u32, kind: &str) {
+        if from != to { self.edges.push(FlowEdge { from, to, kind: kind.into() }); }
+    }
+
+    fn parameter_name<'b>(&self, node: tree_sitter::Node<'b>) -> Option<tree_sitter::Node<'b>> {
+        if node.kind() == self.lang.cfg.identifier_node { return Some(node); }
+        let field = &self.lang.bindings.parameters.name_field;
+        if !field.is_empty() {
+            if let Some(found) = node.child_by_field_name(field).and_then(|n| self.parameter_name(n)) {
+                return Some(found);
+            }
+        }
+        Self::children(node).into_iter().find_map(|child| self.parameter_name(child))
+    }
+
+    fn parameters(&mut self, function: tree_sitter::Node) {
+        let field = self.lang.symbols.parameters_field();
+        let params = function.child_by_field_name(field).or_else(|| {
+            Self::children(function).into_iter().find(|child| {
+                child.kind() == field || matches!(child.kind(), "parameters" | "formal_parameters")
+            })
+        });
+        let Some(params) = params else { return };
+        let mut index = 0;
+        for param in Self::children(params) {
+            if let Some(name) = self.parameter_name(param) {
+                if let Some(path) = self.path(name) {
+                    self.emit(name, "param_in", Some(path), None, Some(index));
+                    self.events.last_mut().unwrap().arg_name = Some(self.text(name).to_string());
+                    index += 1;
+                }
+            }
+        }
+    }
+
+    fn targets(&mut self, node: tree_sitter::Node, inputs: &[u32], mutation: bool) -> Vec<u32> {
+        if let Some(path) = self.path(node) {
+            let role = if node.kind() == self.lang.cfg.identifier_node && !mutation { "def" } else { "mutation" };
+            let id = self.emit(node, role, Some(path), None, None);
+            for &input in inputs { self.edge(input, id, "transfer"); }
+            return vec![id];
+        }
+        Self::children(node).into_iter().flat_map(|child| self.targets(child, inputs, mutation)).collect()
+    }
+
+    fn assignment(&mut self, node: tree_sitter::Node) -> Vec<u32> {
+        let Some(rule) = self.lang.cfg.def_use_rules.iter().find(|r| r.node == node.kind()) else {
+            return self.generic(node);
+        };
+        let augmented = node.kind() == self.lang.pattern_matching.augmented_assignment
+            || node.kind().contains("augmented") || node.kind().contains("compound_assignment");
+        let target = node.child_by_field_name(&rule.target);
+        let mut inputs = if augmented { target.map(|n| self.expr(n)).unwrap_or_default() } else { Vec::new() };
+        if let Some(value) = node.child_by_field_name(&rule.value) { inputs.extend(self.expr(value)); }
+        target.map(|n| self.targets(n, &inputs, augmented)).unwrap_or(inputs)
+    }
+
+    fn call(&mut self, node: tree_sitter::Node) -> Vec<u32> {
+        let pm = &self.lang.pattern_matching;
+        let callee_node = node.child_by_field_name(&pm.func_field).or_else(|| node.named_child(0));
+        let mut callee_values = Vec::new();
+        let callee = callee_node.and_then(|n| { callee_values.extend(self.expr(n)); self.path(n) })
+            .unwrap_or_else(|| "<dynamic>".into());
+        let mut args = node.child_by_field_name(&pm.args_field).map(Self::children).unwrap_or_default();
+        args.sort_by_key(|arg| arg.start_byte());
+        let values: Vec<Vec<u32>> = args.iter().map(|arg| self.expr(*arg)).collect();
+        let mut arg_events = Vec::new();
+        for (index, (arg, inputs)) in args.iter().zip(values).enumerate() {
+            let path = self.path(*arg);
+            let id = self.emit(*arg, "call_arg", path, None, Some(index as u32));
+            self.events.last_mut().unwrap().arg_name = arg.child_by_field_name("name")
+                .map(|name| self.text(name).to_string());
+            for input in inputs { self.edge(input, id, "transfer"); }
+            arg_events.push(id);
+        }
+        let call = self.emit(node, "call", Some(callee.clone()), None, None);
+        let call_event = self.events.last_mut().unwrap();
+        call_event.call_id = Some(call);
+        // Calls expose the full structural callee path for project-level
+        // linking; ordinary value events keep ``var`` as the root binding.
+        call_event.var = Some(callee.clone());
+        for event in &mut self.events {
+            if arg_events.contains(&event.id) { event.call_id = Some(call); }
+        }
+        // Callee/argument evaluation is sequenced by control edges. It is not
+        // an unconditional value transfer through a known function: resolved
+        // calls flow through param_in/return_out instead.
+        let _ = callee_values;
+        let result = self.emit(node, "call_result", None, Some(call), None);
+        for &arg in &arg_events { self.edge(arg, result, "call_input"); }
+        self.calls.push(CallRecord { result, callee, args: arg_events });
+        vec![result]
+    }
+
+    fn generic(&mut self, node: tree_sitter::Node) -> Vec<u32> {
+        let pm = &self.lang.pattern_matching;
+        if !pm.keyword_argument.is_empty() && node.kind() == pm.keyword_argument {
+            return node.child_by_field_name(&pm.value_field).map(|n| self.expr(n)).unwrap_or_default();
+        }
+        Self::children(node).into_iter().flat_map(|child| self.expr(child)).collect()
+    }
+
+    fn expr(&mut self, node: tree_sitter::Node) -> Vec<u32> {
+        if self.is_function(node) { return Vec::new(); }
+        if !self.lang.pattern_matching.call.is_empty() && node.kind() == self.lang.pattern_matching.call {
+            return self.call(node);
+        }
+        if self.lang.cfg.def_use_rules.iter().any(|r| r.node == node.kind()) {
+            return self.assignment(node);
+        }
+        if let Some(path) = self.path(node) {
+            return vec![self.emit(node, "use", Some(path), None, None)];
+        }
+        self.generic(node)
+    }
+
+    fn walk(&mut self, node: tree_sitter::Node) {
+        if self.is_function(node) { return; }
+        if self.lang.cfg.return_nodes.iter().any(|kind| kind == node.kind()) {
+            let value = node.child_by_field_name(&self.lang.pattern_matching.value_field).or_else(|| node.named_child(0));
+            let inputs = value.map(|n| self.expr(n)).unwrap_or_default();
+            let out_node = value.unwrap_or(node);
+            let path = self.path(out_node);
+            let output = self.emit(out_node, "return_out", path, None, None);
+            for input in inputs { self.edge(input, output, "transfer"); }
+            return;
+        }
+        if self.lang.cfg.for_nodes.iter().any(|kind| kind == node.kind()) {
+            let iter = node.child_by_field_name(&self.lang.cfg.for_iterable_field);
+            let target = node.child_by_field_name(&self.lang.cfg.for_variable_field);
+            let inputs = iter.map(|n| self.expr(n)).unwrap_or_default();
+            if let Some(target) = target { self.targets(target, &inputs, false); }
+            for child in Self::children(node) {
+                if Some(child) != iter && Some(child) != target { self.walk(child); }
+            }
+            return;
+        }
+        if self.lang.cfg.def_use_rules.iter().any(|r| r.node == node.kind())
+            || node.kind() == self.lang.pattern_matching.call || self.path(node).is_some() {
+            self.expr(node); return;
+        }
+        for child in Self::children(node) { self.walk(child); }
+    }
+
+    fn control_edges(&mut self) {
+        let mut by_block: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+        for event in &self.events { by_block.entry(event.block).or_default().push((event.ordinal, event.id)); }
+        let mut additions = Vec::new();
+        for values in by_block.values_mut() {
+            values.sort_unstable();
+            additions.extend(values.windows(2).map(|p| FlowEdge { from: p[0].1, to: p[1].1, kind: "control".into() }));
+        }
+        let successors: HashMap<u32, Vec<u32>> = self.cfg.blocks.iter().map(|b| {
+            (b.id.0, self.cfg.successors(b.id).into_iter().map(|id| id.0).collect())
+        }).collect();
+        for (&block, values) in &by_block {
+            let Some(&(_, last)) = values.last() else { continue };
+            let mut queue: VecDeque<u32> = successors.get(&block).into_iter().flatten().copied().collect();
+            let mut seen = HashSet::new();
+            while let Some(next) = queue.pop_front() {
+                if !seen.insert(next) { continue; }
+                if let Some(&(_, first)) = by_block.get(&next).and_then(|v| v.first()) {
+                    additions.push(FlowEdge { from: last, to: first, kind: "control".into() });
+                } else if let Some(more) = successors.get(&next) { queue.extend(more); }
+            }
+        }
+        self.edges.extend(additions);
+    }
+
+    fn binding(event: &FlowEvent) -> Option<&str> { event.access_path.as_deref().or(event.var.as_deref()) }
+    fn is_def(event: &FlowEvent) -> bool { matches!(event.role.as_str(), "def" | "param_in" | "mutation") }
+
+    fn reaching_edges(&mut self) {
+        let mut block_events: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (i, event) in self.events.iter().enumerate() { block_events.entry(event.block).or_default().push(i); }
+        for values in block_events.values_mut() { values.sort_by_key(|&i| self.events[i].ordinal); }
+        type State = HashMap<String, HashSet<u32>>;
+        let mut incoming: HashMap<u32, State> = HashMap::new();
+        let mut outgoing: HashMap<u32, State> = HashMap::new();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for block in &self.cfg.blocks {
+                let mut state = State::new();
+                for pred in self.cfg.predecessors(block.id) {
+                    if let Some(out) = outgoing.get(&pred.0) {
+                        for (name, defs) in out { state.entry(name.clone()).or_default().extend(defs); }
+                    }
+                }
+                incoming.insert(block.id.0, state.clone());
+                for &i in block_events.get(&block.id.0).into_iter().flatten() {
+                    let event = &self.events[i];
+                    if Self::is_def(event) {
+                        if let Some(name) = Self::binding(event) { state.insert(name.into(), HashSet::from([event.id])); }
+                    }
+                }
+                if outgoing.get(&block.id.0) != Some(&state) { outgoing.insert(block.id.0, state); changed = true; }
+            }
+        }
+        let mut additions = Vec::new();
+        for block in &self.cfg.blocks {
+            let mut state = incoming.remove(&block.id.0).unwrap_or_default();
+            for &i in block_events.get(&block.id.0).into_iter().flatten() {
+                let event = &self.events[i];
+                let name = Self::binding(event).map(str::to_string);
+                if event.role == "use" || event.role == "mutation" {
+                    let mut bindings = Vec::new();
+                    if let Some(name) = &name { bindings.push(name.as_str()); }
+                    if let Some(root) = event.var.as_deref() {
+                        if !bindings.contains(&root) { bindings.push(root); }
+                    }
+                    for binding in bindings {
+                        for &def in state.get(binding).into_iter().flatten() {
+                            additions.push(FlowEdge { from: def, to: event.id, kind: "reaching".into() });
+                        }
+                    }
+                }
+                if Self::is_def(event) { if let Some(name) = name { state.insert(name, HashSet::from([event.id])); } }
+            }
+        }
+        self.edges.extend(additions);
+    }
+
+    fn finish(mut self) -> (Vec<FlowEvent>, Vec<FlowEdge>, Vec<CallRecord>) {
+        self.control_edges(); self.reaching_edges();
+        let mut seen = HashSet::new();
+        self.edges.retain(|e| seen.insert((e.from, e.to, e.kind.clone())));
+        (self.events, self.edges, self.calls)
+    }
+}
+
+fn extract_scope(
+    source: &[u8], lang: &LanguageConfig, cfg: &FunctionCfg,
+    func_name: String, func_start: usize, body: tree_sitter::Node,
+    function: Option<tree_sitter::Node>, next_id: &mut u32,
+) -> (Vec<FlowEvent>, Vec<FlowEdge>, Vec<CallRecord>) {
+    let func_id = format!("{}@{}", func_name, func_start);
+    let mut extractor = FlowExtractor {
+        source, lang, cfg, func_id, func_name, func_start, next_id,
+        ordinal: 0, events: Vec::new(), edges: Vec::new(), calls: Vec::new(),
+    };
+    if let Some(function) = function { extractor.parameters(function); }
+    extractor.walk(body);
+    extractor.finish()
+}
+
+/// Build exact occurrence, value-transfer, reaching-definition, control, and
+/// same-buffer call facts. Coordinates are zero-based; byte ranges are exact
+/// half-open UTF-8 offsets.
+pub fn build_flow_facts(source: &str, ext: &str) -> FlowFacts {
+    let Some(tree) = crate::pattern::parse_by_extension(source, ext) else { return FlowFacts::default() };
+    let lang = config_for_ext(ext);
+    if lang.cfg.function_nodes.is_empty() { return FlowFacts::default(); }
+    let bytes = source.as_bytes();
+    let root = tree.root_node();
+    let mut events = Vec::new();
+    let mut edges = Vec::new();
+    let mut calls = Vec::new();
+    let mut next_id = 0;
+    let cfg = module_cfg(root, bytes, &lang.cfg);
+    let (e, d, c) = extract_scope(bytes, lang, &cfg, "<module>".into(), 0, root, None, &mut next_id);
+    events.extend(e); edges.extend(d); calls.extend(c);
+
+    let mut scopes = Vec::new();
+    flow_scopes(root, &lang.cfg, &mut scopes);
+    let mut functions: HashMap<String, Vec<(Vec<u32>, Vec<u32>)>> = HashMap::new();
+    for scope in scopes {
+        let name = scope.node.child_by_field_name("name")
+            .and_then(|n| n.utf8_text(bytes).ok()).unwrap_or("<anonymous>").to_string();
+        let start = scope.node.start_byte();
+        let cfg = build_cfg(scope.node, bytes, &lang.cfg);
+        let (e, d, c) = extract_scope(bytes, lang, &cfg, name.clone(), start, scope.body, Some(scope.node), &mut next_id);
+        let params = e.iter().filter(|v| v.role == "param_in").map(|v| v.id).collect();
+        let returns = e.iter().filter(|v| v.role == "return_out").map(|v| v.id).collect();
+        functions.entry(name).or_default().push((params, returns));
+        events.extend(e); edges.extend(d); calls.extend(c);
+    }
+    for call in calls {
+        let name = call.callee.rsplit('.').next().unwrap_or(&call.callee);
+        let Some(target) = functions.get(name).filter(|v| v.len() == 1).map(|v| &v[0]) else { continue };
+        for (&arg, &param) in call.args.iter().zip(&target.0) {
+            edges.push(FlowEdge { from: arg, to: param, kind: "call_arg".into() });
+        }
+        for &ret in &target.1 {
+            edges.push(FlowEdge { from: ret, to: call.result, kind: "call_return".into() });
+        }
+    }
+    let mut seen = HashSet::new();
+    edges.retain(|e| seen.insert((e.from, e.to, e.kind.clone())));
+    FlowFacts { events, edges }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scope::config_for_ext;
 
     #[test]
     fn test_field_level_defs() {
@@ -1673,5 +2146,49 @@ mod tests {
             .collect();
         assert!(all_uses.iter().any(|u| u.contains("data[") && u.contains("key")),
                 "Expected data['key'] in uses, got {:?}", all_uses);
+    }
+
+    #[test]
+    fn flow_occurrences_preserve_overwrites_and_nested_scopes() {
+        let source = "def f(a):\n    x = a; x = 0; y = x\n    def inner(q):\n        return q\n    return y\n";
+        let facts = build_flow_facts(source, "py");
+        assert!(facts.events.iter().any(|e| e.func_name == "inner" && e.role == "param_in"));
+        let defs: Vec<_> = facts.events.iter().filter(|e| {
+            e.func_name == "f" && e.role == "def" && e.var.as_deref() == Some("x")
+        }).collect();
+        let used = facts.events.iter().find(|e| {
+            e.func_name == "f" && e.role == "use" && e.var.as_deref() == Some("x")
+        }).unwrap();
+        let reaching: Vec<_> = facts.edges.iter().filter(|e| {
+            e.kind == "reaching" && e.to == used.id
+        }).map(|e| e.from).collect();
+        assert_eq!(reaching, vec![defs[1].id]);
+        assert!(facts.events.iter().all(|e| &source[e.start_byte..e.end_byte] == e.text));
+    }
+
+    #[test]
+    fn resolved_calls_do_not_implicitly_copy_arguments_to_results() {
+        let source = "def safe(value):\n    return 0\ndef f():\n    return safe(source())\n";
+        let facts = build_flow_facts(source, "py");
+        let safe_call = facts.events.iter().find(|e| {
+            e.role == "call" && e.var.as_deref() == Some("safe")
+        }).unwrap();
+        let result = facts.events.iter().find(|e| {
+            e.role == "call_result" && e.call_id == Some(safe_call.id)
+        }).unwrap();
+        assert!(!facts.edges.iter().any(|e| e.to == result.id && e.kind == "transfer"));
+        assert!(facts.edges.iter().any(|e| e.to == result.id && e.kind == "call_input"));
+        assert!(facts.edges.iter().any(|e| e.to == result.id && e.kind == "call_return"));
+    }
+
+    #[test]
+    fn keyword_arguments_retain_parameter_identity() {
+        let facts = build_flow_facts("def f(value):\n    return value\nf(value=1)\n", "py");
+        assert!(facts.events.iter().any(|e| {
+            e.role == "param_in" && e.arg_name.as_deref() == Some("value")
+        }));
+        assert!(facts.events.iter().any(|e| {
+            e.role == "call_arg" && e.arg_name.as_deref() == Some("value")
+        }));
     }
 }

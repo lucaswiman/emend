@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
-use crate::cfg::{build_cfgs_for_source, BlockId, FunctionCfg};
+use crate::cfg::{build_cfgs_for_source, build_flow_facts as extract_flow_facts, BlockId, FunctionCfg};
 
 // ─── PyCfg ──────────────────────────────────────────────────────────────────
 
@@ -334,6 +334,50 @@ pub fn build_cfgs(source: &str, ext: Option<&str>) -> PyResult<Vec<PyCfg>> {
     let extension = ext.unwrap_or("py");
     let cfgs = build_cfgs_for_source(source, extension);
     Ok(cfgs.into_iter().map(|c| PyCfg { inner: c }).collect())
+}
+
+/// Build the exact occurrence/value graph. Coordinates are zero-based and
+/// byte offsets are exact half-open UTF-8 ranges.
+#[pyfunction]
+#[pyo3(signature = (source, ext="py"))]
+pub fn build_flow_facts(py: Python<'_>, source: &str, ext: &str) -> PyResult<PyObject> {
+    let facts = extract_flow_facts(source, ext);
+    let root = PyDict::new(py);
+    let events = PyList::empty(py);
+    for event in facts.events {
+        let row = PyDict::new(py);
+        row.set_item("id", event.id)?;
+        row.set_item("func_id", event.func_id)?;
+        row.set_item("func_name", event.func_name)?;
+        row.set_item("func_start", event.func_start)?;
+        row.set_item("role", event.role)?;
+        row.set_item("var", event.var)?;
+        row.set_item("access_path", event.access_path)?;
+        row.set_item("block", event.block)?;
+        row.set_item("start_byte", event.start_byte)?;
+        row.set_item("end_byte", event.end_byte)?;
+        row.set_item("start_line", event.start_line)?;
+        row.set_item("start_col", event.start_col)?;
+        row.set_item("end_line", event.end_line)?;
+        row.set_item("end_col", event.end_col)?;
+        row.set_item("ordinal", event.ordinal)?;
+        row.set_item("call_id", event.call_id)?;
+        row.set_item("arg_index", event.arg_index)?;
+        row.set_item("arg_name", event.arg_name)?;
+        row.set_item("text", event.text)?;
+        events.append(row)?;
+    }
+    let edges = PyList::empty(py);
+    for edge in facts.edges {
+        let row = PyDict::new(py);
+        row.set_item("from", edge.from)?;
+        row.set_item("to", edge.to)?;
+        row.set_item("kind", edge.kind)?;
+        edges.append(row)?;
+    }
+    root.set_item("events", events)?;
+    root.set_item("edges", edges)?;
+    Ok(root.into())
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

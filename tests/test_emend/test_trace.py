@@ -794,7 +794,7 @@ def test_trace_cmd_file_path_resolves_to_parent_dir(tmp_path, capsys):
                     config=str(config_file),
                     label=None, trace=False, json_output=False,
                     project=None,
-                    interprocedural=False, max_iterations=3,
+                    interprocedural=False,
                     preset=None,
                 )
     finally:
@@ -846,7 +846,7 @@ def test_trace_cmd_output_ends_with_newline(tmp_path, capsys):
                 config=str(config_file),
                 label=None, trace=False, json_output=False,
                 project=None,
-                interprocedural=False, max_iterations=3,
+                interprocedural=False,
                 preset=None,
             )
     finally:
@@ -863,7 +863,7 @@ def test_trace_relative_path_matches_absolute_path(tmp_path, monkeypatch):
     """Relative file paths must yield the same violations as absolute paths.
 
     Regression: FactGraph stores facts keyed by the resolved (absolute) path,
-    but ``_run_trace_datalog`` used the raw ``paths`` strings for the Datalog
+    but the old evaluator used the raw ``paths`` strings for analysis
     source/sink relations.  When the CLI passed a relative path (e.g.
     ``emend trace app.py``), the cross-variable propagation join
     (``trace_source.fp == def_use.fp``) failed silently and zero violations

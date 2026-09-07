@@ -7,8 +7,6 @@ the TypeScript-specific parameter extraction and cross-function taint
 propagation end-to-end.
 
 Coverage:
-- Parameter extraction from TypeScript function signatures
-- Function summary computation (param-to-return flow)
 - Direct cross-function sink violations
 - Return-value taint propagation to caller
 - Callback-style taint delegation
@@ -23,8 +21,6 @@ from emend.trace import (
     TraceSanitizer,
     TraceSink,
     TraceSource,
-    _collect_function_params,
-    _compute_function_summary,
     run_interprocedural_trace,
 )
 
@@ -49,74 +45,6 @@ def _make_ts_interproc_config() -> TraceConfig:
             TraceSanitizer(pattern="escape($X)", label="user_input"),
         ],
     )
-
-
-# ---------------------------------------------------------------------------
-# Parameter extraction tests
-# ---------------------------------------------------------------------------
-
-class TestCollectFunctionParamsTypeScript:
-    """Tests for _collect_function_params() with TypeScript function signatures."""
-
-    def test_simple_params(self):
-        """Plain TypeScript function with untyped params."""
-        source = "function handler(req, res) {\n    return;\n}\n"
-        params = _collect_function_params(source, 1, 3)
-        assert params == ["req", "res"]
-
-    def test_typed_params(self):
-        """TypeScript function with typed parameter annotations and return type."""
-        source = "function handler(req: Request, res: Response): void {\n    return;\n}\n"
-        params = _collect_function_params(source, 1, 3)
-        assert params == ["req", "res"]
-
-    def test_async_function_typed_param(self):
-        """Async TypeScript function with a typed param and Promise return type."""
-        source = "async function fetch(url: string): Promise<void> {\n    return;\n}\n"
-        params = _collect_function_params(source, 1, 3)
-        assert params == ["url"]
-
-    def test_exported_function(self):
-        """Exported TypeScript function."""
-        source = "export function handler(req, res) {\n    return;\n}\n"
-        params = _collect_function_params(source, 1, 3)
-        assert params == ["req", "res"]
-
-    def test_no_params(self):
-        """TypeScript function with no parameters."""
-        source = "function empty() {\n    return;\n}\n"
-        params = _collect_function_params(source, 1, 3)
-        assert params == []
-
-
-# ---------------------------------------------------------------------------
-# Function summary test
-# ---------------------------------------------------------------------------
-
-class TestComputeFunctionSummaryTypeScript:
-    """Tests for _compute_function_summary() with TypeScript source."""
-
-    def test_param_to_return(self, tmp_path):
-        """Parameter that flows to the return value via an intermediate variable."""
-        test_file = tmp_path / "identity.ts"
-        source = "function identity(x) {\n    let result = x;\n    return result;\n}\n"
-        test_file.write_text(source)
-
-        config = _make_ts_interproc_config()
-        summary = _compute_function_summary(
-            file_path=str(test_file),
-            source=source,
-            func_start=1,
-            func_end=4,
-            config=config,
-            func_qn="identity.ts::identity",
-            param_names=["x"],
-            language="typescript",
-        )
-
-        assert "x" in summary.param_to_return, (
-            f"Expected 'x' in param_to_return, got: {summary.param_to_return}"
-        )
 
 
 # ---------------------------------------------------------------------------

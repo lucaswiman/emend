@@ -129,8 +129,14 @@ class TestExecuteFlowSpecPython:
         assert v.file_path == str(f)
         assert v.source_text
         assert v.sink_text
-        assert [(step.kind, step.line) for step in v.witness] == [
-            ("source", 2), ("propagation", 3), ("sink", 4),
+        assert [(step.kind, step.line, step.col, step.var_name)
+                for step in v.witness] == [
+            ("source", 2, 17, "user_input"),
+            ("propagation", 2, 4, "user_input"),
+            ("propagation", 3, 11, "user_input"),
+            ("propagation", 3, 4, "data"),
+            ("propagation", 4, 19, "data"),
+            ("sink", 4, 4, "data"),
         ]
 
     def test_sanitizer_blocks(self, tmp_path):
@@ -206,5 +212,5 @@ class TestExecuteFlowSpecDatalog:
         assert violation.source_text == "read(raw)"
         assert violation.sink_text == "sink(raw)"
         assert [(s.kind, s.line, s.col) for s in violation.witness] == [
-            ("source", 2, 4), ("sink", 3, 4),
+            ("source", 2, 4), ("propagation", 3, 9), ("sink", 3, 4),
         ]

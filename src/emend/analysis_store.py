@@ -22,7 +22,7 @@ from emend.errors import BUG_EXCEPTIONS
 from emend.project_config import find_project_root
 
 
-EXTRACTION_ARTIFACT_VERSION = "3"
+EXTRACTION_ARTIFACT_VERSION = "4"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 logger = logging.getLogger(__name__)
 

@@ -442,6 +442,7 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(validate_syntax, m)?)?;
     m.add_function(wrap_pyfunction!(extract_call_sites, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_pattern_in_files, m)?)?;
+    m.add_function(wrap_pyfunction!(matcher::find_pattern_spans_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_multi_patterns_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::compile_pattern_treesitter, m)?)?;
     m.add_class::<scope_py::PyScopeResolver>()?;
@@ -449,6 +450,7 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<cozo_db::PyCozoDb>()?;
     m.add_class::<cfg_py::PyCfg>()?;
     m.add_function(wrap_pyfunction!(cfg_py::build_cfgs, m)?)?;
+    m.add_function(wrap_pyfunction!(cfg_py::build_flow_facts, m)?)?;
     m.add_class::<tree_py::PyTree>()?;
     m.add_class::<tree_py::PyNode>()?;
     m.add_function(wrap_pyfunction!(tree_py::parse_source, m)?)?;

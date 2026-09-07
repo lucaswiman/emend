@@ -4,13 +4,9 @@ import pytest
 import yaml
 
 from emend.lint import (
-    FlowWitness,
     LintRule,
-    LintViolation,
     load_rules,
     run_lint,
-    _assignments_from_cfgs,
-    _extract_names_from_text,
 )
 
 
@@ -31,59 +27,6 @@ def _write_config(tmp_path, config_dict):
     config_file.parent.mkdir(parents=True, exist_ok=True)
     config_file.write_text(yaml.dump(config_dict))
     return config_file
-
-
-# ---------------------------------------------------------------------------
-# Helper unit tests
-# ---------------------------------------------------------------------------
-
-
-class TestExtractNames:
-    def test_simple_identifiers(self):
-        names = _extract_names_from_text("foo + bar")
-        assert "foo" in names
-        assert "bar" in names
-
-    def test_filters_keywords(self):
-        names = _extract_names_from_text("if x and y")
-        assert "x" in names
-        assert "y" in names
-        assert "if" not in names
-        assert "and" not in names
-
-    def test_dotted_access(self):
-        names = _extract_names_from_text("request.args.get(key)")
-        assert "request" in names
-        assert "args" in names
-        assert "get" in names
-        assert "key" in names
-
-
-class TestFindAssignments:
-    """Test tree-sitter CFG-backed assignment extraction via _assignments_from_cfgs."""
-
-    def test_simple_assignment(self, tmp_path):
-        source = "def f():\n    x = 1\n    y = foo(x)\n"
-        test_file = tmp_path / "test.py"
-        test_file.write_text(source)
-        assignments = _assignments_from_cfgs(
-            source, str(test_file),
-            func_start=1, func_end=3,
-        )
-        assert len(assignments) >= 2
-        targets = [a[1] for a in assignments]
-        assert "x" in targets
-        assert "y" in targets
-
-    def test_no_assignments(self, tmp_path):
-        source = "def f():\n    print(hello)\n    foo()\n"
-        test_file = tmp_path / "test.py"
-        test_file.write_text(source)
-        assignments = _assignments_from_cfgs(
-            source, str(test_file),
-            func_start=1, func_end=3,
-        )
-        assert assignments == []
 
 
 # ---------------------------------------------------------------------------

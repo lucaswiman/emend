@@ -761,8 +761,8 @@ def test_fact_consumers_reuse_one_generation_without_ad_hoc_graphs(tmp_path, mon
     seen = []
     original = store.query_facts
 
-    def tracked():
-        graph = original()
+    def tracked(**kwargs):
+        graph = original(**kwargs)
         seen.append((id(graph), graph.snapshot.snapshot_id))
         return graph
 

@@ -1,8 +1,8 @@
-"""Phase 12/13: Interprocedural trace uses the Datalog engine.
+"""Phase 12/13: Interprocedural trace uses the occurrence evaluator.
 
 These tests verify that:
-1. The interprocedural engine produces ``engine == "datalog"`` violations.
-2. The CLI produces ``engine == "datalog"`` in JSON output.
+1. The interprocedural engine produces ``engine == "occurrence"`` violations.
+2. The CLI produces ``engine == "occurrence"`` in JSON output.
 3. All existing violation shapes are preserved.
 """
 
@@ -31,14 +31,14 @@ runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------
-# API-level: engine is datalog
+# API-level: engine is occurrence
 # ---------------------------------------------------------------------------
 
 
-class TestDefaultEngineIsDatalog:
-    """``run_interprocedural_trace()`` uses datalog."""
+class TestDefaultEngineIsOccurrence:
+    """``run_interprocedural_trace()`` uses the occurrence evaluator."""
 
-    def test_default_engine_produces_datalog_violations(self, tmp_path):
+    def test_default_engine_produces_occurrence_violations(self, tmp_path):
         test_file = tmp_path / "app.py"
         test_file.write_text(CROSS_FUNCTION_SOURCE)
 
@@ -48,20 +48,20 @@ class TestDefaultEngineIsDatalog:
 
         assert isinstance(result, InterproceduralResult)
         assert len(result.violations) >= 1
-        assert all(v.engine == "datalog" for v in result.violations), (
-            f"Expected engine='datalog' but got: {[v.engine for v in result.violations]}"
+        assert all(v.engine == "occurrence" for v in result.violations), (
+            f"Expected engine='occurrence' but got: {[v.engine for v in result.violations]}"
         )
 
 
 # ---------------------------------------------------------------------------
-# CLI-level: engine is datalog
+# CLI-level: engine is occurrence
 # ---------------------------------------------------------------------------
 
 
 class TestCLIDefaultEngine:
-    """CLI ``trace --interprocedural`` uses datalog."""
+    """CLI ``trace --interprocedural`` uses the occurrence evaluator."""
 
-    def test_cli_default_engine_is_datalog(self, tmp_path):
+    def test_cli_default_engine_is_occurrence(self, tmp_path):
         src, cfg = setup_trace_fixture(tmp_path)
         result = runner.invoke(
             app,
@@ -70,8 +70,8 @@ class TestCLIDefaultEngine:
         assert result.exit_code in (0, 1), result.output
         data = json.loads(result.output)
         assert len(data) > 0
-        assert all(v["engine"] == "datalog" for v in data), (
-            f"Expected engine='datalog' but got: {[v['engine'] for v in data]}"
+        assert all(v["engine"] == "occurrence" for v in data), (
+            f"Expected engine='occurrence' but got: {[v['engine'] for v in data]}"
         )
 
     def test_cli_stderr_reports_engine(self, tmp_path):
@@ -90,7 +90,7 @@ class TestCLIDefaultEngine:
 
 
 class TestOutputShapePreservation:
-    """Violations from the datalog engine preserve the public output shape."""
+    """Violations from the occurrence evaluator preserve the public output shape."""
 
     def test_json_output_schema(self, tmp_path):
         src, cfg = setup_trace_fixture(tmp_path)
@@ -106,7 +106,7 @@ class TestOutputShapePreservation:
             assert "sink_pattern" in v
             assert "message" in v
             assert "engine" in v
-            assert v["engine"] == "datalog"
+            assert v["engine"] == "occurrence"
 
     def test_result_has_summaries_and_iterations(self, tmp_path):
         test_file = tmp_path / "app.py"

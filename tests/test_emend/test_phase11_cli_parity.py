@@ -1,8 +1,8 @@
-"""Phase 11/13 CLI tests: engine observability and result shape.
+"""Phase 11/13 CLI tests: evaluator observability and result shape.
 
 These tests exercise the trace CLI command with the Datalog engine and verify:
 1. JSON output includes the ``engine`` field.
-2. The engine is always ``"datalog"``.
+2. The evaluator is always ``"occurrence"``.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ _LATE_SANITIZER_SOURCE = textwrap.dedent("""\
 class TestEngineInJsonOutput:
     """JSON output from ``trace --interprocedural`` always includes ``engine``."""
 
-    def test_datalog_engine_in_json(self, tmp_path):
+    def test_occurrence_engine_in_json(self, tmp_path):
         src, cfg = setup_trace_fixture(tmp_path)
         result = runner.invoke(
             app,
@@ -69,9 +69,9 @@ class TestEngineInJsonOutput:
         data = json.loads(result.output)
         for v in data:
             assert "engine" in v, "engine field missing from JSON output"
-            assert v["engine"] == "datalog"
+            assert v["engine"] == "occurrence"
 
-    def test_default_engine_is_datalog(self, tmp_path):
+    def test_default_engine_is_occurrence(self, tmp_path):
         src, cfg = setup_trace_fixture(tmp_path)
         result = runner.invoke(
             app,
@@ -80,7 +80,7 @@ class TestEngineInJsonOutput:
         assert result.exit_code in (0, 1), result.output
         data = json.loads(result.output)
         assert len(data) > 0
-        assert all(v["engine"] == "datalog" for v in data)
+        assert all(v["engine"] == "occurrence" for v in data)
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ class TestResultShape:
     def test_cross_function_produces_violations(self, tmp_path):
         data = self._run_interprocedural(tmp_path, CROSS_FUNCTION_SOURCE)
         assert len(data) > 0
-        assert all(v["engine"] == "datalog" for v in data)
+        assert all(v["engine"] == "occurrence" for v in data)
 
     def test_returned_taint_produces_violations(self, tmp_path):
         data = self._run_interprocedural(tmp_path, _RETURNED_TAINT_SOURCE)
