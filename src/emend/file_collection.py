@@ -80,6 +80,8 @@ def detect_project_languages(project_root: str) -> list[str]:
 def collect_all_source_files(
     root_path: str,
     languages: list[str] | None = None,
+    *,
+    registry: tuple[dict[str, str], dict[str, list[str]]] | None = None,
 ) -> list[str]:
     """Collect source files for all detected (or specified) languages.
 
@@ -89,14 +91,17 @@ def collect_all_source_files(
     """
     if languages is None:
         languages = detect_project_languages(root_path)
-    all_files: list[str] = []
-    seen: set[str] = set()
-    for lang in languages:
-        for f in collect_source_files_scandir(root_path, language=lang):
-            if f not in seen:
-                seen.add(f)
-                all_files.append(f)
-    return all_files
+    from emend import emend_core as _rust
+    from emend.language_registry import registry_snapshot
+
+    registry = registry or registry_snapshot()
+    language_extensions = registry[1]
+    extensions = sorted({
+        extension
+        for language in languages
+        for extension in language_extensions.get(language, ())
+    })
+    return _rust.collect_files(root_path, extensions) if extensions else []
 
 
 def collect_git_tracked_source_files(

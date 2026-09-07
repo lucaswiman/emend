@@ -33,11 +33,13 @@ def run_datalog_check(
     project_path: str,
 ) -> "list[PolicyViolation]":
     """Run a CozoScript Datalog query against the project's fact graph."""
-    from emend.fact_graph import FactGraph
+    from emend.analysis_store import AnalysisStore
 
     violations: list[PolicyViolation] = []
     try:
-        graph = FactGraph.build_from_project(project_path)
+        graph = AnalysisStore.open(project_path).query_facts(
+            include_types="type_binding" in check.cozoscript
+        )
         result = graph.run_query(check.cozoscript)
     except BUG_EXCEPTIONS:
         raise

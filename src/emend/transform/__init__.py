@@ -13,16 +13,9 @@ from .cache import (
     _SCHEMA_VERSION,
     _cache_db_dir,
     _knowledge_db_dir,
-    _delete_facts_for_file,
     _get_disk_cache,
-    _get_facts_db,
     _get_worktree_id,
     _init_cache_schema,
-    _open_facts_db,
-    _build_facts_db,
-    _build_fact_sym_rows,
-    _extract_file_facts,
-    _facts_db_cache,
 )
 
 # ---------------------------------------------------------------------------
@@ -127,7 +120,6 @@ from .patterns import (
 from .refs import (
     Callee,
     Reference,
-    _fact_graph_cache,
     _get_or_build_fact_graph,
     _rename_in_docstrings,
     find_callees,
@@ -215,10 +207,8 @@ from emend import emend_core as _rust
 
 __all__ = [
     # cache
-    "_SCHEMA_VERSION", "_cache_db_dir", "_knowledge_db_dir", "_delete_facts_for_file",
-    "_get_disk_cache", "_get_facts_db", "_get_worktree_id", "_init_cache_schema",
-    "_open_facts_db", "_build_facts_db", "_build_fact_sym_rows",
-    "_extract_file_facts", "_facts_db_cache",
+    "_SCHEMA_VERSION", "_cache_db_dir", "_knowledge_db_dir",
+    "_get_disk_cache", "_get_worktree_id", "_init_cache_schema",
     # index
     "_NOQA_RE", "_compute_duplicate_payloads", "_ensure_cache_ignore_files",
     "_ensure_index_fresh", "_ensure_venv_index", "_extract_all_exports_text",
@@ -244,7 +234,7 @@ __all__ = [
     "analyze_imports", "copy_symbol", "find_pattern", "get_symbol_source", "remove_symbol",
     "replace_pattern",
     # refs
-    "Callee", "Reference", "_fact_graph_cache", "_get_or_build_fact_graph",
+    "Callee", "Reference", "_get_or_build_fact_graph",
     "_rename_in_docstrings", "find_callees", "find_callers", "find_references",
     "generate_graph",
     # deadcode

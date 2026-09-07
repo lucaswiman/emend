@@ -1053,6 +1053,24 @@ def _typed_decorator_entry_points(
     known_types = set(type_methods)
     resolved_entry_points: set[str] = set()
     root = Path(project_root).resolve()
+    from emend.type_oracle import (
+        _type_shared_context,
+        load_cached_file_types,
+        parse_type_string,
+    )
+    type_shared_context = _type_shared_context(root)
+    from emend.analysis_store import AnalysisStore
+
+    absolute_paths = {
+        file_path: (
+            Path(file_path) if Path(file_path).is_absolute()
+            else root / file_path
+        ).resolve()
+        for file_path in decorated_by_file
+    }
+    file_identities = AnalysisStore.open(root).type_file_identities(
+        absolute_paths.values(), graph=graph,
+    )
 
     for file_path, decorators in decorated_by_file.items():
         imports = imports_by_file.get(file_path, {})
@@ -1068,9 +1086,7 @@ def _typed_decorator_entry_points(
             if resolved_type in known_types:
                 receiver_types[binding_name] = resolved_type
 
-        abs_path = Path(file_path)
-        if not abs_path.is_absolute():
-            abs_path = root / abs_path
+        abs_path = absolute_paths[file_path]
         try:
             source = abs_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -1078,15 +1094,11 @@ def _typed_decorator_entry_points(
 
         # Read a prior type index if available, but never populate it here.
         try:
-            import hashlib
-            from emend.type_oracle import load_cached_file_types, parse_type_string
-
             cached_types = load_cached_file_types(
                 abs_path,
                 project_root=root,
-                content_hash=hashlib.md5(
-                    source.encode("utf-8"), usedforsecurity=False,
-                ).hexdigest(),
+                shared_context=type_shared_context,
+                file_identity=file_identities.get(str(abs_path)),
             )
             if cached_types is not None:
                 for receiver in receivers:
@@ -1511,7 +1523,7 @@ def find_dead_code(
     except Exception:
         # Compatibility fallback for an older/incomplete facts database.
         logger.debug("Import fact query failed; reparsing modules", exc_info=True)
-        from emend.fact_graph import _extract_imports
+        from emend.analysis_extraction import _extract_imports
 
         for abs_file in source_files:
             abs_path = Path(abs_file).resolve()
@@ -1596,7 +1608,7 @@ def safe_delete(
     """
     from emend.ast_utils import find_nested_definitions, find_symbol_by_path
     from .project_iter import _find_project_root, _file_to_module, _normalize_module_qn
-    from .cache import _get_facts_db
+    from emend.analysis_store import AnalysisStore
     from .components import _generate_diff
 
     scan_root = project_path or _find_project_root(selector.file_path)
@@ -1634,7 +1646,8 @@ def safe_delete(
         # Compute cascade via CozoDB queries on the persisted facts.db.
         # Iteratively finds callees of deleted symbols, then checks
         # whether each callee has references outside the delete set.
-        fdb = _get_facts_db(scan_root)
+        graph = AnalysisStore.open(scan_root).query_facts()
+        fdb = graph.client
         if fdb is not None:
             changed = True
             while changed:
@@ -1649,36 +1662,24 @@ def safe_delete(
                         # Find callees: symbols called by deleted functions
                         'callee_of_deleted[callee_mqn] := '
                         '  deleted[caller_mqn], '
-                        '  *fact_reference[callee_mqn, fp, ref_line, _, kind], kind == "call", '
-                        '  *fact_symbol[fp, caller_mqn, _, _, caller_kind, caller_line, caller_end, _, _, _, _, _, _, _, _, _], '
-                        '  caller_kind in ["function", "async_function", "method", "async_method"], '
-                        '  caller_line <= ref_line, ref_line <= caller_end, '
+                        '  *call[caller_mqn, callee_mqn, _, _, _, _, _], '
                         '  not deleted[callee_mqn]\n'
-                        # Also match by short qn
-                        'callee_of_deleted[callee_mqn] := '
-                        '  deleted[caller_mqn], '
-                        '  *fact_symbol[_, callee_mqn, _, callee_qn, _, _, _, _, _, _, _, _, _, _, _, _], '
-                        '  callee_qn != "", '
-                        '  *fact_reference[callee_qn, fp, ref_line, _, kind], kind == "call", '
-                        '  *fact_symbol[fp, caller_mqn, _, _, caller_kind, caller_line, caller_end, _, _, _, _, _, _, _, _, _], '
-                        '  caller_kind in ["function", "async_function", "method", "async_method"], '
-                        '  caller_line <= ref_line, ref_line <= caller_end, '
-                        '  not deleted[callee_mqn]\n'
-                        # Has external ref: reference from a non-deleted symbol
+                        # Has external ref: any reference from outside the
+                        # delete set, not just calls.  Attribute reads,
+                        # aliases, and module-level references all keep a
+                        # helper live just as a call does.
                         'has_ext_ref[mqn] := '
                         '  callee_of_deleted[mqn], '
-                        '  *fact_reference[mqn, ref_fp, ref_line, _, _], '
-                        '  *fact_symbol[sym_fp, mqn, _, _, _, sym_line, _, _, _, _, _, _, _, _, _, _], '
+                        '  *reference[mqn, ref_fp, ref_line, _, ref_kind, ref_mqn, _], '
+                        '  ref_kind != "import", ref_kind != "definition", '
+                        '  *symbol[mqn, sym_fp, _, _, sym_line, _, _], '
                         '  not (ref_fp == sym_fp, ref_line == sym_line), '
-                        '  *fact_symbol[ref_fp, ref_mqn, _, _, ref_kind, ref_start, ref_end, _, _, _, _, _, _, _, _, _], '
-                        '  ref_kind in ["function", "async_function", "method", "async_method"], '
-                        '  ref_start <= ref_line, ref_line <= ref_end, '
                         '  not deleted[ref_mqn]\n'
                         # Cascade candidates: callees with no external refs
                         '?[mqn, name, kind, fp, line] := '
                         '  callee_of_deleted[mqn], not has_ext_ref[mqn], '
-                        '  *fact_symbol[fp, mqn, name, _, kind, line, _, depth, _, _, _, _, _, is_entry, is_exported, _], '
-                        '  depth == 1, is_entry == false, is_exported == false, '
+                        '  *symbol[mqn, fp, name, kind, line, _, parent], '
+                        '  parent == "", not *exported_symbol[fp, mqn], '
                         '  not starts_with(name, "test_"), not starts_with(name, "Test"), '
                         '  not (starts_with(name, "__"), ends_with(name, "__"))\n'
                     )
@@ -1690,6 +1691,16 @@ def safe_delete(
                     if mqn not in delete_qns:
                         # Convert relative path back to absolute.
                         abs_fp = str(Path(scan_root) / fp) if not Path(fp).is_absolute() else fp
+                        from emend.language_registry import detect_language
+
+                        decorators = [
+                            fact.decorator for fact in graph.decorators_on(mqn)
+                        ]
+                        if _is_likely_entry_point(
+                            name, sym_kind, decorators, 1,
+                            detect_language(abs_fp) or "python",
+                        ):
+                            continue
                         sym_selector = f"{abs_fp}::{name}"
                         delete_set.append({
                             "selector": sym_selector,

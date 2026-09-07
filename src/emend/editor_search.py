@@ -401,10 +401,12 @@ class EditorSearchEngine:
     """
 
     def __init__(self, project_path: str) -> None:
-        from emend.transform import _find_project_root, _cache_db_dir
+        from emend.analysis_store import AnalysisStore
 
-        self.project_root = _find_project_root(project_path)
-        self.db_path = _cache_db_dir(self.project_root) / "parse.db"
+        self._store = AnalysisStore.open(project_path)
+        self.project_root = str(self._store.project_root)
+        self.db_path = self._store.db_path
+        self._overlay_owner = object()
         self._conn: sqlite3.Connection | None = None
         self._fts_ready = False
         self._fts_available: bool | None = None
@@ -419,10 +421,6 @@ class EditorSearchEngine:
         self._query_history: list[dict] = []
         self._query_history_max = 100
 
-        # Hot buffer snapshots (unsaved editor content)
-        self._hot_buffers: dict[str, str] = {}  # resolved file_path -> content
-        self._hot_buffer_versions: dict[str, int] = {}  # resolved file_path -> version
-
         # Cache expensive CFG construction for synchronous completion ranking.
         self._completion_cfg_cache: OrderedDict[str, list[Any]] = OrderedDict()
         self._completion_cfg_cache_max = 8
@@ -431,8 +429,7 @@ class EditorSearchEngine:
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            self._conn = sqlite3.connect(str(self.db_path), timeout=10)
+            self._conn = self._store.connection()
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute("PRAGMA mmap_size=268435456")
@@ -440,11 +437,12 @@ class EditorSearchEngine:
         return self._conn
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
-            self._fts_ready = False
-        
+        # AnalysisStore owns the shared connection lifetime.  Closing one
+        # editor client must not invalidate type or index consumers.
+        self._store.remove_overlays(self._overlay_owner)
+        self._conn = None
+        self._fts_ready = False
+
         # Close KB if it was lazy-initialized
         if hasattr(self, "_kb"):
             try:
@@ -1396,7 +1394,7 @@ class EditorSearchEngine:
         resolved = str(Path(file_path).resolve())
 
         # Prefer: explicit content param > hot buffer > persistent index
-        source = content if content is not None else self._hot_buffers.get(resolved)
+        source = content if content is not None else self._store.overlay_content(resolved)
 
         items: list[dict] = []
         if source is not None:
@@ -1472,11 +1470,17 @@ class EditorSearchEngine:
         """Store buffer content and return a buffer SearchResult."""
         t0 = time.monotonic()
         resolved = str(Path(file).resolve())
-        self._hot_buffers[resolved] = content
-        self._hot_buffer_versions[resolved] = version
+        update = self._store.update_overlay(
+            resolved, content, version, owner=self._overlay_owner
+        )
         elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(
-            items=[{"file": resolved, "version": version}],
+            items=[{
+                "file": resolved,
+                "version": version,
+                "accepted": update.accepted,
+                "current_version": update.current_version,
+            }],
             elapsed_ms=elapsed,
             mode="buffer",
             query=f"{op} {file}",
@@ -1487,16 +1491,16 @@ class EditorSearchEngine:
         return self._buffer_store(file, content, version, "buffer_open")
 
     def buffer_update(self, file: str, content: str, version: int = 0) -> SearchResult:
-        """Update the content of an open buffer."""
+        """Update a buffer; version zero is an unsequenced notification."""
         return self._buffer_store(file, content, version, "buffer_update")
 
     def buffer_close(self, file: str) -> SearchResult:
         """Remove a buffer from the hot buffer cache."""
         t0 = time.monotonic()
         resolved = str(Path(file).resolve())
-        removed = resolved in self._hot_buffers
-        self._hot_buffers.pop(resolved, None)
-        self._hot_buffer_versions.pop(resolved, None)
+        removed = self._store.remove_overlay(
+            resolved, owner=self._overlay_owner
+        ).accepted
         elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(
             items=[{"file": resolved, "removed": removed}],
@@ -1508,7 +1512,7 @@ class EditorSearchEngine:
     def get_hot_content(self, file_path: str) -> str | None:
         """Return hot buffer content for a file, or None if not buffered."""
         resolved = str(Path(file_path).resolve())
-        return self._hot_buffers.get(resolved)
+        return self._store.overlay_content(resolved)
 
     def _read_file_or_hot(self, file_path: str) -> str | None:
         """Read file content, preferring hot buffer over disk.
@@ -1516,7 +1520,7 @@ class EditorSearchEngine:
         Returns None if file doesn't exist and has no hot buffer.
         """
         resolved = str(Path(file_path).resolve())
-        hot = self._hot_buffers.get(resolved)
+        hot = self._store.overlay_content(resolved)
         if hot is not None:
             return hot
         p = Path(resolved)
@@ -1553,7 +1557,7 @@ class EditorSearchEngine:
         logger.debug("goto_definition: file=%s, line=%s, col=%s", file, line, col)
 
         file_path = Path(file).resolve()
-        if not file_path.exists() and str(file_path) not in self._hot_buffers:
+        if not file_path.exists() and self._store.overlay_content(file_path) is None:
             logger.debug("goto_definition: file not found: %s", file_path)
             return SearchResult(items=[], elapsed_ms=0, mode="symbol")
 

@@ -114,8 +114,10 @@ class TestBufferLifecycle:
         assert result1.items[0]["version"] == 1
         result2 = eng.buffer_update(app, "# v2\n", version=2)
         assert result2.items[0]["version"] == 2
-        # Internal version dict should reflect latest
-        assert eng._hot_buffer_versions[app] == 2
+        assert result2.items[0]["current_version"] == 2
+        stale = eng.buffer_update(app, "# stale\n", version=1)
+        assert stale.items[0]["accepted"] is False
+        assert eng.get_hot_content(app) == "# v2\n"
 
     def test_buffer_open_returns_buffer_mode(self, engine):
         eng, proj = engine

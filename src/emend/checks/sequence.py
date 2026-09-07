@@ -50,12 +50,13 @@ def run_sequence_check(
     project_path: str,
 ) -> "list[PolicyViolation]":
     """Run a temporal sequence check against the project's fact graph."""
-    from emend.fact_graph import FactGraph, compile_sequence_rule
+    from emend.analysis_store import AnalysisStore
+    from emend.fact_graph import compile_sequence_rule
     from emend.checks.flow import WitnessStep, format_witness as _fmt_witness
 
     violations: list[PolicyViolation] = []
     try:
-        graph = FactGraph.build_from_project(project_path)
+        graph = AnalysisStore.open(project_path).query_facts()
     except BUG_EXCEPTIONS:
         raise
     except Exception as exc:

@@ -20,6 +20,7 @@ Usage::
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import sys
 from functools import lru_cache
@@ -100,7 +101,36 @@ def _discover_entry_point_languages() -> dict[str, Path]:
     return result
 
 
-def _parse_toml_extensions(path: Path) -> tuple[str, list[str]] | None:
+def _config_path(language: str) -> Path | None:
+    """Return the effective configuration path for one language."""
+    lang_dir = _find_languages_dir()
+    if lang_dir is not None:
+        candidate = lang_dir / language / "config.toml"
+        if candidate.is_file():
+            return candidate
+    plugin_dir = _discover_entry_point_languages().get(language)
+    if plugin_dir is not None:
+        candidate = plugin_dir / "config.toml"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def config_identity(language: str) -> str:
+    """Hash the exact language configuration consumed by analysis."""
+    path = _config_path(language)
+    try:
+        payload = path.read_bytes() if path is not None else repr(
+            _BUILTIN.get(language, ())
+        ).encode()
+    except OSError:
+        payload = repr(_BUILTIN.get(language, ())).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _parse_toml_extensions(
+    payload: bytes, label: str
+) -> tuple[str, list[str]] | None:
     """Return (language_name, [extensions]) from a config.toml, or None on error."""
     if sys.version_info >= (3, 11):
         import tomllib
@@ -110,11 +140,10 @@ def _parse_toml_extensions(path: Path) -> tuple[str, list[str]] | None:
         except ImportError:
             return None
     try:
-        with open(path, "rb") as fh:
-            data = tomllib.load(fh)
-    except (OSError, ValueError):
+        data = tomllib.loads(payload.decode())
+    except (UnicodeError, ValueError):
         # TOMLDecodeError subclasses ValueError in both tomllib and tomli.
-        logger.debug("Could not parse %s", path, exc_info=True)
+        logger.debug("Could not parse %s", label, exc_info=True)
         return None
 
     lang = data.get("language", {})
@@ -125,11 +154,33 @@ def _parse_toml_extensions(path: Path) -> tuple[str, list[str]] | None:
     return None
 
 
-@lru_cache(maxsize=1)
-def _registry() -> tuple[dict[str, str], dict[str, list[str]]]:
+def _registry_inputs() -> tuple[tuple[str, str, bytes], ...]:
+    """Capture the exact language configurations used by one registry view."""
+    inputs: list[tuple[str, str, bytes]] = []
+    lang_dir = _find_languages_dir()
+    if lang_dir:
+        for path in sorted(lang_dir.glob("*/config.toml")):
+            try:
+                inputs.append(("builtin", str(path), path.read_bytes()))
+            except OSError:
+                pass
+    for name, directory in sorted(_discover_entry_point_languages().items()):
+        path = directory / "config.toml"
+        try:
+            inputs.append(("plugin", name, path.read_bytes()))
+        except OSError:
+            pass
+    return tuple(inputs)
+
+
+@lru_cache(maxsize=8)
+def _build_registry(
+    inputs: tuple[tuple[str, str, bytes], ...],
+) -> tuple[dict[str, str], dict[str, list[str]]]:
     """Return ``(ext_to_lang, lang_to_exts)`` built from TOML configs + builtins.
 
-    Results are cached for the lifetime of the process.
+    Results are content-addressed so live configuration edits cannot leave a
+    stale extension map behind.
     """
     ext_to_lang: dict[str, str] = {}
     lang_to_exts: dict[str, list[str]] = {}
@@ -139,22 +190,12 @@ def _registry() -> tuple[dict[str, str], dict[str, list[str]]]:
         for extension in extensions:
             ext_to_lang.setdefault(extension.lower(), name)
 
-    lang_dir = _find_languages_dir()
-    if lang_dir:
-        for config_path in sorted(lang_dir.glob("*/config.toml")):
-            result = _parse_toml_extensions(config_path)
-            if result:
-                name, exts = result
-                register(name, exts)
-
-    # Discover languages from installed entry-point plugins.
-    # These are loaded AFTER built-in languages so they cannot override them.
-    for lang_name, config_dir in _discover_entry_point_languages().items():
-        if lang_name in lang_to_exts:
-            continue  # built-in takes precedence
-        result = _parse_toml_extensions(config_dir / "config.toml")
+    for source, label, payload in inputs:
+        result = _parse_toml_extensions(payload, label)
         if result:
             name, exts = result
+            if source == "plugin" and name in lang_to_exts:
+                continue
             register(name, exts)
 
     # Fill in any gaps from hardcoded builtins
@@ -167,11 +208,20 @@ def _registry() -> tuple[dict[str, str], dict[str, list[str]]]:
     return ext_to_lang, lang_to_exts
 
 
+def registry_snapshot() -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Return one immutable-by-convention, exact registry revision."""
+    return _build_registry(_registry_inputs())
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def detect_language(path: str | Path) -> str | None:
+def detect_language(
+    path: str | Path,
+    *,
+    registry: tuple[dict[str, str], dict[str, list[str]]] | None = None,
+) -> str | None:
     """Return the language name for *path* based on its extension, or ``None``.
 
     Examples::
@@ -183,7 +233,7 @@ def detect_language(path: str | Path) -> str | None:
     ext = Path(path).suffix.lstrip(".").lower()
     if not ext:
         return None
-    ext_to_lang, _ = _registry()
+    ext_to_lang, _ = registry or registry_snapshot()
     return ext_to_lang.get(ext)
 
 
@@ -198,13 +248,13 @@ def get_extensions(language: str) -> list[str]:
         get_extensions("typescript")   # ["ts", "tsx", "js", "jsx"]
         get_extensions("cobol")        # []
     """
-    _, lang_to_exts = _registry()
+    _, lang_to_exts = registry_snapshot()
     return lang_to_exts.get(language, []) or _BUILTIN.get(language, [])
 
 
 def get_all_languages() -> list[str]:
     """Return all registered language names."""
-    _, lang_to_exts = _registry()
+    _, lang_to_exts = registry_snapshot()
     return list(lang_to_exts.keys())
 
 
@@ -235,31 +285,21 @@ def get_comment_prefix(language: str) -> str:
     return config.get("language", {}).get("comment_prefix", "#")
 
 
-@lru_cache(maxsize=16)
 def load_config(language: str) -> dict:
     """Load the full TOML configuration for *language*.
 
     Returns an empty dict if the language or config file is not found.
     Checks built-in languages first, then entry-point plugins.
     """
+    config_path = _config_path(language)
+
+    return _load_config(language, config_identity(language), config_path)
+
+
+@lru_cache(maxsize=32)
+def _load_config(language: str, _identity: str, config_path: Path | None) -> dict:
+    """Parse one exact config revision, reusing unchanged revisions."""
     import sys
-
-    config_path: Path | None = None
-
-    # 1. Check built-in languages directory
-    lang_dir = _find_languages_dir()
-    if lang_dir:
-        candidate = lang_dir / language / "config.toml"
-        if candidate.is_file():
-            config_path = candidate
-
-    # 2. Check entry-point plugins
-    if config_path is None:
-        ep_langs = _discover_entry_point_languages()
-        if language in ep_langs:
-            candidate = ep_langs[language] / "config.toml"
-            if candidate.is_file():
-                config_path = candidate
 
     if config_path is None:
         return {}
@@ -280,6 +320,10 @@ def load_config(language: str) -> dict:
         # TOMLDecodeError subclasses ValueError in both tomllib and tomli.
         logger.debug("Could not parse %s", config_path, exc_info=True)
         return {}
+
+
+# Preserve the cache-management hook exposed by the formerly decorated loader.
+load_config.cache_clear = _load_config.cache_clear  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +348,13 @@ _TS_TYPE_KEYWORDS: tuple[str, ...] = (
     "enum ",
     "abstract class ",
 )
+
+
+def _detect_exported_names_python(content: str) -> set[str]:
+    """Detect Python's explicit module API from a parsed ``__all__`` value."""
+    from emend import emend_core
+
+    return set(emend_core.python_all_names(content))
 
 
 def _extract_name_after_keywords(rest: str) -> str:
@@ -423,13 +474,13 @@ def _detect_exported_names_rust(content: str) -> set[str]:
 def detect_exported_names(content: str, language: str) -> set[str]:
     """Detect exported/public symbol names using tree-sitter analysis.
 
-    For Python, returns empty (Python uses ``__all__`` which is handled
-    separately).  For TypeScript/JavaScript, walks ``export_statement`` nodes
-    via ``emend_core.get_statement_ranges()``.  For Rust, uses
+    For Python, reads ``__all__`` from a structurally matched assignment.  For
+    TypeScript/JavaScript, walks ``export_statement`` nodes via
+    ``emend_core.get_statement_ranges()``.  For Rust, uses
     ``emend_core.collect_symbols_from_str()`` with ``pub`` visibility checks.
     """
     if language == "python":
-        return set()
+        return _detect_exported_names_python(content)
     if language in ("typescript", "javascript"):
         return _detect_exported_names_typescript(content)
     if language == "rust":

@@ -191,6 +191,35 @@ class TestSafeDeleteCascade:
         # shared_helper should NOT be deleted (also called by other)
         assert "shared_helper" not in deleted_names
 
+    def test_cascade_preserves_noncall_reference_and_public_export(self, tmp_path):
+        """Cascade respects value references and the module's public API."""
+        from emend.transform import safe_delete
+
+        project = self._setup_project(tmp_path)
+        (project / "main.py").write_text(
+            "from helpers import fixture_helper, main, public_helper, referenced_helper\n\n"
+            "def target():\n"
+            "    return fixture_helper() + main() + public_helper() + referenced_helper()\n\n"
+            "def expose():\n    return referenced_helper\n"
+        )
+        (project / "helpers.py").write_text(
+            "import pytest\n\n"
+            "__all__ = ['public_helper']\n\n"
+            "def main():\n    return 0\n\n"
+            "@pytest.fixture\n"
+            "def fixture_helper():\n    return 0\n\n"
+            "def public_helper():\n    return 1\n\n"
+            "def referenced_helper():\n    return 2\n"
+        )
+        self._build_index(str(project))
+
+        sel = parse_extended_selector(f"{project / 'main.py'}::target")
+        plan = safe_delete(sel, cascade=True, project_path=str(project), apply=False)
+
+        assert {"fixture_helper", "main", "public_helper", "referenced_helper"}.isdisjoint(
+            deletion["name"] for deletion in plan.deletions
+        )
+
     def test_cascade_no_effect_without_flag(self, tmp_path):
         """Without --cascade, only the target is deleted even if callees would be dead."""
         from emend.transform import safe_delete

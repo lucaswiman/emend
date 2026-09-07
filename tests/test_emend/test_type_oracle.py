@@ -15,6 +15,7 @@ Tests cover:
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import textwrap
 from pathlib import Path
@@ -30,6 +31,7 @@ from emend.type_oracle import (
     TypeBinding,
     TypeDescriptor,
     TypeScriptAdapter,
+    _LSPTypeOracle,
     _FileTypeCache,
     _parse_callable_arrow,
     _parse_pyrefly_debug,
@@ -39,6 +41,8 @@ from emend.type_oracle import (
     _split_union,
     create_type_oracle,
     detect_type_engine,
+    _file_cache_key,
+    load_cached_file_types,
 )
 
 
@@ -568,6 +572,225 @@ class TestFileTypeCache:
         assert len(cache) == 1
         cache.clear()
         assert len(cache) == 0
+
+    def test_read_only_lookup_accepts_legacy_content_hash(self, tmp_path):
+        """Single-file and read-only consumers address one disk entry."""
+        target = tmp_path / "target.py"
+        target.write_text("value = 1\n")
+        oracle = create_type_oracle("pyrefly", project_root=tmp_path)
+        oracle._cache.put(_file_cache_key(target), FileTypes(path=str(target)))
+
+        legacy_hash = hashlib.md5(
+            target.read_bytes(), usedforsecurity=False
+        ).hexdigest()
+        cached = load_cached_file_types(
+            target, project_root=tmp_path, content_hash=legacy_hash
+        )
+        assert cached is not None
+        assert cached.path == str(target.resolve())
+
+    def test_pyrefly_cache_key_matches_disk_input_with_overlay(self, tmp_path, monkeypatch):
+        """A disk-reading checker never caches disk results under overlay keys."""
+        from emend.analysis_store import AnalysisStore
+
+        target = tmp_path / "target.py"
+        target.write_text("value = int\n")
+        store = AnalysisStore.open(tmp_path)
+        owner = object()
+        store.update_overlay(target, "value = str\n", 1, owner=owner)
+        adapter = PyreflyAdapter(pyrefly_path="pyrefly")
+        calls = []
+
+        def fake_pyrefly(path, _project_root):
+            calls.append(path)
+            raw_type = path.read_text().split("=", 1)[1].strip()
+            return {"modules": {"__unknown__": {"bindings": [
+                {"key": "Key::Definition(value 1:1-6)", "result": raw_type},
+            ]}}}
+
+        monkeypatch.setattr(adapter, "_run_pyrefly", fake_pyrefly)
+        assert adapter.infer_file(target, tmp_path).bindings[0].raw_type == "int"
+        store.remove_overlay(target, owner=owner)
+        target.write_text("value = str\n")
+        assert adapter.infer_file(target, tmp_path).bindings[0].raw_type == "str"
+        assert len(calls) == 2
+        unsaved = tmp_path / "unsaved.py"
+        store.update_overlay(unsaved, "value = str\n", 1)
+        assert adapter.infer_batch([unsaved], tmp_path)[str(unsaved)].bindings == []
+
+    def test_pyrefly_does_not_cache_a_racing_disk_read(self, tmp_path, monkeypatch):
+        target = tmp_path / "target.py"
+        target.write_text("value = int\n")
+        adapter = PyreflyAdapter(pyrefly_path="pyrefly")
+        calls = 0
+
+        def fake_pyrefly(path, _project_root):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                path.write_text("value = str\n")
+            raw_type = path.read_text().split("=", 1)[1].strip()
+            return {"modules": {"__unknown__": {"bindings": [
+                {"key": "Key::Definition(value 1:1-6)", "result": raw_type},
+            ]}}}
+
+        monkeypatch.setattr(adapter, "_run_pyrefly", fake_pyrefly)
+        assert adapter.infer_file(target, tmp_path).bindings[0].raw_type == "str"
+        target.write_text("value = int\n")
+        assert adapter.infer_file(target, tmp_path).bindings[0].raw_type == "int"
+        assert calls == 2
+
+    def test_typescript_batch_does_not_cache_a_racing_disk_read(
+        self, tmp_path, monkeypatch
+    ):
+        target = tmp_path / "target.ts"
+        target.write_text("const value: number = 1;\n")
+        adapter = TypeScriptAdapter(node_path="node")
+        calls = 0
+
+        def fake_tsc(path, _project_root):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                path.write_text("const value: string = 'changed';\n")
+            raw_type = path.read_text().split(":", 1)[1].split("=", 1)[0].strip()
+            return FileTypes(path=str(path), bindings=[TypeBinding(
+                "value", 1, 7, 12, parse_type_string(raw_type), raw_type, "definition"
+            )])
+
+        monkeypatch.setattr(adapter, "_run_tsc", fake_tsc)
+        result = adapter.infer_batch([target], tmp_path)[str(target)]
+        assert result.bindings[0].raw_type == "string"
+        target.write_text("const value: number = 1;\n")
+        assert adapter.infer_file(target, tmp_path).bindings[0].raw_type == "number"
+        assert calls == 2
+
+    def test_lsp_batch_opens_one_exact_snapshot_before_hover(self, tmp_path):
+        from emend.analysis_store import AnalysisStore
+
+        dependency = tmp_path / "dependency.py"
+        leaf = tmp_path / "leaf.py"
+        other = tmp_path / "other.py"
+        target = tmp_path / "target.py"
+        unsaved = tmp_path / "unsaved.py"
+        leaf.write_text("value = int\n")
+        other.write_text("unrelated = 1\n")
+        dependency.write_text("from leaf import value\n")
+        target.write_text("from dependency import value\nresult = value\n")
+        store = AnalysisStore.open(tmp_path)
+        store.update_overlay(leaf, "value = str\n", 1)
+        store.update_overlay(unsaved, "new_value = str\n", 1)
+
+        class FakeLsp:
+            opened = {}
+            changed = {}
+            closed = []
+            project_changes = []
+
+            def did_open(self, path, source, language_id="python"):
+                self.opened[str(path)] = source
+
+            def did_change(self, path, source, version):
+                self.opened[str(path)] = source
+                self.changed[str(path)] = version
+
+            def did_close(self, path):
+                self.opened.pop(str(path))
+                self.closed.append(str(path))
+
+            def did_change_watched_files(self, *, created, deleted):
+                self.project_changes.append((created, deleted))
+
+            def hover(self, path, line, col):
+                assert {str(target), str(dependency)} <= self.opened.keys()
+                return "str"
+
+        class Oracle(_LSPTypeOracle):
+            _tool_name = "fake"
+
+            def _get_lsp(self, project_root):
+                return lsp
+
+            def _parse_hover_type(self, hover_text):
+                return hover_text
+
+            def _lsp_command(self):
+                return []
+
+        lsp = FakeLsp()
+        oracle = Oracle("fake")
+        assert oracle.infer_file(target, tmp_path).bindings[0].raw_type == "str"
+        assert lsp.opened[str(leaf)] == "value = str\n"
+        store.remove_overlay(leaf)
+        leaf.unlink()
+        oracle.infer_file(target, tmp_path)
+        assert lsp.closed == [str(leaf)]
+        assert lsp.project_changes == [(set(), {str(leaf)})]
+        leaf.write_text("value = 'new'\n")
+        oracle.infer_file(target, tmp_path)
+        assert lsp.project_changes[-1] == ({str(leaf)}, set())
+        oracle.infer_file(other, tmp_path)
+        assert lsp.closed == [str(leaf)]
+        store.update_overlay(leaf, "value = float\n", 2)
+        oracle.infer_file(target, tmp_path)
+        assert lsp.opened[str(leaf)] == "value = float\n"
+        results = oracle.infer_batch(
+            [target, dependency, unsaved], project_root=tmp_path
+        )
+
+        assert set(lsp.opened) == {
+            str(target), str(dependency), str(leaf), str(other), str(unsaved)
+        }
+        assert results[str(unsaved)].bindings[0].raw_type == "str"
+        store.update_overlay(dependency, "value = bytes\n", 2)
+        oracle.infer_batch([target, dependency, unsaved], project_root=tmp_path)
+        assert lsp.opened[str(dependency)] == "value = bytes\n"
+        assert lsp.changed == {str(dependency): 2, str(leaf): 2}
+
+    def test_long_lived_lsp_refreshes_config_and_engine_namespace(
+        self, tmp_path, monkeypatch
+    ):
+        source = tmp_path / "app.py"
+        source.write_text("value = 1\n")
+        config = tmp_path / "pyproject.toml"
+        config.write_text("[tool.pyright]\ntypeCheckingMode = 'basic'\n")
+
+        class FakeLsp:
+            instances = []
+
+            def __init__(self, *_args):
+                self.calls = 0
+                self.stopped = False
+                self.instances.append(self)
+
+            def start(self):
+                return True
+
+            def stop(self):
+                self.stopped = True
+
+            def did_open(self, *_args, **_kwargs):
+                pass
+
+            def did_change_watched_files(self, **_kwargs):
+                pass
+
+            def hover(self, *_args):
+                self.calls += 1
+                return "```python\n(variable) value: int\n```"
+
+        monkeypatch.setattr("emend.type_oracle.LSPClient", FakeLsp)
+        adapter = PyrightAdapter(pyright_path="pyright", db_path=None)
+        adapter.infer_file(source, tmp_path)
+        config.write_text("[tool.pyright]\ntypeCheckingMode = 'strict'\n")
+        adapter.infer_file(source, tmp_path)
+        monkeypatch.setattr(
+            "emend.type_oracle._type_engine_context", lambda *_args: "new-engine"
+        )
+        adapter.infer_file(source, tmp_path)
+        assert len(FakeLsp.instances) == 3
+        assert [lsp.calls for lsp in FakeLsp.instances] == [1, 1, 1]
+        assert [lsp.stopped for lsp in FakeLsp.instances] == [True, True, False]
 
 
 # ---------------------------------------------------------------------------

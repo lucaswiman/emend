@@ -24,11 +24,13 @@ def facts_query(
     max_depth: Annotated[int, Field(description="Max depth for transitive queries.")] = 10,
 ) -> str:
     """Query the project fact graph via structured parameters."""
-    from emend.fact_graph import FactGraph
+    from emend.analysis_store import AnalysisStore
     import dataclasses
 
     _fact_type = fact_type or "symbols"
-    graph = FactGraph.build_from_project(project)
+    graph = AnalysisStore.open(project).query_facts(
+        include_types=_fact_type == "types"
+    )
 
     if _fact_type == "symbols":
         results = graph.symbols(name=name, kind=kind, file_path=file_path)

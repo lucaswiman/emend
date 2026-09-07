@@ -13,198 +13,65 @@ The backing store is CozoDB with the SQLite engine, giving us:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import posixpath
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, Union
+from typing import TYPE_CHECKING, Any, Callable
 
 from emend.errors import BUG_EXCEPTIONS
+from emend.analysis_extraction import (
+    _bfs_reachable_blocks,
+    _build_method_call_facts,
+    _build_symbol_line_index,
+    _enclosing_symbol,
+    _extract_file_facts,
+    _extract_imports,
+    _extract_imports_python,
+    _extract_imports_rust,
+    _extract_imports_typescript,
+    _find_containing_block,
+    _map_ref_kind,
+    _normalize_qn,
+    _resolve_cfg_func_qn,
+    _walk_symbols,
+    build_def_use_facts,
+)
+from emend.analysis_snapshot import (
+    AnalysisSnapshot,
+    CallFact,
+    CfgBlockFact,
+    CfgEdgeFact,
+    DecoratorOnFact,
+    DefUseFact,
+    EntryPointDecoratorFact,
+    EntryPointNameFact,
+    ExtractedFile,
+    ExportedSymbolFact,
+    Fact,
+    FileRevision,
+    FuncSummaryFact,
+    ImportFact,
+    MethodCallFact,
+    ReferenceFact,
+    SourceLocFact,
+    SymbolFact,
+    TraceFlowFact,
+    TypeFact,
+)
 
 if TYPE_CHECKING:
     from emend.policy import SequenceCheck
 
 logger = logging.getLogger(__name__)
 
+FACT_GRAPH_SCHEMA_VERSION = "9"
+
 
 # ---------------------------------------------------------------------------
-# Fact types (stable dataclass API)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class SymbolFact:
-    """A symbol definition in the project."""
-    file_path: str
-    name: str
-    qualified_name: str
-    kind: str  # e.g. "class", "function", "method", "async_function"
-    line: int
-    end_line: int
-    parent: str | None = None  # qualified name of containing symbol
-
-
-@dataclass(frozen=True)
-class CallFact:
-    """A call relationship between two symbols."""
-    caller_qn: str
-    callee_qn: str
-    file_path: str
-    line: int
-    col: int
-    func_qn: str = ""      # containing function
-    block_id: int = -1      # containing CFG block
-
-
-@dataclass(frozen=True)
-class ReferenceFact:
-    """A reference to a symbol at a specific location."""
-    symbol_qn: str
-    file_path: str
-    line: int
-    col: int
-    ref_kind: Literal["read", "write", "call", "import", "definition"]
-    func_qn: str = ""      # containing function (empty for module-level)
-    block_id: int = -1      # containing CFG block (-1 for module-level)
-
-
-@dataclass(frozen=True)
-class TraceFlowFact:
-    """A trace flow edge from source to sink within a function."""
-    source_var: str
-    sink_var: str
-    label: str
-    file_path: str
-    func_qn: str
-    source_line: int
-    sink_line: int
-
-
-@dataclass(frozen=True)
-class TypeFact:
-    """A type binding for a symbol."""
-    symbol_qn: str
-    type_str: str
-    file_path: str
-    line: int
-    binding_kind: str  # e.g. "annotation", "inferred", "return"
-
-
-@dataclass(frozen=True)
-class ImportFact:
-    """An import relationship in a file."""
-    importing_file: str
-    imported_module: str
-    imported_name: str | None
-    alias: str | None
-    line: int
-
-
-@dataclass(frozen=True)
-class CfgEdgeFact:
-    """A control flow edge within a function."""
-    file_path: str
-    func_qn: str
-    from_block: int
-    to_block: int
-    edge_kind: str  # fallthrough, true_branch, false_branch, exception, finally, back_edge, jump
-    from_line: int
-    to_line: int
-
-
-@dataclass(frozen=True)
-class DefUseFact:
-    """A definition-use relationship within a function."""
-    file_path: str
-    func_qn: str
-    var_name: str
-    kind: str = "write"  # "read", "write", "aug_write", "del"
-    def_block: int = 0
-    use_block: int = 0
-    def_line: int = 0    # kept for backwards compat display
-    def_col: int = 0
-    use_line: int = 0
-    use_col: int = 0
-
-
-@dataclass(frozen=True)
-class MethodCallFact:
-    """A method call on a receiver object (e.g. obj.append())."""
-    file_path: str
-    func_qn: str
-    receiver: str
-    method: str
-    block_id: int = 0
-    line: int = 0
-
-
-@dataclass(frozen=True)
-class CfgBlockFact:
-    """A basic block in a function's control flow graph."""
-    file_path: str
-    func_qn: str
-    block_id: int
-    is_entry: bool = False
-    is_exit: bool = False
-
-
-@dataclass(frozen=True)
-class DecoratorOnFact:
-    """A decorator applied to a symbol."""
-    symbol_qn: str
-    decorator: str
-
-
-@dataclass(frozen=True)
-class SourceLocFact:
-    """Display-only source location (not joined in analysis)."""
-    file_path: str
-    loc_kind: str  # "symbol", "reference", "call", etc.
-    loc_id: str    # qualified_name or ref_id
-    line: int
-    col: int = 0
-    end_line: int = 0
-    rel_line: int = 0
-
-
-@dataclass(frozen=True)
-class FuncSummaryFact:
-    """Interprocedural taint summary for a function parameter."""
-    func_qn: str
-    param_name: str
-    flows_to_return: bool = False
-    flows_to_sink: bool = False
-    sink_label: str = ""
-
-
-@dataclass(frozen=True)
-class EntryPointDecoratorFact:
-    """A decorator that marks a symbol as an entry point."""
-    decorator: str
-
-
-@dataclass(frozen=True)
-class EntryPointNameFact:
-    """A name pattern that marks a symbol as an entry point."""
-    name: str
-
-
-@dataclass(frozen=True)
-class ExportedSymbolFact:
-    """A symbol exported by a particular source file."""
-    file_path: str
-    qualified_name: str
-
-
-# Union of all fact types for generic queries.
-Fact = Union[
-    SymbolFact, CallFact, ReferenceFact, TraceFlowFact, TypeFact,
-    ImportFact, CfgEdgeFact, DefUseFact, MethodCallFact, CfgBlockFact,
-    DecoratorOnFact, SourceLocFact, FuncSummaryFact,
-    EntryPointDecoratorFact, EntryPointNameFact, ExportedSymbolFact,
-]
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +112,22 @@ _SCHEMA_INIT = """\
     line: Int,
     end_line: Int,
     parent: String default ""
+}}
+
+{:create search_symbol {
+    file_path: String,
+    module_qualified_name: String
+    =>
+    name: String,
+    qualified_name: String,
+    kind: String,
+    line: Int,
+    end_line: Int,
+    depth: Int,
+    parent: String default "",
+    signature: String default "",
+    returns: String default "",
+    decorators: String default ""
 }}
 
 {:create call {
@@ -397,6 +280,16 @@ _SCHEMA_INIT = """\
     qualified_name: String
 }}
 
+{:create file_revision {
+    file_path: String
+    =>
+    content_hash: String,
+    language: String,
+    module_name: String,
+    origin: String,
+    version: Int default -1
+}}
+
 {:create ref_by_block {
     file_path: String,
     func_qn: String,
@@ -456,10 +349,160 @@ class FactGraph:
     are preserved as the public API for callers that need typed results.
     """
 
-    def __init__(self, db_path: str | None = None) -> None:
+    def __init__(
+        self,
+        db_path: str | None = None,
+        *,
+        snapshot: AnalysisSnapshot | None = None,
+        source_overrides: dict[str, str] | None = None,
+        source_loader: Callable[[FileRevision], str | None] | None = None,
+    ) -> None:
         self._db_path = db_path
         self._client = _create_cozo_client(db_path)
+        self._snapshot = snapshot
+        self._source_overrides = dict(source_overrides or {})
+        self._source_loader = source_loader
+        # Detached compatibility graphs may own a private snapshot copy. The
+        # analysis owner, by contrast, keeps its generation files alive.
+        self._close_unlinks_db = False
+        self._revisions_by_path = {
+            revision.file_path: revision for revision in snapshot.files
+        } if snapshot is not None else {}
         _init_schema(self._client)
+
+    @property
+    def snapshot(self) -> AnalysisSnapshot:
+        """The immutable source generation this graph represents."""
+        if self._snapshot is None:
+            raise RuntimeError("FactGraph is not bound to an analysis snapshot")
+        return self._snapshot
+
+    def bind_snapshot(
+        self,
+        snapshot: AnalysisSnapshot,
+        *,
+        source_overrides: dict[str, str] | None = None,
+        source_loader: Callable[[FileRevision], str | None] | None = None,
+    ) -> None:
+        """Bind this store to a successfully-published source generation."""
+        self._snapshot = snapshot
+        self._source_overrides = {
+            str(Path(path).resolve()): content
+            for path, content in (source_overrides or {}).items()
+        }
+        self._source_loader = source_loader
+        self._revisions_by_path = {
+            revision.file_path: revision for revision in snapshot.files
+        }
+
+    def source_text(self, file_path: str | Path) -> str:
+        """Read source from this graph's overlay, falling back to disk."""
+        resolved = str(Path(file_path).resolve())
+        if resolved in self._source_overrides:
+            return self._source_overrides[resolved]
+        revision = self._revisions_by_path.get(resolved)
+        try:
+            content = Path(resolved).read_text(encoding="utf-8")
+        except OSError:
+            content = None
+        if content is not None and (
+            revision is None
+            or hashlib.sha256(content.encode()).hexdigest() == revision.content_hash
+        ):
+            return content
+        if revision is not None and self._source_loader is not None:
+            preserved = self._source_loader(revision)
+            if preserved is not None:
+                return preserved
+        if revision is None and content is None:
+            raise FileNotFoundError(resolved)
+        raise RuntimeError(f"source no longer matches snapshot: {resolved}")
+
+    def stored_path(self, file_path: str | Path) -> str:
+        """Return the canonical fact path for this graph's project."""
+        resolved = Path(file_path).resolve()
+        if self._snapshot is not None:
+            try:
+                return str(resolved.relative_to(Path(self._snapshot.project_root)))
+            except ValueError:
+                pass
+        return str(resolved)
+
+    def published_snapshot_id(self) -> str | None:
+        """Return the generation marker stored alongside the fact relations."""
+        try:
+            rows = self._client.run(
+                '?[value] := *facts_meta["snapshot_id", value]'
+            )["rows"]
+        except Exception:
+            return None
+        return str(rows[0][0]) if rows else None
+
+    def published_snapshot(self, project_root: str | Path) -> AnalysisSnapshot | None:
+        """Load the source inventory published with this graph."""
+        try:
+            schema_rows = self._client.run(
+                '?[value] := *facts_meta["schema_version", value]'
+            )["rows"]
+        except Exception:
+            return None
+        if schema_rows != [[FACT_GRAPH_SCHEMA_VERSION]]:
+            return None
+        snapshot_id = self.published_snapshot_id()
+        if snapshot_id is None:
+            return None
+        try:
+            rows = self._client.run(
+                "?[fp, hash, lang, module, origin, version] := "
+                "*file_revision[fp, hash, lang, module, origin, version]"
+            )["rows"]
+        except Exception:
+            return None
+        revisions = tuple(
+            FileRevision.create(
+                project_root, row[0], row[1], row[2], row[3],
+                origin=row[4], version=None if row[5] == -1 else row[5],
+            )
+            for row in rows
+        )
+        context_rows = self._client.run(
+            '?[value] := *facts_meta["analysis_context_id", value]'
+        )["rows"]
+        return AnalysisSnapshot(
+            str(Path(project_root).resolve()), snapshot_id, revisions,
+            analysis_context_id=(str(context_rows[0][0]) if context_rows else ""),
+        )
+
+    def publish_snapshot(self, snapshot: AnalysisSnapshot) -> None:
+        """Mark a generation current after all relation mutations succeed."""
+        self._client.run(
+            "?[file_path, content_hash, language, module_name, origin, version] <- $rows "
+            ":replace file_revision {file_path => content_hash, language, module_name, "
+            "origin, version}",
+            {"rows": [
+                [revision.file_path, revision.content_hash, revision.language,
+                 revision.module_name, revision.origin,
+                 -1 if revision.version is None else revision.version]
+                for revision in snapshot.files
+            ]},
+        )
+        self._client.run(
+            "?[key, value] <- $rows :put facts_meta {key => value}",
+            {"rows": [
+                ["schema_version", FACT_GRAPH_SCHEMA_VERSION],
+                ["project_root", snapshot.project_root],
+                ["snapshot_id", snapshot.snapshot_id],
+                ["analysis_context_id", snapshot.analysis_context_id],
+            ]},
+        )
+        self.bind_snapshot(snapshot)
+
+    def clear_snapshot_marker(self) -> None:
+        """Make a graph unpublishable before an in-place delta starts."""
+        self._client.run(
+            '?[key] := *facts_meta[key, _], key == "snapshot_id" '
+            ':rm facts_meta {key => }'
+        )
 
     @property
     def client(self) -> Any:
@@ -467,124 +510,51 @@ class FactGraph:
         return self._client
 
     def run_query(self, cozoscript: str) -> dict[str, Any]:
-        """Execute a raw CozoScript query and return the result dict.
+        """Execute a read-only CozoScript query and return the result dict.
 
         The result has keys ``headers`` (list of column names) and
         ``rows`` (list of row tuples).
         """
-        return self._client.run(cozoscript)
+        return self._client.run(cozoscript, read_only=True)
 
     def close(self) -> None:
         """Close the underlying database connection."""
+        db_path = self._db_path if self._close_unlinks_db else None
         try:
-            self._client.close()
+            if self._client is not None:
+                self._client.close()
+            self._client = None
         except Exception:
             logger.debug("Failed to close CozoDB client", exc_info=True)
+        finally:
+            if db_path is not None:
+                try:
+                    Path(db_path).unlink(missing_ok=True)
+                except OSError:
+                    logger.debug("Failed to remove detached graph %s", db_path,
+                                 exc_info=True)
 
     # -- Mutation ---------------------------------------------------------
 
     def add_symbol(self, fact: SymbolFact) -> None:
         """Add a symbol definition fact."""
-        self._client.run(
-            "?[qualified_name, file_path, name, kind, line, end_line, parent] <- "
-            "[[$qn, $fp, $name, $kind, $line, $end, $parent]] "
-            ":put symbol {qualified_name => file_path, name, kind, line, end_line, parent}",
-            {
-                "qn": fact.qualified_name,
-                "fp": fact.file_path,
-                "name": fact.name,
-                "kind": fact.kind,
-                "line": fact.line,
-                "end": fact.end_line,
-                "parent": fact.parent or "",
-            },
-        )
+        self.add_symbols_batch([fact])
 
     def add_call(self, fact: CallFact) -> None:
         """Add a call relationship fact."""
-        params = {
-            "caller": fact.caller_qn,
-            "callee": fact.callee_qn,
-            "fp": fact.file_path,
-            "line": fact.line,
-            "col": fact.col,
-            "fq": fact.func_qn,
-            "bid": fact.block_id,
-        }
-        self._client.run(
-            "?[caller_qn, callee_qn, file_path, line, col, func_qn, block_id] <- "
-            "[[$caller, $callee, $fp, $line, $col, $fq, $bid]] "
-            ":put call {caller_qn, callee_qn, file_path, line, col => func_qn, block_id}",
-            params,
-        )
-        self._client.run(
-            "?[callee_qn, caller_qn, file_path, line, col, func_qn, block_id] <- "
-            "[[$callee, $caller, $fp, $line, $col, $fq, $bid]] "
-            ":put call_by_callee {callee_qn, caller_qn, file_path, line, col => func_qn, block_id}",
-            params,
-        )
-        self._client.run(
-            "?[file_path, caller_qn, callee_qn, line, col, func_qn, block_id] <- "
-            "[[$fp, $caller, $callee, $line, $col, $fq, $bid]] "
-            ":put call_by_file {file_path, caller_qn, callee_qn, line, col => func_qn, block_id}",
-            params,
-        )
+        self.add_calls_batch([fact])
 
     def add_reference(self, fact: ReferenceFact) -> None:
         """Add a reference fact."""
-        params = {
-            "qn": fact.symbol_qn,
-            "fp": fact.file_path,
-            "line": fact.line,
-            "col": fact.col,
-            "kind": fact.ref_kind,
-            "fq": fact.func_qn,
-            "bid": fact.block_id,
-        }
-        self._client.run(
-            "?[symbol_qn, file_path, line, col, ref_kind, func_qn, block_id] <- "
-            "[[$qn, $fp, $line, $col, $kind, $fq, $bid]] "
-            ":put reference {symbol_qn, file_path, line, col => ref_kind, func_qn, block_id}",
-            params,
-        )
-        if fact.func_qn == "" and fact.block_id == -1:
-            self._client.run(
-                "?[symbol_qn, file_path, line] <- [[$qn, $fp, $line]] "
-                ":put module_level_ref {symbol_qn, file_path, line}",
-                params,
-            )
+        self.add_references_batch([fact])
 
     def add_trace_flow(self, fact: TraceFlowFact) -> None:
         """Add a taint flow fact."""
-        self._client.run(
-            "?[source_var, sink_var, label, file_path, func_qn, source_line, sink_line] <- "
-            "[[$sv, $skv, $lbl, $fp, $fq, $sl, $skl]] "
-            ":put trace_flow {source_var, sink_var, label, file_path, func_qn, source_line, sink_line}",
-            {
-                "sv": fact.source_var,
-                "skv": fact.sink_var,
-                "lbl": fact.label,
-                "fp": fact.file_path,
-                "fq": fact.func_qn,
-                "sl": fact.source_line,
-                "skl": fact.sink_line,
-            },
-        )
+        self.add_trace_flows_batch([fact])
 
     def add_type(self, fact: TypeFact) -> None:
         """Add a type binding fact."""
-        self._client.run(
-            "?[symbol_qn, file_path, line, binding_kind, type_str] <- "
-            "[[$qn, $fp, $line, $bk, $ts]] "
-            ":put type_binding {symbol_qn, file_path, line, binding_kind => type_str}",
-            {
-                "qn": fact.symbol_qn,
-                "fp": fact.file_path,
-                "line": fact.line,
-                "bk": fact.binding_kind,
-                "ts": fact.type_str,
-            },
-        )
+        self.add_types_batch([fact])
 
     def add_types_batch(self, facts: list[TypeFact]) -> None:
         """Bulk-insert type binding facts."""
@@ -598,69 +568,94 @@ class FactGraph:
             rows,
         )
 
+    def replace_types_batch(self, facts: list[TypeFact]) -> None:
+        """Replace the type facts in this graph with one inference result.
+
+        Type facts are a derived view, rather than part of syntax extraction,
+        so they are materialized independently on a copy of a source graph.
+        Keeping the replacement atomic prevents a consumer from observing a
+        mixture of two analyzer generations.
+        """
+        operations: list[tuple[str, dict[str, Any]]] = [(
+            "?[symbol_qn, file_path, line, binding_kind] := "
+            "*type_binding[symbol_qn, file_path, line, binding_kind, _] "
+            ":rm type_binding {symbol_qn, file_path, line, binding_kind => }",
+            {},
+        )]
+        if facts:
+            self._put_batch(
+                "type_binding",
+                "symbol_qn, file_path, line, binding_kind, type_str",
+                "symbol_qn, file_path, line, binding_kind => type_str",
+                [[f.symbol_qn, f.file_path, f.line, f.binding_kind, f.type_str]
+                 for f in facts],
+                operations,
+            )
+        self._run_mutations(operations)
+
+    def add_trace_flows_batch(self, facts: list[TraceFlowFact]) -> None:
+        """Bulk-insert taint flow facts."""
+        if not facts:
+            return
+        rows = [
+            [f.source_var, f.sink_var, f.label, f.file_path, f.func_qn,
+             f.source_line, f.sink_line]
+            for f in facts
+        ]
+        self._put_batch(
+            "trace_flow",
+            "source_var, sink_var, label, file_path, func_qn, source_line, sink_line",
+            "source_var, sink_var, label, file_path, func_qn, source_line, sink_line",
+            rows,
+        )
+
     def add_import(self, fact: ImportFact) -> None:
         """Add an import fact."""
-        self._client.run(
-            "?[importing_file, imported_module, imported_name, line, alias] <- "
-            "[[$f, $mod, $name, $line, $alias]] "
-            ":put import {importing_file, imported_module, imported_name, line => alias}",
-            {
-                "f": fact.importing_file,
-                "mod": fact.imported_module,
-                "name": fact.imported_name or "",
-                "line": fact.line,
-                "alias": fact.alias or "",
-            },
-        )
+        self.add_imports_batch([fact])
 
     def add_cfg_edge(self, fact: CfgEdgeFact) -> None:
         """Add a control flow edge fact."""
-        self._client.run(
-            "?[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line] <- "
-            "[[$fp, $fq, $fb, $tb, $ek, $fl, $tl]] "
-            ":put cfg_edge {file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}",
-            {
-                "fp": fact.file_path,
-                "fq": fact.func_qn,
-                "fb": fact.from_block,
-                "tb": fact.to_block,
-                "ek": fact.edge_kind,
-                "fl": fact.from_line,
-                "tl": fact.to_line,
-            },
-        )
+        self.add_cfg_edges_batch([fact])
 
     def add_def_use(self, fact: DefUseFact) -> None:
         """Add a definition-use fact."""
-        self._client.run(
-            "?[file_path, func_qn, var_name, kind, def_block, use_block, def_line, def_col, use_line, use_col] <- "
-            "[[$fp, $fq, $vn, $k, $db, $ub, $dl, $dc, $ul, $uc]] "
-            ":put def_use {file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line => def_col, use_col}",
-            {
-                "fp": fact.file_path,
-                "fq": fact.func_qn,
-                "vn": fact.var_name,
-                "k": fact.kind,
-                "db": fact.def_block,
-                "ub": fact.use_block,
-                "dl": fact.def_line,
-                "dc": fact.def_col,
-                "ul": fact.use_line,
-                "uc": fact.use_col,
-            },
-        )
+        self.add_def_uses_batch([fact])
 
     # -- Batch mutation (for build_from_project performance) ---------------
 
-    def _put_batch(self, relation: str, cols: str, schema: str, rows: list[list[Any]]) -> None:
+    def _put_batch(
+        self,
+        relation: str,
+        cols: str,
+        schema: str,
+        rows: list[list[Any]],
+        operations: list[tuple[str, dict[str, Any]]] | None = None,
+    ) -> None:
         """Run ``?[<cols>] <- $rows :put <relation> {<schema>}``.
 
         Caller is responsible for skipping empty inserts.
         """
-        self._client.run(
+        operation = (
             f"?[{cols}] <- $rows :put {relation} {{{schema}}}",
             {"rows": rows},
         )
+        if operations is None:
+            self._client.run(*operation)
+        else:
+            operations.append(operation)
+
+    def _run_mutations(
+        self, operations: list[tuple[str, dict[str, Any]]]
+    ) -> None:
+        """Run generated mutations in Cozo's synchronous atomic script."""
+        queries, bindings = [], {}
+        for index, (query, params) in enumerate(operations):
+            # These internal statements contain only parameter uses of '$'.
+            prefix = f"mutation_{index}_"
+            queries.append("{" + query.replace("$", "$" + prefix) + "}")
+            bindings.update((prefix + key, value) for key, value in params.items())
+        if queries:
+            self._client.run("\n".join(queries), bindings)
 
     def add_symbols_batch(self, facts: list[SymbolFact]) -> None:
         """Bulk-insert symbol facts."""
@@ -748,13 +743,7 @@ class FactGraph:
 
     def add_cfg_block(self, fact: CfgBlockFact) -> None:
         """Add a CFG block fact."""
-        self._client.run(
-            "?[file_path, func_qn, block_id, is_entry, is_exit] <- "
-            "[[$fp, $fq, $bid, $ie, $ix]] "
-            ":put cfg_block {file_path, func_qn, block_id => is_entry, is_exit}",
-            {"fp": fact.file_path, "fq": fact.func_qn, "bid": fact.block_id,
-             "ie": fact.is_entry, "ix": fact.is_exit},
-        )
+        self.add_cfg_blocks_batch([fact])
 
     def add_cfg_blocks_batch(self, facts: list[CfgBlockFact]) -> None:
         """Bulk-insert CFG block facts."""
@@ -770,16 +759,7 @@ class FactGraph:
 
     def add_method_call(self, fact: MethodCallFact) -> None:
         """Add a method call fact."""
-        self._client.run(
-            "?[file_path, func_qn, receiver, method, block_id, line] <- "
-            "[[$fp, $fq, $rcv, $meth, $bid, $ln]] "
-            ":put method_call {file_path, func_qn, receiver, method, block_id, line}",
-            {
-                "fp": fact.file_path, "fq": fact.func_qn,
-                "rcv": fact.receiver, "meth": fact.method,
-                "bid": fact.block_id, "ln": fact.line,
-            },
-        )
+        self.add_method_calls_batch([fact])
 
     def add_method_calls_batch(self, facts: list[MethodCallFact]) -> None:
         """Bulk-insert method call facts."""
@@ -791,11 +771,7 @@ class FactGraph:
 
     def add_decorator_on(self, fact: DecoratorOnFact) -> None:
         """Add a decorator-on fact."""
-        self._client.run(
-            "?[symbol_qn, decorator] <- [[$sqn, $dec]] "
-            ":put decorator_on {symbol_qn, decorator}",
-            {"sqn": fact.symbol_qn, "dec": fact.decorator},
-        )
+        self.add_decorator_on_batch([fact])
 
     def add_decorator_on_batch(self, facts: list[DecoratorOnFact]) -> None:
         """Bulk-insert decorator-on facts."""
@@ -806,13 +782,7 @@ class FactGraph:
 
     def add_source_loc(self, fact: SourceLocFact) -> None:
         """Add a source location fact."""
-        self._client.run(
-            "?[file_path, loc_kind, loc_id, line, col, end_line, rel_line] <- "
-            "[[$fp, $lk, $lid, $line, $col, $el, $rl]] "
-            ":put source_loc {file_path, loc_kind, loc_id => line, col, end_line, rel_line}",
-            {"fp": fact.file_path, "lk": fact.loc_kind, "lid": fact.loc_id,
-             "line": fact.line, "col": fact.col, "el": fact.end_line, "rl": fact.rel_line},
-        )
+        self.add_source_locs_batch([fact])
 
     def add_source_locs_batch(self, facts: list[SourceLocFact]) -> None:
         """Bulk-insert source location facts."""
@@ -828,13 +798,7 @@ class FactGraph:
 
     def add_func_summary(self, fact: FuncSummaryFact) -> None:
         """Add a function summary fact."""
-        self._client.run(
-            "?[func_qn, param_name, flows_to_return, flows_to_sink, sink_label] <- "
-            "[[$fq, $pn, $ftr, $fts, $sl]] "
-            ":put func_summary {func_qn, param_name => flows_to_return, flows_to_sink, sink_label}",
-            {"fq": fact.func_qn, "pn": fact.param_name, "ftr": fact.flows_to_return,
-             "fts": fact.flows_to_sink, "sl": fact.sink_label},
-        )
+        self.add_func_summaries_batch([fact])
 
     def add_func_summaries_batch(self, facts: list[FuncSummaryFact]) -> None:
         """Bulk-insert function summary facts."""
@@ -850,11 +814,7 @@ class FactGraph:
 
     def add_entry_point_decorator(self, fact: EntryPointDecoratorFact) -> None:
         """Add an entry point decorator fact."""
-        self._client.run(
-            "?[decorator] <- [[$dec]] "
-            ":put entry_point_decorator {decorator}",
-            {"dec": fact.decorator},
-        )
+        self.add_entry_point_decorators_batch([fact])
 
     def add_entry_point_decorators_batch(self, facts: list[EntryPointDecoratorFact]) -> None:
         """Bulk-insert entry point decorator facts."""
@@ -865,11 +825,7 @@ class FactGraph:
 
     def add_entry_point_name(self, fact: EntryPointNameFact) -> None:
         """Add an entry point name fact."""
-        self._client.run(
-            "?[name] <- [[$name]] "
-            ":put entry_point_name {name}",
-            {"name": fact.name},
-        )
+        self.add_entry_point_names_batch([fact])
 
     def add_entry_point_names_batch(self, facts: list[EntryPointNameFact]) -> None:
         """Bulk-insert entry point name facts."""
@@ -880,11 +836,7 @@ class FactGraph:
 
     def add_exported_symbol(self, fact: ExportedSymbolFact) -> None:
         """Add an exported symbol scoped to its defining file."""
-        self._client.run(
-            "?[file_path, qualified_name] <- [[$fp, $qn]] "
-            ":put exported_symbol {file_path, qualified_name}",
-            {"fp": fact.file_path, "qn": fact.qualified_name},
-        )
+        self.add_exported_symbols_batch([fact])
 
     def add_exported_symbols_batch(
         self, facts: list[ExportedSymbolFact | tuple[str, str] | str]
@@ -1333,7 +1285,7 @@ class FactGraph:
         Returns ``(MODULE_LEVEL_FUNC, MODULE_LEVEL_BLOCK)`` for module-level
         code (i.e. when the line does not fall inside any known function).
         """
-        from emend.location_resolver import MODULE_LEVEL_BLOCK, MODULE_LEVEL_FUNC, LocationResolver
+        from emend.location_resolver import LocationResolver
 
         resolver = LocationResolver.from_fact_graph(self, file_path=file_path)
         loc = resolver.resolve(file_path, line)
@@ -2830,7 +2782,12 @@ class FactGraph:
 
     # -- Incremental update / removal -------------------------------------
 
-    def remove_files(self, file_paths: list[str]) -> None:
+    def remove_files(
+        self,
+        file_paths: list[str],
+        *,
+        operations: list[tuple[str, dict[str, Any]]] | None = None,
+    ) -> None:
         """Delete all facts for the given files.
 
         Removes rows from every stored relation that references any of the
@@ -2856,6 +2813,10 @@ class FactGraph:
                 # symbol
                 "?[qualified_name] := *symbol[qualified_name, file_path, _, _, _, _, _], "
                 "file_path == $fp  :rm symbol {qualified_name => }",
+                # search_symbol
+                "?[file_path, module_qualified_name] := "
+                "*search_symbol[file_path, module_qualified_name, _, _, _, _, _, _, _, _, _, _], "
+                "file_path == $fp  :rm search_symbol {file_path, module_qualified_name => }",
                 # call
                 "?[caller_qn, callee_qn, file_path, line, col] := "
                 "*call[caller_qn, callee_qn, file_path, line, col, _, _], "
@@ -2932,15 +2893,32 @@ class FactGraph:
                 "importing_file == $fp  :rm import "
                 "{importing_file, imported_module, imported_name, line => }",
             ):
+                if operations is not None:
+                    operations.append((query, {"fp": fp}))
+                    continue
                 try:
                     self._client.run(query, {"fp": fp})
                 except Exception:
                     logger.debug("Fact removal query failed for %s", fp, exc_info=True)
 
-    def _insert_extracted_file_facts(self, rows: dict[str, list[list[Any]]]) -> None:
+    def _insert_extracted_file_facts(
+        self,
+        extracted: ExtractedFile | dict[str, list[list[Any]]],
+        *,
+        operations: list[tuple[str, dict[str, Any]]] | None = None,
+    ) -> None:
         """Insert the language-neutral rows returned by the canonical extractor."""
+        # Dict support is retained only for injected legacy/test extractors.
+        rows = extracted.rows if isinstance(extracted, ExtractedFile) else extracted
         specs = {
             "fg_sym": ("symbol", "qualified_name, file_path, name, kind, line, end_line, parent", "qualified_name => file_path, name, kind, line, end_line, parent"),
+            "search_sym": (
+                "search_symbol",
+                "file_path, module_qualified_name, name, qualified_name, kind, "
+                "line, end_line, depth, parent, signature, returns, decorators",
+                "file_path, module_qualified_name => name, qualified_name, kind, "
+                "line, end_line, depth, parent, signature, returns, decorators",
+            ),
             "dec": ("decorator_on", "symbol_qn, decorator", "symbol_qn, decorator"),
             "fg_refs": ("reference", "symbol_qn, file_path, line, col, ref_kind, func_qn, block_id", "symbol_qn, file_path, line, col => ref_kind, func_qn, block_id"),
             "calls": ("call", "caller_qn, callee_qn, file_path, line, col, func_qn, block_id", "caller_qn, callee_qn, file_path, line, col => func_qn, block_id"),
@@ -2963,7 +2941,9 @@ class FactGraph:
         for key, (relation, cols, schema) in specs.items():
             relation_rows = rows[key]
             if relation_rows:
-                self._put_batch(relation, cols, schema, relation_rows)
+                self._put_batch(
+                    relation, cols, schema, relation_rows, operations
+                )
 
         entries: dict[tuple[str, str], set[int]] = {}
         adjacency: dict[tuple[str, str, int], list[int]] = {}
@@ -2976,8 +2956,21 @@ class FactGraph:
         if reachable:
             self._put_batch(
                 "reachable_block", "file_path, func_qn, block_id",
-                "file_path, func_qn, block_id", reachable,
+                "file_path, func_qn, block_id", reachable, operations,
             )
+
+    def replace_extracted(
+        self,
+        extracted_files: list[ExtractedFile],
+        *,
+        stored_paths: list[str],
+    ) -> None:
+        """Replace path-owned rows using precomputed extraction artifacts."""
+        operations: list[tuple[str, dict[str, Any]]] = []
+        self.remove_files(stored_paths, operations=operations)
+        for extracted in extracted_files:
+            self._insert_extracted_file_facts(extracted, operations=operations)
+        self._run_mutations(operations)
 
     def update_files(
         self,
@@ -2998,8 +2991,6 @@ class FactGraph:
         insertion only.
         """
         from emend import emend_core as _rust
-        from emend.transform.cache import _extract_file_facts
-
         # 1. Delete existing facts for all files in the batch.
         resolved_project_root = Path(project_root).resolve() if project_root else None
 
@@ -3012,15 +3003,15 @@ class FactGraph:
                     pass
             return str(resolved)
 
-        self.remove_files([stored_path(fp) for fp, _ in file_list])
-
         # 2. Extract and insert new facts per file.  The persisted index uses
         # this same extractor, so analysis semantics cannot drift by builder.
+        extracted_files = []
         for abs_file_path, content in file_list:
             rel_path = stored_path(abs_file_path)
             if project_root:
-                from emend.transform.project_iter import _file_to_module
-                module_name = _file_to_module(abs_file_path, project_root)
+                from emend.project_config import module_name_for_file
+
+                module_name = module_name_for_file(abs_file_path, project_root)
             else:
                 module_name = Path(abs_file_path).stem
             ext = Path(abs_file_path).suffix.lstrip(".") or "py"
@@ -3032,12 +3023,15 @@ class FactGraph:
                 logger.debug("Could not build scope resolver for %s", abs_file_path, exc_info=True)
                 resolver = None
 
-            rows = _extract_file_facts(
+            extracted_files.append(_extract_file_facts(
                 abs_file_path, rel_path, ext, content,
                 project_root or str(Path(abs_file_path).parent),
                 module_name, scope_resolver=resolver,
-            )
-            self._insert_extracted_file_facts(rows)
+            ))
+        self.replace_extracted(
+            extracted_files,
+            stored_paths=[stored_path(fp) for fp, _ in file_list],
+        )
 
     # -- File-list builder ------------------------------------------------
 
@@ -3094,525 +3088,17 @@ class FactGraph:
         This full-rebuild API and the persisted index share the same
         per-file extractor.
         """
-        from emend.transform import (
-            _collect_all_source_files,
-            _find_project_root,
-            detect_project_languages,
+        from emend.fact_graph_compat import build_from_project
+
+        return build_from_project(
+            cls, project_path, language, db_path, languages, include_types
         )
-
-        graph = cls(db_path=db_path)
-        project_root = _find_project_root(project_path)
-
-        # Resolve which languages to collect.
-        # Priority: explicit ``languages`` list > singular ``language`` > auto-detect.
-        if languages is not None:
-            effective_languages = list(languages)
-        elif language is not None:
-            effective_languages = [language]
-        else:
-            effective_languages = detect_project_languages(project_root)
-
-        source_files = _collect_all_source_files(project_root, languages=effective_languages)
-
-        # The scope resolver may fail if pointed at a repo root with
-        # incompatible config.  Use the user-supplied project_path as
-        # the resolver root (typically ``src/pkg``), falling back to
-        # the detected project_root.
-        resolver_root = str(Path(project_path).resolve())
-
-        file_list: list[tuple[str, str]] = []
-        for abs_file_path in source_files:
-            try:
-                file_list.append((
-                    abs_file_path,
-                    Path(abs_file_path).read_text(encoding="utf-8"),
-                ))
-            except (OSError, UnicodeDecodeError):
-                logger.debug("Could not read %s", abs_file_path, exc_info=True)
-
-        graph.update_files(
-            file_list,
-            project_root=project_root,
-            resolver_root=resolver_root,
-        )
-
-        # -- Resolve builtins.* references using import facts -----------
-        # When a scope resolver can't resolve a cross-file import (common
-        # for TypeScript/Rust), references end up as "builtins.X".  We
-        # resolve these using the import facts to find the real callee QN.
-        graph._resolve_builtin_refs()
-
-        # -- Type binding facts (via type oracle) ----------------------
-        # Populate after all files are processed so the type oracle can
-        # see the full project. Fact-only consumers (notably deadcode) keep
-        # this lazy because type inference is much slower than syntax/facts.
-        # Gracefully skips when no type checker is available.
-        if include_types:
-            try:
-                from emend.type_oracle import create_type_oracle, parse_type_string
-
-                oracle = create_type_oracle(engine="auto")
-                if oracle.is_available():
-                    project_root_path = Path(project_root).resolve()
-                    for abs_file_path in source_files:
-                        try:
-                            rel_path = str(Path(abs_file_path).relative_to(project_root_path))
-                        except ValueError:
-                            rel_path = abs_file_path
-                        try:
-                            file_types = oracle.infer_file(Path(abs_file_path), project_root=project_root_path)
-                        except BUG_EXCEPTIONS:
-                            raise
-                        except Exception:
-                            logger.debug("Type oracle failed for %s", abs_file_path, exc_info=True)
-                            continue
-                        type_facts: list[TypeFact] = []
-                        for binding in file_types.bindings:
-                            td = parse_type_string(binding.raw_type)
-                            type_facts.append(TypeFact(
-                                symbol_qn=binding.name,
-                                type_str=td.name,  # top-level constructor
-                                file_path=rel_path,
-                                line=binding.line,
-                                binding_kind=binding.binding_kind,
-                            ))
-                        graph.add_types_batch(type_facts)
-            except BUG_EXCEPTIONS:
-                raise
-            except Exception:
-                logger.debug("Could not populate type bindings", exc_info=True)
-
-        return graph
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers for build_from_project
 # ---------------------------------------------------------------------------
 
-def _walk_symbols(
-    out: list[SymbolFact],
-    dec_out: list[DecoratorOnFact],
-    raw_symbols: list[dict[str, Any]],
-    file_path: str,
-    module_name: str,
-    parent_qn: str | None,
-) -> None:
-    """Recursively walk Rust symbol dicts and collect SymbolFact entries."""
-    # Normalize the module name to use dots so that symbol QNs are
-    # consistent with reference QNs (which go through _normalize_qn()).
-    normalized_module = _normalize_qn(module_name)
-    for d in raw_symbols:
-        kind = d.get("kind", "")
-        if kind in ("variable", "reference"):
-            continue
-
-        name = d["name"]
-        path_parts = list(d.get("path", []))
-        if path_parts:
-            qn = f"{normalized_module}.{'.'.join(path_parts)}"
-        else:
-            qn = f"{normalized_module}.{name}"
-
-        out.append(SymbolFact(
-            file_path=file_path,
-            name=name,
-            qualified_name=qn,
-            kind=kind,
-            line=d["line"],
-            end_line=d["end_line"],
-            parent=parent_qn,
-        ))
-
-        # Extract decorators — strip @ prefix and arguments so that
-        # ``@router.get('/users')`` becomes ``router.get`` and also
-        # stores the basename ``get`` for broader matching.
-        for dec_name in (d.get("decorators", []) or []):
-            cleaned = dec_name
-            if cleaned.startswith("@"):
-                cleaned = cleaned[1:]
-            if "(" in cleaned:
-                cleaned = cleaned[:cleaned.index("(")]
-            cleaned = cleaned.strip()
-            dec_out.append(DecoratorOnFact(symbol_qn=qn, decorator=cleaned))
-            # Also store the basename for broader matching
-            basename = cleaned.rsplit(".", 1)[-1] if "." in cleaned else None
-            if basename and basename != cleaned:
-                dec_out.append(DecoratorOnFact(symbol_qn=qn, decorator=basename))
-
-        children = d.get("children", [])
-        if children:
-            _walk_symbols(out, dec_out, children, file_path, module_name, parent_qn=qn)
-
-
-def _map_ref_kind(kind: str) -> Literal["read", "write", "call", "import", "definition"]:
-    """Map a Rust scope-resolver reference kind to our fact model."""
-    if kind == "definition":
-        return "definition"
-    if kind == "call":
-        return "call"
-    if kind == "write":
-        return "write"
-    if kind == "import":
-        return "import"
-    return "read"
-
-
-def _build_symbol_line_index(
-    sym_facts: list[SymbolFact],
-    file_path: str,
-) -> list[tuple[int, int, str]]:
-    """Build a sorted list of (start_line, end_line, qn) for function symbols."""
-    entries: list[tuple[int, int, str]] = []
-    for sym in sym_facts:
-        if sym.file_path == file_path and sym.kind in (
-            "function", "async_function", "method", "async_method"
-        ):
-            entries.append((sym.line, sym.end_line, sym.qualified_name))
-    entries.sort(key=lambda e: e[0], reverse=True)
-    return entries
-
-
-def _enclosing_symbol(
-    symbol_ranges: list[tuple[int, int, str]],
-    line: int,
-) -> str | None:
-    """Return the qualified name of the innermost function containing *line*."""
-    for start, end, qn in symbol_ranges:
-        if start <= line <= end:
-            return qn
-    return None
-
-
-def _normalize_qn(qn: str) -> str:
-    """Normalize language-specific QN separators to dots.
-
-    The Rust scope resolver uses ``::`` (Rust) and ``/`` (TypeScript) as
-    separators, but ``_walk_symbols`` always uses ``.``.
-
-    Also strips quotes and normalizes relative import paths (e.g.
-    ``'./target'.process`` → ``target.process``).
-    """
-    qn = qn.replace("'", "").replace('"', "")
-    qn = qn.replace("::", ".").replace("/", ".")
-    # Most QNs contain no repeated dots. Avoid paying for a regex on every
-    # reference in large indexes; relative paths are the uncommon slow path.
-    while ".." in qn:
-        qn = qn.replace("..", ".")
-    qn = qn.lstrip(".")
-    return qn
-
-
-def _find_containing_block(
-    block_ranges: list[tuple],
-    line: int,
-) -> tuple[str, int]:
-    """Find the (func_qn, block_id) containing a given line.
-
-    Returns ``("", -1)`` for module-level code.
-
-    *block_ranges* must be sorted by ``(start_line, -(end_line - start_line))``
-    — the default ordering produced by ``_build_facts_db``.  Uses binary search
-    to find the insertion point, then scans backwards through candidates whose
-    start_line <= line, picking the tightest (smallest span) enclosing block.
-    """
-    import bisect
-
-    if not block_ranges:
-        return ("", -1)
-
-    # bisect on start_line: find rightmost block whose start_line <= line.
-    # block_ranges[i] = (func_qn, block_id, start_line, end_line, ...)
-    # sorted by start_line ascending.
-    lo, hi = 0, len(block_ranges)
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if block_ranges[mid][2] <= line:
-            lo = mid + 1
-        else:
-            hi = mid
-    # lo is the first index where start_line > line.
-    # Scan backwards from lo-1 to find all blocks containing the line.
-    best_func_qn = ""
-    best_block_id = -1
-    best_span = float("inf")
-
-    for i in range(lo - 1, -1, -1):
-        start_line_i = block_ranges[i][2]
-        # Once start_line is far enough before line that no block starting
-        # here could still be the tightest, stop.  But blocks can be large,
-        # so we must check end_line.  We can stop when
-        # start_line < line - best_span (any block starting here with
-        # span < best_span would end before line).
-        if best_span < float("inf") and start_line_i < line - best_span:
-            break
-        end_line_i = block_ranges[i][3]
-        if end_line_i >= line:
-            span = end_line_i - start_line_i
-            if span < best_span:
-                best_span = span
-                best_func_qn = block_ranges[i][0]
-                best_block_id = block_ranges[i][1]
-
-    return best_func_qn, best_block_id
-
-
-def _extract_imports_python(file_path: str, content: str) -> list[ImportFact]:
-    """Extract imports from Python source using tree-sitter via ``emend_core``."""
-    from emend import emend_core
-
-    resolver = getattr(_extract_imports_python, "_resolver", None)
-    if resolver is None:
-        resolver = emend_core.PyScopeResolver(".", extension="py")
-        _extract_imports_python._resolver = resolver
-    facts: list[ImportFact] = []
-    for imp in resolver.collect_structured_imports_from_source(content, ext="py"):
-        for name, alias in imp["names"]:
-            facts.append(ImportFact(
-                importing_file=file_path,
-                imported_module=name if imp["is_plain"] else "." * imp["level"] + imp["module"],
-                imported_name=None if imp["is_plain"] else name,
-                alias=alias,
-                line=imp["start_line"] + 1,
-            ))
-    return facts
-
-
-# ---------------------------------------------------------------------------
-# TypeScript / JavaScript import extraction
-# ---------------------------------------------------------------------------
-
-import re as _re
-def _extract_imports_typescript(file_path: str, content: str) -> list[ImportFact]:
-    """Extract imports from TypeScript/JavaScript source using tree-sitter.
-
-    Uses ``PyScopeResolver.imports_in_file()`` (Rust-backed) for ES module
-    import extraction.  Side-effect imports, re-exports, and CommonJS
-    ``require()`` calls are not covered by the scope resolver and are silently
-    omitted.  Line numbers are not available from this API and are recorded as
-    ``0``.
-    """
-    facts: list[ImportFact] = []
-    imports: list = []
-    try:
-        from emend import emend_core as ec  # type: ignore[attr-defined]
-        ext = Path(file_path).suffix.lstrip(".") or "ts"
-        if ext not in ("ts", "tsx", "js", "jsx"):
-            ext = "ts"
-        resolver = ec.PyScopeResolver(".", ext)
-        resolver.index_file(file_path, content)
-        imports = resolver.imports_in_file(file_path)
-    except Exception:
-        logger.debug(
-            "emend_core TypeScript import extraction failed for %s",
-            file_path,
-            exc_info=True,
-        )
-    for local_name, module_path, imported_name, is_star in imports:
-        # Strip surrounding quotes that the scope resolver includes in the
-        # module path (e.g. '"./foo"' → './foo').
-        clean_module = module_path.strip("\"'")
-        if not clean_module:
-            continue
-        facts.append(ImportFact(
-            importing_file=file_path,
-            imported_module=clean_module,
-            imported_name="*" if is_star else (imported_name or None),
-            alias=local_name if local_name != imported_name else None,
-            line=0,  # scope resolver does not return line numbers here
-        ))
-    return facts
-
-
-def _extract_imports_rust(file_path: str, content: str) -> list[ImportFact]:
-    """Extract imports from Rust source using tree-sitter via ``emend_core``.
-
-    Handles ``use`` declarations (plain, aliased, glob, grouped/nested),
-    ``pub use``, ``pub(crate) use``, and ``mod name;`` declarations.
-    """
-    facts: list[ImportFact] = []
-    imports: list = []
-    try:
-        from emend import emend_core as ec  # type: ignore[attr-defined]
-        resolver = getattr(_extract_imports_rust, "_resolver", None)
-        if resolver is None:
-            resolver = ec.PyScopeResolver(".", extension="rs")
-            _extract_imports_rust._resolver = resolver  # type: ignore[attr-defined]
-        imports = resolver.collect_rust_imports_from_source(content, ext="rs")
-    except Exception:
-        logger.debug(
-            "emend_core Rust import extraction failed for %s",
-            file_path,
-            exc_info=True,
-        )
-    for local_name, module_path, imported_name, is_star, line in imports:
-        if not module_path and not is_star:
-            continue
-        alias = local_name if (imported_name and local_name != imported_name) else None
-        facts.append(ImportFact(
-            importing_file=file_path,
-            imported_module=module_path,
-            imported_name="*" if is_star else (imported_name or None),
-            alias=alias,
-            line=line,
-        ))
-    return facts
-
-
-def _extract_imports(file_path: str, content: str) -> list[ImportFact]:
-    """Extract import facts from *content*, dispatching by language.
-
-    - Python files: tree-sitter via ``emend_core``
-    - TypeScript / JavaScript files: tree-sitter via ``PyScopeResolver``
-    - Rust files: tree-sitter via ``emend_core`` (``collect_rust_imports_from_source``)
-    - All others: treated as Python (best-effort)
-    """
-    from emend.language_registry import detect_language
-    lang = detect_language(file_path)
-    if lang == "typescript":
-        return _extract_imports_typescript(file_path, content)
-    elif lang == "rust":
-        return _extract_imports_rust(file_path, content)
-    else:
-        return _extract_imports_python(file_path, content)
-
-
-def _resolve_cfg_func_qn(
-    cfg: Any,
-    sym_facts: list[SymbolFact],
-    rel_path: str,
-    module_name: str,
-) -> str:
-    """Resolve the qualified name of a CFG's function.
-
-    Matches ``cfg.func_name`` against *sym_facts* first by name and line range
-    (disambiguating same-named methods across classes; CFG lines are
-    0-indexed, symbol lines 1-indexed), then by name only, and finally falls
-    back to ``module_name.func_name``.
-    """
-    func_name = cfg.func_name
-    cfg_start = cfg.func_start_line + 1
-    matching = [
-        sf for sf in sym_facts
-        if sf.name == func_name and sf.file_path == rel_path
-    ]
-    for sf in matching:
-        if sf.line <= cfg_start <= (sf.end_line or sf.line):
-            return sf.qualified_name
-    return matching[0].qualified_name if matching else f"{module_name}.{func_name}"
-
-
-def _bfs_reachable_blocks(
-    entries_by_func: dict[tuple[str, str], set[int]],
-    adj: dict[tuple[str, str, int], list[int]],
-) -> list[list]:
-    """Return ``[file_path, func_qn, block_id]`` rows reachable from entry blocks.
-
-    Runs a per-function traversal over the CFG adjacency map *adj*, seeded by
-    the entry block ids in *entries_by_func*.
-    """
-    reachable_rows: list[list] = []
-    for (fp, fq), entry_set in entries_by_func.items():
-        visited: set[int] = set()
-        stack = list(entry_set)
-        while stack:
-            bid = stack.pop()
-            if bid in visited:
-                continue
-            visited.add(bid)
-            reachable_rows.append([fp, fq, bid])
-            for nb in adj.get((fp, fq, bid), []):
-                if nb not in visited:
-                    stack.append(nb)
-    return reachable_rows
-
-
-def build_def_use_facts(
-    cfgs: list[Any],
-    sym_facts: list[SymbolFact],
-    rel_path: str,
-    module_name: str,
-) -> list[DefUseFact]:
-    """Extract def-use facts from CFG blocks.
-
-    Covers only intra-function code; module-level def-use facts must be
-    synthesised separately from scope-resolver references.
-    """
-    def_use_facts: list[DefUseFact] = []
-
-    for cfg in cfgs:
-        func_qn = _resolve_cfg_func_qn(cfg, sym_facts, rel_path, module_name)
-
-        defs_map: dict[str, list[tuple[int, int, int, str]]] = {}
-        for block in cfg.get_blocks():
-            bid = block["id"]
-            for d in block.get("defs", []) or []:
-                var_name = d[0] if isinstance(d, (list, tuple)) else d
-                dline = d[1] if isinstance(d, (list, tuple)) and len(d) > 1 else 0
-                dcol = d[2] if isinstance(d, (list, tuple)) and len(d) > 2 else 0
-                dkind = d[3] if isinstance(d, (list, tuple)) and len(d) > 3 else "write"
-                defs_map.setdefault(var_name, []).append((bid, dline, dcol, dkind))
-
-        for block in cfg.get_blocks():
-            bid = block["id"]
-            for u in block.get("uses", []) or []:
-                var_name = u[0] if isinstance(u, (list, tuple)) else u
-                uline = u[1] if isinstance(u, (list, tuple)) and len(u) > 1 else 0
-                ucol = u[2] if isinstance(u, (list, tuple)) and len(u) > 2 else 0
-                if var_name in defs_map:
-                    for def_bid, dl, dc, dk in defs_map[var_name]:
-                        def_use_facts.append(DefUseFact(
-                            file_path=rel_path,
-                            func_qn=func_qn,
-                            var_name=var_name,
-                            kind=dk,
-                            def_block=def_bid,
-                            use_block=bid,
-                            def_line=dl,
-                            def_col=dc,
-                            use_line=uline,
-                            use_col=ucol,
-                        ))
-
-    return def_use_facts
-
-
-def _build_method_call_facts(
-    refs: list[tuple],
-    rel_path: str,
-    block_ranges: list,
-    *,
-    normalize_qn: bool,
-) -> list[MethodCallFact]:
-    """Extract MethodCallFacts from dotted-name call references.
-
-    The scope resolver emits 1-based line numbers, but CFG def-use facts use
-    0-based.  Method-call lines are emitted as 0-based so same-line Datalog
-    taint comparisons work.
-    """
-    from emend.location_resolver import MODULE_LEVEL_BLOCK as _MLB
-    from emend.location_resolver import MODULE_LEVEL_FUNC as _MLF
-
-    facts: list[MethodCallFact] = []
-    for qn, line, _col, _offset, _end_offset, kind, _ann in refs:
-        if normalize_qn:
-            qn = _normalize_qn(qn)
-        if _map_ref_kind(kind) != "call" or "." not in qn:
-            continue
-        parts = qn.rsplit(".", 1)
-        if len(parts) != 2:
-            continue
-        fq, bid = _find_containing_block(block_ranges, line)
-        if fq == "" and bid == -1:
-            fq, bid = _MLF, _MLB
-        facts.append(MethodCallFact(
-            file_path=rel_path,
-            func_qn=fq,
-            receiver=parts[0].rsplit(".", 1)[-1],
-            method=parts[1],
-            block_id=bid,
-            line=line - 1,
-        ))
-    return facts
 
 
 # ---------------------------------------------------------------------------
@@ -3920,7 +3406,7 @@ def _compile_sequence_query(
     # CozoScript doesn't support "as" aliases in the output — use positional
     # We'll just output all step lines plus fp and fq
     rules.append(
-        f'?[fp, fq, first_line, last_line] := '
+        '?[fp, fq, first_line, last_line] := '
         + ", ".join(join_clauses)
         + f', first_line = {first_line}'
         + f', last_line = {last_line}'

@@ -171,13 +171,17 @@ def find_nested_definitions(
     max_depth: int | None = None,
     *,
     ext: str | None = None,
+    source_override: str | None = None,
 ) -> list[NestedSymbol]:
     """Walk source and find all class/function definitions with nesting info.
 
     Uses tree-sitter via the Rust extension for parsing.
     """
-    with open(filepath) as f:
-        source = f.read()
+    if source_override is None:
+        with open(filepath) as f:
+            source = f.read()
+    else:
+        source = source_override
 
     ext = ext or Path(filepath).suffix.lstrip('.') or 'py'
     rust_syms = emend_core.collect_symbols_from_str(
