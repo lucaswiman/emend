@@ -59,14 +59,12 @@ class AnalysisStore:
         self._connection_lock = threading.RLock()
         self._refresh_lock = threading.RLock()
         self._disk_graph: object | None = None
-        self._disk_path: Path | None = None
         self._overlay_graph: object | None = None
-        self._overlay_path: Path | None = None
         self._overlays: dict[str, tuple[object | None, int, str]] = {}
         # Type bindings are an optional derived view.  Keep each one on its
         # own immutable graph so asking for types never mutates the fast base
         # generation or invalidates readers that still hold it.
-        self._typed_graph: tuple[tuple[str, str, str], object, Path] | None = None
+        self._typed_graph: tuple[tuple[str, str, str], object] | None = None
         self._type_oracle: tuple[tuple[str, str], object] | None = None
         self._observed_files: dict[
             str, tuple[int, int, int, int, int, str, str, str]
@@ -129,27 +127,49 @@ class AnalysisStore:
         """Create the owner directory and keep generated data out of VCS."""
         self._prepare_cache_directory(self.cache_dir)
 
+    def _temporary_db_path(self, prefix: str) -> Path:
+        """Allocate an empty private database in the owner cache."""
+        self.ensure_cache_directory()
+        fd, name = tempfile.mkstemp(prefix=prefix, suffix=".db", dir=self.cache_dir)
+        os.close(fd)
+        return Path(name)
+
+    @staticmethod
+    def _unlink(path: Path | None) -> None:
+        """Best-effort removal for an obsolete private generation."""
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _graph_path(graph: object | None) -> Path | None:
+        path = getattr(graph, "_db_path", None)
+        return Path(path) if path is not None else None
+
+    @staticmethod
+    def _stat_identity(stat: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
+            getattr(stat, "st_ctime_ns", int(stat.st_ctime * 1_000_000_000)),
+        )
+
     def close(self) -> None:
         self._discard_overlay_graph(close=True)
         self._overlays.clear()
         if self._typed_graph is not None:
-            typed_graph, typed_path = self._typed_graph[1:]
+            typed_graph = self._typed_graph[1]
+            typed_path = self._graph_path(typed_graph)
             typed_graph.close()
-            try:
-                typed_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            self._unlink(typed_path)
             self._typed_graph = None
         self._type_oracle = None
         if self._disk_graph is not None:
+            disk_path = self._graph_path(self._disk_graph)
             self._disk_graph.close()
             self._disk_graph = None
-        if self._disk_path is not None:
-            try:
-                self._disk_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            self._disk_path = None
+            self._unlink(disk_path)
         with self._connection_lock:
             if self._connection is not None:
                 self._connection.close()
@@ -306,10 +326,7 @@ class AnalysisStore:
             module_name = self._module_name(
                 file_path, language, module_separators.get(language)
             )
-            identity = (
-                stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
-                getattr(stat, "st_ctime_ns", int(stat.st_ctime * 1_000_000_000)),
-            )
+            identity = self._stat_identity(stat)
             if old is not None and old[:5] == identity:
                 content_hash = old[5]
             else:
@@ -322,20 +339,8 @@ class AnalysisStore:
                     except (OSError, UnicodeDecodeError):
                         break
                     after = os.stat(file_path)
-                    before_id = (
-                        before.st_dev, before.st_ino, before.st_size,
-                        before.st_mtime_ns, getattr(
-                            before, "st_ctime_ns",
-                            int(before.st_ctime * 1_000_000_000),
-                        ),
-                    )
-                    after_id = (
-                        after.st_dev, after.st_ino, after.st_size,
-                        after.st_mtime_ns, getattr(
-                            after, "st_ctime_ns",
-                            int(after.st_ctime * 1_000_000_000),
-                        ),
-                    )
+                    before_id = self._stat_identity(before)
+                    after_id = self._stat_identity(after)
                     if before_id == after_id:
                         identity = after_id
                         break
@@ -548,37 +553,26 @@ class AnalysisStore:
 
     def _snapshot_copy(self, source_path: Path, prefix: str) -> Path:
         """Create a stable private copy of one SQLite generation."""
-        fd, name = tempfile.mkstemp(
-            prefix=prefix, suffix=".db", dir=self.cache_dir
-        )
-        os.close(fd)
-        path = Path(name)
+        path = self._temporary_db_path(prefix)
         try:
             self._copy_sqlite(source_path, path)
         except BaseException:
-            path.unlink(missing_ok=True)
+            self._unlink(path)
             raise
         return path
 
-    def _set_disk_graph(self, graph: object, path: Path) -> None:
-        previous_path = self._disk_path
-        self._disk_graph, self._disk_path = graph, path
-        if previous_path is not None and previous_path != path:
-            try:
-                previous_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+    def _set_disk_graph(self, graph: object) -> None:
+        previous_path = self._graph_path(self._disk_graph)
+        self._disk_graph = graph
+        if previous_path != self._graph_path(graph):
+            self._unlink(previous_path)
 
     def _updated_graph(self, previous, snapshot: AnalysisSnapshot, contents):
         """Apply one revision delta, equally for disk and overlay generations."""
         from emend.fact_graph import FactGraph
 
         if previous is None:
-            fd, name = tempfile.mkstemp(
-                prefix="facts-next-", suffix=".db", dir=self.cache_dir
-            )
-            os.close(fd)
-            path = Path(name)
+            path = self._temporary_db_path("facts-next-")
             graph = FactGraph(db_path=str(path))
             before = {}
         else:
@@ -610,7 +604,7 @@ class AnalysisStore:
             return graph, path
         except BaseException:
             graph.close()
-            path.unlink(missing_ok=True)
+            self._unlink(path)
             raise
 
     def _ensure_disk_facts(self, scan: _DiskScan):
@@ -625,7 +619,7 @@ class AnalysisStore:
                 published = candidate.published_snapshot(self.project_root)
                 if published is not None:
                     candidate.bind_snapshot(published, source_loader=self._revision_source)
-                    self._set_disk_graph(candidate, path)
+                    self._set_disk_graph(candidate)
                     graph = candidate
             except (OSError, RuntimeError, sqlite3.Error):
                 logger.debug("Could not reuse published facts", exc_info=True)
@@ -633,8 +627,7 @@ class AnalysisStore:
                 if graph is not candidate or graph is None:
                     if candidate is not None:
                         candidate.close()
-                    if path is not None:
-                        path.unlink(missing_ok=True)
+                    self._unlink(path)
         if graph is not None and graph.snapshot.snapshot_id == scan.snapshot.snapshot_id:
             return graph
         candidate, path = self._updated_graph(graph, scan.snapshot, scan.contents)
@@ -644,25 +637,20 @@ class AnalysisStore:
             os.replace(publish_path, self.facts_path)
         except BaseException:
             candidate.close()
-            path.unlink(missing_ok=True)
+            self._unlink(path)
             raise
         finally:
-            if publish_path is not None:
-                publish_path.unlink(missing_ok=True)
-        self._set_disk_graph(candidate, path)
+            self._unlink(publish_path)
+        self._set_disk_graph(candidate)
         return candidate
 
     def _discard_overlay_graph(self, *, close: bool = False) -> None:
-        graph, path = self._overlay_graph, self._overlay_path
+        graph = self._overlay_graph
+        path = self._graph_path(graph)
         self._overlay_graph = None
-        self._overlay_path = None
         if close and graph is not None:
             graph.close()
-        if path is not None:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        self._unlink(path)
 
     def _clone_graph(self, source_path: Path, snapshot: AnalysisSnapshot):
         """Copy a stable SQLite snapshot without serializing every fact."""
@@ -673,7 +661,7 @@ class AnalysisStore:
             graph = FactGraph(db_path=str(path))
             graph.bind_snapshot(snapshot, source_loader=self._revision_source)
         except BaseException:
-            path.unlink(missing_ok=True)
+            self._unlink(path)
             raise
         return graph, path
 
@@ -707,12 +695,7 @@ class AnalysisStore:
             requested = Path(db_path).resolve() if db_path is not None else None
             owns_path = requested is None
             if requested is None:
-                self.ensure_cache_directory()
-                fd, name = tempfile.mkstemp(
-                    prefix="facts-detached-", suffix=".db", dir=self.cache_dir
-                )
-                os.close(fd)
-                target = Path(name)
+                target = self._temporary_db_path("facts-detached-")
             else:
                 target = requested
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -720,18 +703,17 @@ class AnalysisStore:
             owned_paths = {
                 path.resolve()
                 for path in (
-                    self.facts_path, self._disk_path, self._overlay_path,
-                    self._typed_graph[2] if self._typed_graph is not None else None,
+                    self.facts_path,
+                    self._graph_path(self._disk_graph),
+                    self._graph_path(self._overlay_graph),
+                    self._graph_path(self._typed_graph[1])
+                    if self._typed_graph is not None else None,
                 )
                 if path is not None
             }
             # Never let a legacy caller mutate an owner-managed generation.
             if target == source or target in owned_paths:
-                fd, name = tempfile.mkstemp(
-                    prefix="facts-detached-", suffix=".db", dir=self.cache_dir
-                )
-                os.close(fd)
-                target = Path(name)
+                target = self._temporary_db_path("facts-detached-")
                 owns_path = True
             try:
                 self._copy_sqlite(source, target)
@@ -762,7 +744,7 @@ class AnalysisStore:
                 detached._close_unlinks_db = owns_path
                 return detached
             except BaseException:
-                target.unlink(missing_ok=True)
+                self._unlink(target)
                 raise
 
     def _overlay_snapshot(self, disk: AnalysisSnapshot) -> AnalysisSnapshot:
@@ -788,17 +770,14 @@ class AnalysisStore:
         if (self._overlay_graph is not None
                 and self._overlay_graph.snapshot.snapshot_id == snapshot.snapshot_id):
             return self._overlay_graph
-        previous_path = self._overlay_path
+        previous_path = self._graph_path(self._overlay_graph)
         graph, path = self._updated_graph(
             self._overlay_graph or disk_graph, snapshot,
             {path: value[2] for path, value in self._overlays.items()},
         )
-        self._overlay_graph, self._overlay_path = graph, path
-        if previous_path is not None:
-            try:
-                previous_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        self._overlay_graph = graph
+        if previous_path != path:
+            self._unlink(previous_path)
         return graph
 
     def _typed_facts(self, graph, engine: str, *, _retry: bool = False):
@@ -858,7 +837,7 @@ class AnalysisStore:
         else:
             paths = [Path(revision.file_path) for revision in graph.snapshot.files]
 
-        base_path = self._overlay_path if self._overlays else self._disk_path
+        base_path = self._graph_path(graph)
         if base_path is None:
             return graph
         typed, typed_path = self._clone_graph(base_path, graph.snapshot)
@@ -887,7 +866,7 @@ class AnalysisStore:
                         ))
             except BUG_EXCEPTIONS:
                 typed.close()
-                typed_path.unlink(missing_ok=True)
+                self._unlink(typed_path)
                 raise
             except Exception:
                 logger.debug("Could not populate type bindings", exc_info=True)
@@ -895,7 +874,7 @@ class AnalysisStore:
             typed.replace_types_batch(type_facts)
         except BaseException:
             typed.close()
-            typed_path.unlink(missing_ok=True)
+            self._unlink(typed_path)
             raise
         # An analyzer subprocess can outlive a source edit.  Do not publish
         # its answer under the generation captured before that subprocess
@@ -908,21 +887,19 @@ class AnalysisStore:
         )
         if current_id != graph.snapshot.snapshot_id:
             typed.close()
-            typed_path.unlink(missing_ok=True)
+            self._unlink(typed_path)
             if _retry:
                 raise RuntimeError("source changed during typed analysis")
             return self._typed_facts(
                 self.query_facts(), engine, _retry=True
             )
         previous = self._typed_graph
-        self._typed_graph = (key, typed, typed_path)
-        if previous is not None and previous[2] != typed_path:
+        self._typed_graph = (key, typed)
+        previous_path = self._graph_path(previous[1]) if previous is not None else None
+        if previous_path != typed_path:
             # The old graph may still be held by a reader.  SQLite keeps its
             # open handle valid after unlinking the private backing file.
-            try:
-                previous[2].unlink(missing_ok=True)
-            except OSError:
-                pass
+            self._unlink(previous_path)
         return typed
 
     def query_facts(
