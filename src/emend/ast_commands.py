@@ -1,7 +1,7 @@
 """AST-based refactoring commands reimplemented using transform primitives."""
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
@@ -147,60 +147,17 @@ def _print_symbol_flat(symbols: list[TreeSymbol], parent_path: str = "", max_dep
 
 
 def dicts_to_tree_symbols(dicts: list[dict], module_path: str, separator: str = ".") -> list[TreeSymbol]:
-    """Build a TreeSymbol hierarchy from flat or nested definitions."""
-    root_symbols = []
-    symbol_map = {} # path_tuple -> TreeSymbol
+    """Build a consumer-owned tree from the shared immutable projection."""
+    from emend.symbol_projection import symbol_hierarchy
 
-    def flatten(definitions: list[dict]):
-        for definition in definitions:
-            yield definition
-            yield from flatten(definition.get("children", []))
-
-    mod_parts = tuple(module_path.split(separator))
-
-    # First pass: create all symbols
-    for d in flatten(dicts):
-        full_path = tuple(d.get("path", [d["name"]]))
-        
-        # Strip module path from the beginning if it matches
-        if full_path[:len(mod_parts)] == mod_parts:
-            path = full_path[len(mod_parts):]
-        else:
-            path = full_path
-            
-        if not path:
-            continue
-            
-        sym = TreeSymbol(
-            name=path[-1],
-            kind=d["kind"],
-            signature=d.get("signature"),
-            type_annotation=d.get("type_annotation"),
-            children=[],
-            depth=len(path) - 1,
-            line=d.get("line") or None,
-            end_line=d.get("end_line") or None,
-            path=list(path),
+    def view(symbol):
+        return TreeSymbol(
+            symbol.name, symbol.kind, symbol.signature, symbol.type_annotation,
+            [view(child) for child in symbol.children], len(symbol.path) - 1,
+            symbol.line or None, symbol.end_line or None, list(symbol.path),
         )
-        symbol_map[path] = sym
 
-    # Second pass: build parent-child links
-    # Sort paths by length so parents are processed or at least we know where children go
-    sorted_paths = sorted(symbol_map.keys(), key=len)
-    
-    for path in sorted_paths:
-        sym = symbol_map[path]
-        if len(path) == 1:
-            root_symbols.append(sym)
-        else:
-            parent_path = path[:-1]
-            if parent_path in symbol_map:
-                symbol_map[parent_path].children.append(sym)
-            else:
-                # Parent not in definitions (e.g. from an import or outside module)
-                root_symbols.append(sym)
-
-    return root_symbols
+    return [view(symbol) for symbol in symbol_hierarchy(dicts, module_path, separator)]
 
 
 def derive_module_path(
@@ -276,18 +233,13 @@ def collect_symbols(
             
             def find_selected(syms, target_parts):
                 result = []
-                for s in syms:
-                    if s.name == target_parts[0]:
-                        if len(target_parts) == 1:
-                            # Found the target, include it and all its children
-                            result.append(s)
-                        else:
-                            # Recurse into children to find the next part
-                            selected_children = find_selected(s.children, target_parts[1:])
-                            if selected_children:
-                                # Keep this ancestor but only with the selected children
-                                s.children = selected_children
-                                result.append(s)
+                for symbol in syms:
+                    if symbol.name != target_parts[0]:
+                        continue
+                    if len(target_parts) == 1:
+                        result.append(symbol)
+                    elif children := find_selected(symbol.children, target_parts[1:]):
+                        result.append(replace(symbol, children=children))
                 return result
             
             symbols = find_selected(symbols, selector_parts)

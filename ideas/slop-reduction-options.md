@@ -13,6 +13,7 @@ tests; ranges overlap and must not be added. Larger changes remain proposals.
 | One analysis snapshot/cache owner | #231 owns freshness and shared content artifacts, including worktree/edit/revert reuse. Its correctness machinery increased LOC; this is not a future 2–4K deletion claim. |
 | One compiled rule model/flow evaluator | #232 removed competing rule/flow paths; subsequent cleanup must build on that evaluator. |
 | Behavioral-contract suites | #233 removed 922 total lines including its guide, with structural oracles and mutation checks. The original 5–8K hypothesis was not achieved. |
+| One symbol projection | Implemented above #234: immutable native records, caller-owned views, and AnalysisStore-owned content reuse. Syntax/resolver inventory differences remain intentional; the earlier 300–750-line estimate was not achieved. |
 
 The misc follow-up keeps small behavior-preserving changes: common native
 parser dispatch and symbol formatting, ordered config-layer merging, removal
@@ -25,7 +26,6 @@ Compatibility exports and public command aliases remain intact.
 | --- | --- | --- |
 | One CLI/MCP command service boundary | 4,058 CLI + 1,733 MCP source lines | 400–1,000 |
 | Config-driven embedded-language extraction | 1,588 DSL source + 2,050 dedicated test lines | 700–1,300 |
-| One symbol projection for lookup/index/summary | 264 `ast_utils` + 302 `ast_commands` + 542 `query` + 1,498 `transform/index` lines | 300–750 |
 | One benchmark harness | 1,666 lines in five benchmark/support modules | 300–600 |
 | Canonical/generated user reference | 7,088 lines under `docs/` and `ideas/` | 800–1,500, documentation only |
 
@@ -57,19 +57,7 @@ Unicode, multiline/malformed literals, magic comments and standalone files.
 Benchmark project extraction. No supported language is removed, and no
 structural parser is replaced with raw-source regexes.
 
-### 3. One symbol projection
-
-`ast_utils.py`, `ast_commands.py`, `query.py` and `transform/index.py` adapt
-tree-sitter symbol data for different consumers. Inventory those conversions,
-then provide one immutable projection with consumer-specific views for paths,
-signatures and hierarchy. Delete only genuinely repeated conversion/remapping
-code. This is not another cache owner: reuse `AnalysisStore` and its snapshots.
-
-Gate on exact CLI/editor output, nested/anonymous symbols, module-qualified
-names, unsaved overlays, identical content at distinct paths, worktrees and
-incremental/full-index parity. No extra parse/type work on warm queries.
-
-### 4. Benchmark and documentation consolidation
+### 3. Benchmark and documentation consolidation
 
 `bench_django.py` (467), `bench_cozodb.py` (449), `goto_def_audit.py` (507),
 `django_checkout.py` (196), and `bench_utils.py` (47) are candidates for shared

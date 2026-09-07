@@ -214,7 +214,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
     """
     import pickle
     import zlib
-    from emend.query import _collect_symbols as _collect_symbols_ts
+    from emend.analysis_store import collect_symbol_info as _collect_symbols_ts
     from emend import emend_core as _rust
     from emend.dsl import (
         detect_dsl_regions, extract_sql_symbols,

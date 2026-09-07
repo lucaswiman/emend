@@ -20,11 +20,18 @@ from collections.abc import Callable, Iterable
 from emend.analysis_snapshot import AnalysisSnapshot, ExtractedFile, FileRevision, TypeFact
 from emend.errors import BUG_EXCEPTIONS
 from emend.project_config import find_project_root
+from emend.symbol_projection import SymbolInfo, _symbol_info_view
 
 
 EXTRACTION_ARTIFACT_VERSION = "4"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 logger = logging.getLogger(__name__)
+
+def collect_symbol_info(filepath: Path, source: str) -> list[SymbolInfo]:
+    """Project exact source into fresh, caller-owned lookup/index results."""
+    store = AnalysisStore.existing_for_path(filepath) or AnalysisStore.open(filepath.parent)
+    return _symbol_info_view(store.symbols(source, filepath.suffix.lstrip('.') or 'py'), str(filepath))
+
 
 
 @dataclass(frozen=True)
@@ -70,6 +77,48 @@ class AnalysisStore:
             str, tuple[int, int, int, int, int, str, str, str]
         ] = {}
         self._observed_loaded = False
+        self._symbols: dict[tuple[str, str], tuple] = {}
+
+    def symbols(self, source: str, ext: str = "py") -> tuple:
+        """Return immutable syntax symbols; content identity never includes a path."""
+        from emend import emend_core
+        from emend.language_registry import detect_language
+        from emend.symbol_projection import project_symbols
+
+        key = (ext, hashlib.sha256(source.encode()).hexdigest())
+        with self._connection_lock:
+            if key not in self._symbols:
+                symbols = None
+                try:
+                    conn = self.artifact_connection()
+                    conn.execute(
+                        "CREATE TABLE IF NOT EXISTS symbol_projection "
+                        "(identity TEXT PRIMARY KEY, payload BLOB NOT NULL)"
+                    )
+                    config = self._language_config_id(detect_language(f"file.{ext}") or "python")
+                    identity = repr(("2", EXTRACTION_ARTIFACT_VERSION, key, config))
+                    row = conn.execute(
+                        "SELECT payload FROM symbol_projection WHERE identity = ?", (identity,)
+                    ).fetchone()
+                    if row is not None:
+                        symbols = pickle.loads(zlib.decompress(row[0]))
+                    else:
+                        symbols = project_symbols(emend_core.collect_symbols_from_str(source, ext=ext))
+                        conn.execute(
+                            "INSERT OR IGNORE INTO symbol_projection VALUES (?, ?)",
+                            (identity, zlib.compress(pickle.dumps(symbols))),
+                        )
+                        conn.commit()
+                except (OSError, sqlite3.Error):
+                    logger.debug("Symbol artifact cache unavailable", exc_info=True)
+                    if self._artifact_connection is not None:
+                        self._artifact_connection.rollback()
+                if symbols is None:
+                    symbols = project_symbols(emend_core.collect_symbols_from_str(source, ext=ext))
+                if len(self._symbols) >= 256:
+                    del self._symbols[next(iter(self._symbols))]
+                self._symbols[key] = symbols
+            return self._symbols[key]
 
     @classmethod
     def open(cls, project_root: str | Path = ".") -> "AnalysisStore":
@@ -171,6 +220,7 @@ class AnalysisStore:
             self._disk_graph = None
             self._unlink(disk_path)
         with self._connection_lock:
+            self._symbols.clear()
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None

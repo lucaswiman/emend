@@ -64,6 +64,42 @@ def _linked_worktrees(tmp_path):
     return main, linked
 
 
+@pytest.mark.parametrize("persistent", [True, False])
+def test_symbol_projection_reuses_revisions_without_sharing_mutable_views(tmp_path, monkeypatch, persistent):
+    from emend import emend_core
+    from emend.ast_utils import find_nested_definitions
+    from emend.query import _collect_symbols
+
+    main, linked = _linked_worktrees(tmp_path)
+    if not persistent:
+        def unavailable(self):
+            raise PermissionError("read-only source tree")
+        monkeypatch.setattr(AnalysisStore, "artifact_connection", unavailable)
+    source = "@decorate\ndef original(x: int):\n    return x\n"
+    native = emend_core.collect_symbols_from_str
+    calls = []
+
+    def tracked(text, **kwargs):
+        calls.append(text)
+        return native(text, **kwargs)
+
+    monkeypatch.setattr(emend_core, "collect_symbols_from_str", tracked)
+    for root in (main, linked, main):
+        path = root / "sample.py"
+        symbols = _collect_symbols(path, source)
+        assert [(s.path, s.decorators, s.parameters) for s in symbols] == [
+            (f"{path}::original", ["@decorate"], ["x: int"]),
+        ]
+        symbols[0].decorators.clear()
+        symbols[0].parameters.clear()
+        nested = find_nested_definitions(str(path), source_override=source)
+        assert [(s.name, s.parameters) for s in nested] == [("original", ["x"])]
+        nested[0].parameters.clear()
+        assert _collect_symbols(path, source.replace("original", "edited"))[0].name == "edited"
+        AnalysisStore.open(root).close()
+    assert calls == [source, source.replace("original", "edited")] * (1 if persistent else 3)
+
+
 class _FakeTypeOracle(TypeOracle):
     calls = 0
 
