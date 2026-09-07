@@ -194,16 +194,21 @@ impl PyCozoDb {
     /// Run a CozoScript query with optional parameters.
     ///
     /// Returns a dict with "headers" (list[str]) and "rows" (list[list]).
-    #[pyo3(signature = (query, params=None))]
+    #[pyo3(signature = (query, params=None, *, read_only=false))]
     fn run(
         &self,
         py: Python<'_>,
         query: &str,
         params: Option<&Bound<'_, PyDict>>,
+        read_only: bool,
     ) -> PyResult<PyObject> {
         let result = self
             .db
-            .run_script(query, py_params(params)?, ScriptMutability::Mutable)
+            .run_script(query, py_params(params)?, if read_only {
+                ScriptMutability::Immutable
+            } else {
+                ScriptMutability::Mutable
+            })
             .map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("CozoDB query error: {}", e))
             })?;

@@ -532,6 +532,20 @@ def test_check_cli_uses_rules_yaml(tmp_path, monkeypatch):
 class TestDatalogCheckColumnIndexing:
     """Named result columns preserve zero indices, precedence and locations."""
 
+    def test_query_cannot_mutate_shared_facts(self, tmp_path):
+        from emend.analysis_store import AnalysisStore
+
+        (tmp_path / "app.py").write_text("def live(): pass\n")
+        store = AnalysisStore.open(tmp_path)
+        before = store.query_facts().symbols()
+        check = DatalogCheck(
+            "?[name] := *symbol[name, _, _, _, _, _, _] :rm symbol {name => }"
+        )
+        policy = Policy("immutable", "", "error", [check])
+        violation, = run_policy_checks([], [policy], project_path=str(tmp_path))
+        assert violation.check_name == "datalog:error"
+        assert store.query_facts().symbols() == before
+
     @pytest.mark.parametrize("headers,row,expected", [
         (["file_path", "line", "col", "message"], ["app.py", 42, 7, "problem"],
          ("app.py", 42, 7, "problem")),

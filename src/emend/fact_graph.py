@@ -515,12 +515,12 @@ class FactGraph:
         return self._client
 
     def run_query(self, cozoscript: str) -> dict[str, Any]:
-        """Execute a raw CozoScript query and return the result dict.
+        """Execute a read-only CozoScript query and return the result dict.
 
         The result has keys ``headers`` (list of column names) and
         ``rows`` (list of row tuples).
         """
-        return self._client.run(cozoscript)
+        return self._client.run(cozoscript, read_only=True)
 
     def close(self) -> None:
         """Close the underlying database connection."""
