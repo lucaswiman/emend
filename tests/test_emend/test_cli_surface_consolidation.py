@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+import pytest
 from typer.testing import CliRunner
 
 from emend.cli import app
@@ -16,48 +17,27 @@ def _strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", text)
 
 
-def test_root_help_keeps_mcp_public_and_hides_query():
-    """`mcp` remains a public command; raw query moves under `tool`."""
-    result = runner.invoke(app, ["--help"])
+@pytest.mark.parametrize(
+    ("command", "present", "absent"),
+    [
+        pytest.param([], ("│ mcp", "│ tool"), ("│ query",), id="root"),
+        pytest.param(["edit"], ("Commands", "rm", "replace"), (), id="edit"),
+        pytest.param(
+            ["analyze"], ("Commands", "refs", "graph", "impact"), (), id="analyze"
+        ),
+        pytest.param(["tool"], ("Commands",), ("query",), id="tool"),
+    ],
+)
+def test_grouped_help_contract(command, present, absent):
+    """Each command group exposes its promised surface and hides removals."""
+    result = runner.invoke(app, [*command, "--help"])
     stdout = _strip_ansi(result.stdout)
 
     assert result.exit_code == 0
-    assert "│ mcp" in stdout
-    assert "│ tool" in stdout
-    assert "│ query" not in stdout
-
-
-def test_edit_group_has_subcommands():
-    """Mutation workflow is grouped under `edit`."""
-    result = runner.invoke(app, ["edit", "--help"])
-    stdout = _strip_ansi(result.stdout)
-
-    assert result.exit_code == 0
-    assert "Commands" in stdout
-    assert "rm" in stdout
-    assert "replace" in stdout
-
-
-def test_analyze_group_has_subcommands():
-    """Read-only analysis workflow is grouped under `analyze`."""
-    result = runner.invoke(app, ["analyze", "--help"])
-    stdout = _strip_ansi(result.stdout)
-
-    assert result.exit_code == 0
-    assert "Commands" in stdout
-    assert "refs" in stdout
-    assert "graph" in stdout
-    assert "impact" in stdout
-
-
-def test_tool_group_no_query_subcommand():
-    """Raw datalog query has been removed from the public CLI (Phase 1)."""
-    result = runner.invoke(app, ["tool", "--help"])
-    stdout = _strip_ansi(result.stdout)
-
-    assert result.exit_code == 0
-    assert "Commands" in stdout
-    assert "query" not in stdout
+    for text in present:
+        assert text in stdout
+    for text in absent:
+        assert text not in stdout
 
 
 def test_rm_alias_still_works_without_edit_prefix(tmp_path):

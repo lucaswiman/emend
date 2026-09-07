@@ -38,29 +38,21 @@ from emend.type_oracle import (
 class TestOracleTypeConstraintParsing:
     """Test that :type[X] and :returns[X] are parsed correctly by the grammar."""
 
-    def test_simple_type_constraint(self):
-        pat = parse_pattern("$X:type[Connection]")
-        assert len(pat.metavars) == 1
-        assert pat.metavars[0].name == "X"
-        assert pat.metavars[0].type_constraint == "type[Connection]"
-
-    def test_returns_constraint(self):
-        pat = parse_pattern("$F:returns[str]")
-        assert len(pat.metavars) == 1
-        assert pat.metavars[0].name == "F"
-        assert pat.metavars[0].type_constraint == "returns[str]"
-
-    def test_nested_brackets(self):
-        pat = parse_pattern("$X:type[Optional[str]]")
-        assert pat.metavars[0].type_constraint == "type[Optional[str]]"
-
-    def test_parameterized_type(self):
-        pat = parse_pattern("$X:type[list[int]]")
-        assert pat.metavars[0].type_constraint == "type[list[int]]"
-
-    def test_dict_type(self):
-        pat = parse_pattern("$X:type[dict[str, int]]")
-        assert pat.metavars[0].type_constraint == "type[dict[str, int]]"
+    @pytest.mark.parametrize(
+        "pattern, name, constraint",
+        [
+            pytest.param("$X:type[Connection]", "X", "type[Connection]", id="type"),
+            pytest.param("$F:returns[str]", "F", "returns[str]", id="returns"),
+            pytest.param("$X:type[Optional[str]]", "X", "type[Optional[str]]", id="nested"),
+            pytest.param("$X:type[list[int]]", "X", "type[list[int]]", id="parameterized"),
+            pytest.param("$X:type[dict[str, int]]", "X", "type[dict[str, int]]", id="multiple-params"),
+        ],
+    )
+    def test_oracle_constraint(self, pattern, name, constraint):
+        pat = parse_pattern(pattern)
+        assert [(mv.name, mv.type_constraint) for mv in pat.metavars] == [
+            (name, constraint)
+        ]
 
     def test_mixed_constraints(self):
         """Oracle constraint + normal constraint in same pattern."""
@@ -71,11 +63,11 @@ class TestOracleTypeConstraintParsing:
         assert mv_by_name["X"].type_constraint == "type[bytes]"
         assert mv_by_name["Y"].type_constraint == "int"
 
-    def test_regular_constraints_still_work(self):
-        """Verify existing constraint types are not broken."""
-        for tc in ["int", "str", "float", "identifier", "call", "attr", "stmt", "expr", "any"]:
-            pat = parse_pattern(f"$X:{tc}")
-            assert pat.metavars[0].type_constraint == tc
+    @pytest.mark.parametrize(
+        "constraint", ["int", "str", "float", "identifier", "call", "attr", "stmt", "expr", "any"]
+    )
+    def test_regular_constraints_still_work(self, constraint):
+        assert parse_pattern(f"$X:{constraint}").metavars[0].type_constraint == constraint
 
     def test_negated_constraints_still_work(self):
         pat = parse_pattern("$X:!int")
@@ -91,31 +83,31 @@ class TestOracleTypeConstraintParsing:
 class TestOracleConstraintHelpers:
     """Test is_oracle_type_constraint and parse_oracle_type_constraint."""
 
-    def test_is_oracle_type(self):
-        assert is_oracle_type_constraint("type[Connection]") is True
-        assert is_oracle_type_constraint("returns[str]") is True
-        assert is_oracle_type_constraint("type[list[int]]") is True
+    @pytest.mark.parametrize(
+        "constraint, expected",
+        [
+            pytest.param("type[Connection]", True, id="type"),
+            pytest.param("returns[str]", True, id="returns"),
+            pytest.param("type[list[int]]", True, id="nested"),
+            pytest.param("int", False, id="builtin"),
+            pytest.param("str", False, id="string"),
+            pytest.param(None, False, id="none"),
+            pytest.param("expr", False, id="structural"),
+        ],
+    )
+    def test_is_oracle_constraint(self, constraint, expected):
+        assert is_oracle_type_constraint(constraint) is expected
 
-    def test_is_not_oracle(self):
-        assert is_oracle_type_constraint("int") is False
-        assert is_oracle_type_constraint("str") is False
-        assert is_oracle_type_constraint(None) is False
-        assert is_oracle_type_constraint("expr") is False
-
-    def test_parse_type(self):
-        kind, ts = parse_oracle_type_constraint("type[Connection]")
-        assert kind == "type"
-        assert ts == "Connection"
-
-    def test_parse_returns(self):
-        kind, ts = parse_oracle_type_constraint("returns[Optional[str]]")
-        assert kind == "returns"
-        assert ts == "Optional[str]"
-
-    def test_parse_parameterized(self):
-        kind, ts = parse_oracle_type_constraint("type[dict[str, int]]")
-        assert kind == "type"
-        assert ts == "dict[str, int]"
+    @pytest.mark.parametrize(
+        "constraint, expected",
+        [
+            pytest.param("type[Connection]", ("type", "Connection"), id="type"),
+            pytest.param("returns[Optional[str]]", ("returns", "Optional[str]"), id="returns-nested"),
+            pytest.param("type[dict[str, int]]", ("type", "dict[str, int]"), id="type-multiple-params"),
+        ],
+    )
+    def test_parse_oracle_constraint(self, constraint, expected):
+        assert parse_oracle_type_constraint(constraint) == expected
 
 
 class TestOracleConstraintCompilation:

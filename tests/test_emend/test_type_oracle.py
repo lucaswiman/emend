@@ -51,6 +51,34 @@ def write_pyrefly_config(tmp_path):
     (tmp_path / "pyrefly.toml").write_text('[default]\nproject_includes = ["."]\n')
 
 
+def _type_shape(descriptor):
+    """Literal contract snapshot, independent of parsing and display logic."""
+    if descriptor is None:
+        return None
+    return (
+        descriptor.kind,
+        descriptor.name,
+        tuple(_type_shape(param) for param in descriptor.params),
+        _type_shape(descriptor.return_type),
+    )
+
+
+def _named(name):
+    return ("named", name, (), None)
+
+
+def _parameterized(name, *params):
+    return ("parameterized", name, params, None)
+
+
+def _union(*members):
+    return ("union", "", members, None)
+
+
+def _callable(params, returns):
+    return ("callable", "", params, returns)
+
+
 # ---------------------------------------------------------------------------
 # TypeDescriptor parsing
 # ---------------------------------------------------------------------------
@@ -196,27 +224,30 @@ class TestSplitParams:
 # ---------------------------------------------------------------------------
 
 class TestTypeDescriptorDisplay:
-
-    def test_named(self):
-        assert TypeDescriptor.named("int").display() == "int"
-
-    def test_parameterized(self):
-        td = TypeDescriptor.parameterized("list", (TypeDescriptor.named("int"),))
-        assert td.display() == "list[int]"
-
-    def test_union(self):
-        td = TypeDescriptor.union((TypeDescriptor.named("str"), TypeDescriptor.named("None")))
-        assert td.display() == "str | None"
-
-    def test_callable(self):
-        td = TypeDescriptor.callable_(
-            (TypeDescriptor.named("str"),),
-            TypeDescriptor.named("int"),
-        )
-        assert td.display() == "(str) -> int"
-
-    def test_unknown(self):
-        assert TypeDescriptor.unknown().display() == "Unknown"
+    @pytest.mark.parametrize(
+        "descriptor, expected",
+        [
+            pytest.param(TypeDescriptor.named("int"), "int", id="named"),
+            pytest.param(
+                TypeDescriptor.parameterized("list", (TypeDescriptor.named("int"),)),
+                "list[int]",
+                id="parameterized",
+            ),
+            pytest.param(
+                TypeDescriptor.union((TypeDescriptor.named("str"), TypeDescriptor.named("None"))),
+                "str | None",
+                id="union",
+            ),
+            pytest.param(
+                TypeDescriptor.callable_((TypeDescriptor.named("str"),), TypeDescriptor.named("int")),
+                "(str) -> int",
+                id="callable",
+            ),
+            pytest.param(TypeDescriptor.unknown(), "Unknown", id="unknown"),
+        ],
+    )
+    def test_display(self, descriptor, expected):
+        assert descriptor.display() == expected
 
 
 # ---------------------------------------------------------------------------
@@ -1403,49 +1434,36 @@ class TestParseTypeStringEdgeCases:
 
 
 class TestSplitUnionEdgeCases:
-
-    def test_union_inside_nested_brackets(self):
-        """Union inside double-nested brackets should not split."""
-        parts = _split_union("dict[str, list[int | float]] | None")
-        assert parts == ["dict[str, list[int | float]]", "None"]
-
-    def test_single_type_no_pipe(self):
-        parts = _split_union("int")
-        assert parts == ["int"]
-
-    def test_pipe_without_spaces(self):
-        """'int|str' (no spaces) should NOT split."""
-        parts = _split_union("int|str")
-        assert parts == ["int|str"]
-
-    def test_three_way_union(self):
-        parts = _split_union("int | str | None")
-        assert parts == ["int", "str", "None"]
-
-    def test_union_with_callable(self):
-        """Callable inside parens should not be split."""
-        parts = _split_union("(int) -> str | None")
-        assert parts == ["(int) -> str", "None"]
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            pytest.param("dict[str, list[int | float]] | None", ["dict[str, list[int | float]]", "None"], id="nested"),
+            pytest.param("int", ["int"], id="no-pipe"),
+            pytest.param("int|str", ["int|str"], id="unspaced-pipe"),
+            pytest.param("int | str | None", ["int", "str", "None"], id="three-way"),
+            pytest.param("(int) -> str | None", ["(int) -> str", "None"], id="callable"),
+        ],
+    )
+    def test_split_contract(self, raw, expected):
+        assert _split_union(raw) == expected
 
 
 class TestSplitParamsEdgeCases:
-
-    def test_empty_string(self):
-        parts = _split_params("")
-        assert parts == []
-
-    def test_deeply_nested(self):
-        parts = _split_params("dict[str, list[int]], tuple[float, complex]")
-        assert parts == ["dict[str, list[int]]", "tuple[float, complex]"]
-
-    def test_callable_param(self):
-        parts = _split_params("(int) -> str, int")
-        assert parts == ["(int) -> str", "int"]
-
-    def test_trailing_comma(self):
-        parts = _split_params("int, str, ")
-        assert len(parts) == 3
-        assert parts[2] == ""
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            pytest.param("", [], id="empty"),
+            pytest.param(
+                "dict[str, list[int]], tuple[float, complex]",
+                ["dict[str, list[int]]", "tuple[float, complex]"],
+                id="deeply-nested",
+            ),
+            pytest.param("(int) -> str, int", ["(int) -> str", "int"], id="callable"),
+            pytest.param("int, str, ", ["int", "str", ""], id="trailing-comma"),
+        ],
+    )
+    def test_split_contract(self, raw, expected):
+        assert _split_params(raw) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -1978,183 +1996,54 @@ class TestTypesCLIEdgeCases:
 
 
 class TestParseTypeStringTypeScript:
-    """Tests for TypeScript-specific type string parsing."""
+    """Named TypeScript scenarios preserve the complete normalized structure."""
 
-    def test_ts_simple_string(self):
-        td = parse_type_string("string")
-        assert td.kind == "named"
-        assert td.name == "string"
-
-    def test_ts_number(self):
-        td = parse_type_string("number")
-        assert td.kind == "named"
-        assert td.name == "number"
-
-    def test_ts_boolean(self):
-        td = parse_type_string("boolean")
-        assert td.kind == "named"
-        assert td.name == "boolean"
-
-    def test_ts_void(self):
-        td = parse_type_string("void")
-        assert td.kind == "named"
-        assert td.name == "void"
-
-    def test_ts_array_shorthand(self):
-        td = parse_type_string("string[]")
-        assert td.kind == "parameterized"
-        assert td.name == "Array"
-        assert len(td.params) == 1
-        assert td.params[0].name == "string"
-
-    def test_ts_nested_array_shorthand(self):
-        td = parse_type_string("number[][]")
-        assert td.kind == "parameterized"
-        assert td.name == "Array"
-        assert td.params[0].kind == "parameterized"
-        assert td.params[0].name == "Array"
-        assert td.params[0].params[0].name == "number"
-
-    def test_ts_angle_bracket_generic(self):
-        td = parse_type_string("Array<string>")
-        assert td.kind == "parameterized"
-        assert td.name == "Array"
-        assert len(td.params) == 1
-        assert td.params[0].name == "string"
-
-    def test_ts_promise(self):
-        td = parse_type_string("Promise<string>")
-        assert td.kind == "parameterized"
-        assert td.name == "Promise"
-        assert td.params[0].name == "string"
-
-    def test_ts_map_generic(self):
-        td = parse_type_string("Map<string, number>")
-        assert td.kind == "parameterized"
-        assert td.name == "Map"
-        assert len(td.params) == 2
-        assert td.params[0].name == "string"
-        assert td.params[1].name == "number"
-
-    def test_ts_nested_generics(self):
-        td = parse_type_string("Map<string, Array<number>>")
-        assert td.kind == "parameterized"
-        assert td.name == "Map"
-        assert td.params[1].kind == "parameterized"
-        assert td.params[1].name == "Array"
-        assert td.params[1].params[0].name == "number"
-
-    def test_ts_union_with_null(self):
-        td = parse_type_string("string | null")
-        assert td.kind == "union"
-        assert len(td.params) == 2
-        assert td.params[0].name == "string"
-        assert td.params[1].name == "null"
-
-    def test_ts_arrow_function(self):
-        td = parse_type_string("(a: string, b: number) => boolean")
-        assert td.kind == "callable"
-        assert len(td.params) == 2
-        assert td.params[0].name == "string"
-        assert td.params[1].name == "number"
-        assert td.return_type.name == "boolean"
-
-    def test_ts_arrow_void_return(self):
-        td = parse_type_string("(x: string) => void")
-        assert td.kind == "callable"
-        assert td.return_type.name == "void"
-
-    def test_ts_generic_array_shorthand(self):
-        """Promise<string>[] parses as Array[Promise[string]]."""
-        td = parse_type_string("Promise<string>[]")
-        assert td.kind == "parameterized"
-        assert td.name == "Array"
-        assert td.params[0].kind == "parameterized"
-        assert td.params[0].name == "Promise"
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            pytest.param("string", _named("string"), id="string"),
+            pytest.param("number", _named("number"), id="number"),
+            pytest.param("boolean", _named("boolean"), id="boolean"),
+            pytest.param("void", _named("void"), id="void"),
+            pytest.param("string[]", _parameterized("Array", _named("string")), id="array-shorthand"),
+            pytest.param("number[][]", _parameterized("Array", _parameterized("Array", _named("number"))), id="nested-array"),
+            pytest.param("Array<string>", _parameterized("Array", _named("string")), id="angle-generic"),
+            pytest.param("Promise<string>", _parameterized("Promise", _named("string")), id="promise"),
+            pytest.param("Map<string, number>", _parameterized("Map", _named("string"), _named("number")), id="map"),
+            pytest.param("Map<string, Array<number>>", _parameterized("Map", _named("string"), _parameterized("Array", _named("number"))), id="nested-generics"),
+            pytest.param("string | null", _union(_named("string"), _named("null")), id="nullable-union"),
+            pytest.param("(a: string, b: number) => boolean", _callable((_named("string"), _named("number")), _named("boolean")), id="arrow"),
+            pytest.param("(x: string) => void", _callable((_named("string"),), _named("void")), id="void-arrow"),
+            pytest.param("Promise<string>[]", _parameterized("Array", _parameterized("Promise", _named("string"))), id="generic-array"),
+        ],
+    )
+    def test_normalized_descriptor(self, raw, expected):
+        assert _type_shape(parse_type_string(raw)) == expected
 
 
 class TestParseTypeStringRust:
-    """Tests for Rust-specific type string parsing."""
+    """Named Rust scenarios preserve the complete normalized structure."""
 
-    def test_rust_i32(self):
-        td = parse_type_string("i32")
-        assert td.kind == "named"
-        assert td.name == "i32"
-
-    def test_rust_string(self):
-        td = parse_type_string("String")
-        assert td.kind == "named"
-        assert td.name == "String"
-
-    def test_rust_bool(self):
-        td = parse_type_string("bool")
-        assert td.kind == "named"
-        assert td.name == "bool"
-
-    def test_rust_reference(self):
-        td = parse_type_string("&str")
-        assert td.kind == "parameterized"
-        assert td.name == "&"
-        assert td.params[0].name == "str"
-
-    def test_rust_mut_reference(self):
-        td = parse_type_string("&mut String")
-        assert td.kind == "parameterized"
-        assert td.name == "&"
-        assert td.params[0].name == "String"
-
-    def test_rust_lifetime_reference(self):
-        td = parse_type_string("&'a str")
-        assert td.kind == "parameterized"
-        assert td.name == "&"
-        assert td.params[0].name == "str"
-
-    def test_rust_vec(self):
-        td = parse_type_string("Vec<String>")
-        assert td.kind == "parameterized"
-        assert td.name == "Vec"
-        assert td.params[0].name == "String"
-
-    def test_rust_option(self):
-        td = parse_type_string("Option<i32>")
-        assert td.kind == "parameterized"
-        assert td.name == "Option"
-        assert td.params[0].name == "i32"
-
-    def test_rust_result(self):
-        td = parse_type_string("Result<String, Error>")
-        assert td.kind == "parameterized"
-        assert td.name == "Result"
-        assert len(td.params) == 2
-        assert td.params[0].name == "String"
-        assert td.params[1].name == "Error"
-
-    def test_rust_box_dyn(self):
-        td = parse_type_string("Box<dyn Display>")
-        assert td.kind == "parameterized"
-        assert td.name == "Box"
-        assert td.params[0].name == "dyn Display"
-
-    def test_rust_nested_generic(self):
-        td = parse_type_string("Vec<Option<String>>")
-        assert td.kind == "parameterized"
-        assert td.name == "Vec"
-        assert td.params[0].kind == "parameterized"
-        assert td.params[0].name == "Option"
-        assert td.params[0].params[0].name == "String"
-
-    def test_rust_ref_to_vec(self):
-        td = parse_type_string("&Vec<String>")
-        assert td.kind == "parameterized"
-        assert td.name == "&"
-        assert td.params[0].kind == "parameterized"
-        assert td.params[0].name == "Vec"
-
-    def test_rust_callable(self):
-        td = parse_type_string("(i32, i32) -> i32")
-        assert td.kind == "callable"
-        assert len(td.params) == 2
-        assert td.return_type.name == "i32"
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            pytest.param("i32", _named("i32"), id="i32"),
+            pytest.param("String", _named("String"), id="string"),
+            pytest.param("bool", _named("bool"), id="bool"),
+            pytest.param("&str", _parameterized("&", _named("str")), id="reference"),
+            pytest.param("&mut String", _parameterized("&", _named("String")), id="mutable-reference"),
+            pytest.param("&'a str", _parameterized("&", _named("str")), id="lifetime-reference"),
+            pytest.param("Vec<String>", _parameterized("Vec", _named("String")), id="vec"),
+            pytest.param("Option<i32>", _parameterized("Option", _named("i32")), id="option"),
+            pytest.param("Result<String, Error>", _parameterized("Result", _named("String"), _named("Error")), id="result"),
+            pytest.param("Box<dyn Display>", _parameterized("Box", _named("dyn Display")), id="dyn"),
+            pytest.param("Vec<Option<String>>", _parameterized("Vec", _parameterized("Option", _named("String"))), id="nested"),
+            pytest.param("&Vec<String>", _parameterized("&", _parameterized("Vec", _named("String"))), id="reference-to-generic"),
+            pytest.param("(i32, i32) -> i32", _callable((_named("i32"), _named("i32")), _named("i32")), id="callable"),
+        ],
+    )
+    def test_normalized_descriptor(self, raw, expected):
+        assert _type_shape(parse_type_string(raw)) == expected
 
 
 class TestParseRustFnSignature:
@@ -2274,33 +2163,30 @@ class TestTypeDescriptorMatchesCrossLanguage:
 class TestDetectTypeEngineCrossLanguage:
     """Tests for detect_type_engine with TypeScript and Rust projects."""
 
-    def test_ts_file_extension(self, tmp_path):
-        ts_file = tmp_path / "app.ts"
-        ts_file.write_text("")
-        assert detect_type_engine(tmp_path, file_path=ts_file) == "typescript"
+    @pytest.mark.parametrize(
+        "filename, expected",
+        [
+            pytest.param("app.ts", "typescript", id="typescript"),
+            pytest.param("App.tsx", "typescript", id="tsx"),
+            pytest.param("index.js", "typescript", id="javascript"),
+            pytest.param("lib.rs", "rust-analyzer", id="rust"),
+        ],
+    )
+    def test_file_extension_selects_engine(self, tmp_path, filename, expected):
+        source = tmp_path / filename
+        source.write_text("")
+        assert detect_type_engine(tmp_path, file_path=source) == expected
 
-    def test_tsx_file_extension(self, tmp_path):
-        tsx_file = tmp_path / "App.tsx"
-        tsx_file.write_text("")
-        assert detect_type_engine(tmp_path, file_path=tsx_file) == "typescript"
-
-    def test_js_file_extension(self, tmp_path):
-        js_file = tmp_path / "index.js"
-        js_file.write_text("")
-        assert detect_type_engine(tmp_path, file_path=js_file) == "typescript"
-
-    def test_rs_file_extension(self, tmp_path):
-        rs_file = tmp_path / "lib.rs"
-        rs_file.write_text("")
-        assert detect_type_engine(tmp_path, file_path=rs_file) == "rust-analyzer"
-
-    def test_tsconfig_in_project(self, tmp_path):
-        (tmp_path / "tsconfig.json").write_text("{}")
-        assert detect_type_engine(tmp_path) == "typescript"
-
-    def test_cargo_toml_in_project(self, tmp_path):
-        (tmp_path / "Cargo.toml").write_text("[package]\nname = 'test'\n")
-        assert detect_type_engine(tmp_path) == "rust-analyzer"
+    @pytest.mark.parametrize(
+        "filename, content, expected",
+        [
+            pytest.param("tsconfig.json", "{}", "typescript", id="typescript"),
+            pytest.param("Cargo.toml", "[package]\nname = 'test'\n", "rust-analyzer", id="rust"),
+        ],
+    )
+    def test_project_marker_selects_engine(self, tmp_path, filename, content, expected):
+        (tmp_path / filename).write_text(content)
+        assert detect_type_engine(tmp_path) == expected
 
     def test_file_ext_overrides_project_config(self, tmp_path):
         """A .rs file in a TypeScript project still returns rust-analyzer."""
@@ -2325,29 +2211,28 @@ class TestDetectTypeEngineCrossLanguage:
 class TestCreateTypeOracleCrossLanguage:
     """Tests for create_type_oracle with TypeScript and Rust engines."""
 
-    def test_create_typescript(self, tmp_path):
-        oracle = create_type_oracle(engine="typescript", project_root=tmp_path)
-        assert isinstance(oracle, TypeScriptAdapter)
+    @pytest.mark.parametrize(
+        "engine, adapter",
+        [
+            pytest.param("typescript", TypeScriptAdapter, id="typescript"),
+            pytest.param("rust-analyzer", RustAnalyzerAdapter, id="rust"),
+        ],
+    )
+    def test_explicit_engine(self, tmp_path, engine, adapter):
+        assert isinstance(create_type_oracle(engine=engine, project_root=tmp_path), adapter)
 
-    def test_create_rust_analyzer(self, tmp_path):
-        oracle = create_type_oracle(engine="rust-analyzer", project_root=tmp_path)
-        assert isinstance(oracle, RustAnalyzerAdapter)
-
-    def test_auto_detects_typescript(self, tmp_path):
-        ts_file = tmp_path / "app.ts"
-        ts_file.write_text("")
-        oracle = create_type_oracle(
-            engine="auto", project_root=tmp_path, file_path=ts_file,
-        )
-        assert isinstance(oracle, TypeScriptAdapter)
-
-    def test_auto_detects_rust(self, tmp_path):
-        rs_file = tmp_path / "lib.rs"
-        rs_file.write_text("")
-        oracle = create_type_oracle(
-            engine="auto", project_root=tmp_path, file_path=rs_file,
-        )
-        assert isinstance(oracle, RustAnalyzerAdapter)
+    @pytest.mark.parametrize(
+        "filename, adapter",
+        [
+            pytest.param("app.ts", TypeScriptAdapter, id="typescript"),
+            pytest.param("lib.rs", RustAnalyzerAdapter, id="rust"),
+        ],
+    )
+    def test_auto_detects_language(self, tmp_path, filename, adapter):
+        source = tmp_path / filename
+        source.write_text("")
+        oracle = create_type_oracle(engine="auto", project_root=tmp_path, file_path=source)
+        assert isinstance(oracle, adapter)
 
 
 # ---------------------------------------------------------------------------

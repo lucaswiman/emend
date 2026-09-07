@@ -18,6 +18,10 @@ def _build(source: str, ext: str = "ts"):
     return emend_core.build_cfgs(textwrap.dedent(source), ext=ext)
 
 
+def _definitions(cfg) -> set[str]:
+    return {definition[0] for block in cfg.get_blocks() for definition in block["defs"]}
+
+
 # ---------------------------------------------------------------------------
 # Basic construction
 # ---------------------------------------------------------------------------
@@ -340,10 +344,7 @@ class TestTsDefUse:
             }
         """)
         cfg = cfgs[0]
-        blocks = cfg.get_blocks()
-        all_defs = []
-        for b in blocks:
-            all_defs.extend(d[0] for d in b["defs"])
+        all_defs = _definitions(cfg)
         assert "x" in all_defs or "y" in all_defs
 
     def test_assignment_expression(self):
@@ -354,10 +355,7 @@ class TestTsDefUse:
             }
         """)
         cfg = cfgs[0]
-        blocks = cfg.get_blocks()
-        all_defs = []
-        for b in blocks:
-            all_defs.extend(d[0] for d in b["defs"])
+        all_defs = _definitions(cfg)
         assert "x" in all_defs
 
 

@@ -28,37 +28,33 @@ from emend.language_plugins import (
 # ============================================================================
 
 class TestLanguageDetection:
-    def test_detect_python(self):
-        assert detect_language("foo.py") == "python"
-        assert detect_language("bar.pyi") == "python"
+    @pytest.mark.parametrize(
+        "path, expected",
+        [
+            pytest.param("foo.py", "python", id="python-source"),
+            pytest.param("bar.pyi", "python", id="python-stub"),
+            pytest.param("foo.ts", "typescript", id="typescript"),
+            pytest.param("bar.tsx", "typescript", id="tsx"),
+            pytest.param("baz.js", "typescript", id="javascript"),
+            pytest.param("qux.jsx", "typescript", id="jsx"),
+            pytest.param("foo.rs", "rust", id="rust"),
+            pytest.param("foo.txt", None, id="unknown-extension"),
+            pytest.param("Makefile", None, id="extensionless"),
+        ],
+    )
+    def test_detect_language_contract(self, path, expected):
+        assert detect_language(path) == expected
 
-    def test_detect_typescript(self):
-        assert detect_language("foo.ts") == "typescript"
-        assert detect_language("bar.tsx") == "typescript"
-        assert detect_language("baz.js") == "typescript"
-        assert detect_language("qux.jsx") == "typescript"
-
-    def test_detect_rust(self):
-        assert detect_language("foo.rs") == "rust"
-
-    def test_detect_unknown(self):
-        assert detect_language("foo.txt") is None
-        assert detect_language("Makefile") is None
-
-    def test_get_extensions_python(self):
-        exts = get_extensions("python")
-        assert "py" in exts
-        assert "pyi" in exts
-
-    def test_get_extensions_typescript(self):
-        exts = get_extensions("typescript")
-        assert "ts" in exts
-        assert "tsx" in exts
-        assert "js" in exts
-
-    def test_get_extensions_rust(self):
-        exts = get_extensions("rust")
-        assert "rs" in exts
+    @pytest.mark.parametrize(
+        "language, expected_extensions",
+        [
+            pytest.param("python", {"py", "pyi"}, id="python"),
+            pytest.param("typescript", {"ts", "tsx", "js"}, id="typescript"),
+            pytest.param("rust", {"rs"}, id="rust"),
+        ],
+    )
+    def test_get_extensions_contract(self, language, expected_extensions):
+        assert expected_extensions <= set(get_extensions(language))
 
     def test_get_all_languages(self):
         langs = get_all_languages()
@@ -78,35 +74,22 @@ class TestLanguageDetection:
 
 
 class TestLanguageConfig:
-    def test_load_python_config(self):
-        config = load_config("python")
-        assert config.get("language", {}).get("name") == "python"
-        assert "py" in config.get("language", {}).get("file_extensions", [])
-
-    def test_load_rust_config(self):
-        config = load_config("rust")
-        assert config.get("language", {}).get("name") == "rust"
-        assert "rs" in config.get("language", {}).get("file_extensions", [])
-
-    def test_load_typescript_config(self):
-        config = load_config("typescript")
-        assert config.get("language", {}).get("name") == "typescript"
-        assert "ts" in config.get("language", {}).get("file_extensions", [])
-
-    def test_config_has_scoping(self):
-        for lang in ("python", "typescript", "rust"):
-            config = load_config(lang)
-            assert "scoping" in config, f"{lang} config missing [scoping]"
-
-    def test_config_has_pattern_matching(self):
-        for lang in ("python", "typescript", "rust"):
-            config = load_config(lang)
-            assert "pattern_matching" in config, f"{lang} config missing [pattern_matching]"
-
-    def test_config_has_symbols(self):
-        for lang in ("python", "typescript", "rust"):
-            config = load_config(lang)
-            assert "symbols" in config, f"{lang} config missing [symbols]"
+    @pytest.mark.parametrize(
+        "language, extension",
+        [
+            pytest.param("python", "py", id="python"),
+            pytest.param("typescript", "ts", id="typescript"),
+            pytest.param("rust", "rs", id="rust"),
+        ],
+    )
+    def test_config_contract(self, language, extension):
+        config = load_config(language)
+        assert config.get("language", {}).get("name") == language
+        assert extension in config.get("language", {}).get("file_extensions", [])
+        for required_section in ("scoping", "pattern_matching", "symbols"):
+            assert required_section in config, (
+                f"{language} config missing [{required_section}]"
+            )
 
 
 # ============================================================================
@@ -176,60 +159,19 @@ class TestFileResolution:
 # Symbol collection
 # ============================================================================
 
-class TestSymbolCollectionTypescript:
-    def test_function_declaration(self, tmp_path):
-        f = tmp_path / "test.ts"
-        f.write_text("function greet(name: string): string { return name; }")
-        symbols = collect_symbols(str(f))
-        names = [s.name for s in symbols]
-        assert any("greet" in n for n in names)
-
-    def test_class_with_methods(self, tmp_path):
-        f = tmp_path / "test.ts"
-        f.write_text("""
+SYMBOL_COLLECTION_SCENARIOS = [
+    pytest.param("ts", "function greet(name: string): string { return name; }", [("greet",)], id="typescript-function"),
+    pytest.param("ts", """
 class Foo {
     bar() { return 1; }
     baz(x: number) { return x; }
 }
-""")
-        symbols = collect_symbols(str(f))
-        names = [s.name for s in symbols]
-        assert any("Foo" in n for n in names)
-
-    def test_arrow_function(self, tmp_path):
-        f = tmp_path / "test.ts"
-        f.write_text("const add = (a: number, b: number) => a + b;")
-        symbols = collect_symbols(str(f))
-        names = [s.name for s in symbols]
-        assert any("add" in n for n in names)
-
-    def test_exported_function(self, tmp_path):
-        f = tmp_path / "test.ts"
-        f.write_text("export function helper() { return 42; }")
-        symbols = collect_symbols(str(f))
-        names = [s.name for s in symbols]
-        assert any("helper" in n for n in names)
-
-    def test_multiple_symbols(self, tmp_path):
-        f = tmp_path / "test.ts"
-        f.write_text("class Foo { method() {} } function bar() {}")
-        symbols = collect_symbols(str(f))
-        names = [s.name for s in symbols]
-        assert any("Foo" in n for n in names)
-        assert any("bar" in n for n in names)
-
-
-class TestSymbolCollectionRust:
-    def test_function(self, tmp_path):
-        f = tmp_path / "test.rs"
-        f.write_text("fn hello() -> String { String::from(\"hello\") }")
-        symbols = collect_symbols(str(f))
-        names = [s.name for s in symbols]
-        assert any("hello" in n for n in names)
-
-    def test_struct_with_impl(self, tmp_path):
-        f = tmp_path / "test.rs"
-        f.write_text("""
+""", [("Foo",)], id="typescript-class-methods"),
+    pytest.param("ts", "const add = (a: number, b: number) => a + b;", [("add",)], id="typescript-arrow-function"),
+    pytest.param("ts", "export function helper() { return 42; }", [("helper",)], id="typescript-exported-function"),
+    pytest.param("ts", "class Foo { method() {} } function bar() {}", [("Foo",), ("bar",)], id="typescript-multiple-symbols"),
+    pytest.param("rs", 'fn hello() -> String { String::from("hello") }', [("hello",)], id="rust-function"),
+    pytest.param("rs", """
 struct Point {
     x: f64,
     y: f64,
@@ -240,93 +182,52 @@ impl Point {
         Point { x, y }
     }
 }
-""")
-        symbols = collect_symbols(str(f))
-        names = [s.name for s in symbols]
-        assert any("Point" in n for n in names)
+""", [("Point",)], id="rust-struct-impl"),
+    pytest.param("rs", "enum Color { Red, Green, Blue }", [("Color",)], id="rust-enum"),
+    pytest.param("rs", "trait Drawable { fn draw(&self); }", [("Drawable",)], id="rust-trait"),
+    pytest.param("rs", "mod utils { pub fn helper() {} }", [("helper", "utils")], id="rust-module-or-nested-function"),
+    pytest.param("rs", "struct Foo; impl Foo { fn method(&self) {} } fn bar() {}", [("Foo",), ("bar",)], id="rust-multiple-symbols"),
+]
 
-    def test_enum(self, tmp_path):
-        f = tmp_path / "test.rs"
-        f.write_text("enum Color { Red, Green, Blue }")
-        symbols = collect_symbols(str(f))
-        names = [s.name for s in symbols]
-        assert any("Color" in n for n in names)
 
-    def test_trait(self, tmp_path):
-        f = tmp_path / "test.rs"
-        f.write_text("trait Drawable { fn draw(&self); }")
-        symbols = collect_symbols(str(f))
-        names = [s.name for s in symbols]
-        assert any("Drawable" in n for n in names)
-
-    def test_module(self, tmp_path):
-        f = tmp_path / "test.rs"
-        f.write_text("mod utils { pub fn helper() {} }")
-        symbols = collect_symbols(str(f))
-        names = [s.name for s in symbols]
-        # mod_item may not register as a top-level symbol in all configs;
-        # at minimum the nested function should appear
-        assert any("helper" in n for n in names) or any("utils" in n for n in names)
-
-    def test_multiple_symbols(self, tmp_path):
-        f = tmp_path / "test.rs"
-        f.write_text("struct Foo; impl Foo { fn method(&self) {} } fn bar() {}")
-        symbols = collect_symbols(str(f))
-        names = [s.name for s in symbols]
-        assert any("Foo" in n for n in names)
-        assert any("bar" in n for n in names)
+@pytest.mark.parametrize("extension, source, expected_name_groups", SYMBOL_COLLECTION_SCENARIOS)
+def test_symbol_collection_contract(tmp_path, extension, source, expected_name_groups):
+    path = tmp_path / f"test.{extension}"
+    path.write_text(source)
+    names = [symbol.name for symbol in collect_symbols(str(path))]
+    for alternatives in expected_name_groups:
+        assert any(candidate in name for candidate in alternatives for name in names)
 
 
 # ============================================================================
 # Pattern matching
 # ============================================================================
 
-class TestPatternMatchingTypescript:
-    def test_identifier_pattern(self, tmp_path):
-        f = tmp_path / "test.ts"
-        f.write_text("const x = 1;\nconst y = x + 2;")
-        matches = find_pattern("x", str(f))
-        assert len(matches) >= 2
-
-    def test_member_expression(self, tmp_path):
-        f = tmp_path / "test.ts"
-        f.write_text("console.log('hello'); console.log('world');")
-        matches = find_pattern("console.log", str(f))
-        assert len(matches) == 2
-
-    def test_string_literal(self, tmp_path):
-        f = tmp_path / "test.ts"
-        f.write_text("const a = 'hello';\nconst b = 'world';")
-        matches = find_pattern("'hello'", str(f))
-        assert len(matches) == 1
-
-    def test_number_literal(self, tmp_path):
-        f = tmp_path / "test.ts"
-        f.write_text("const x = 42;\nconst y = 43;\nconst z = 42;")
-        matches = find_pattern("42", str(f))
-        assert len(matches) == 2
+PATTERN_MATCH_SCENARIOS = [
+    pytest.param("ts", "const x = 1;\nconst y = x + 2;", "x", 2, None, id="typescript-identifier"),
+    pytest.param("ts", "console.log('hello'); console.log('world');", "console.log", 2, 2, id="typescript-member-expression"),
+    pytest.param("ts", "const a = 'hello';\nconst b = 'world';", "'hello'", 1, 1, id="typescript-string-literal"),
+    pytest.param("ts", "const x = 42;\nconst y = 43;\nconst z = 42;", "42", 2, 2, id="typescript-number-literal"),
+    pytest.param("rs", "let x = 1;\nlet y = 2;\nlet z = x;", "x", 2, 2, id="rust-identifier-declaration-and-use"),
+    pytest.param("rs", 'fn main() { println!("hello"); let v = vec![1,2,3]; }', "println", 1, None, id="rust-macro-identifier"),
+]
 
 
-class TestPatternMatchingRust:
-    def test_identifier_pattern(self, tmp_path):
-        f = tmp_path / "test.rs"
-        f.write_text("let x = 1;\nlet y = 2;\nlet z = x;")
-        matches = find_pattern("x", str(f))
-        assert len(matches) == 2  # declaration + use
+@pytest.mark.parametrize("extension, source, pattern, minimum, exact", PATTERN_MATCH_SCENARIOS)
+def test_pattern_matching_contract(tmp_path, extension, source, pattern, minimum, exact):
+    path = tmp_path / f"test.{extension}"
+    path.write_text(source)
+    matches = find_pattern(pattern, str(path))
+    assert len(matches) >= minimum
+    if exact is not None:
+        assert len(matches) == exact
 
-    def test_function_call(self, tmp_path):
-        f = tmp_path / "test.rs"
-        f.write_text("fn main() { println!(\"hello\"); let v = vec![1,2,3]; }")
-        matches = find_pattern("println", str(f))
-        assert len(matches) >= 1
 
-    def test_number_literal(self, tmp_path):
-        f = tmp_path / "test.rs"
-        f.write_text("fn main() { let x = 42;\nlet y = 43;\nlet z = 42; }")
-        matches = find_pattern("42", str(f))
-        # Rust integer_literal patterns may not match bare numbers
-        # in all pattern compilation modes
-        assert len(matches) >= 0  # at minimum, no crash
+def test_rust_number_literal_pattern_is_a_best_effort_smoke_contract(tmp_path):
+    """Rust integer matching is not promised here, but must not crash."""
+    path = tmp_path / "test.rs"
+    path.write_text("fn main() { let x = 42;\nlet y = 43;\nlet z = 42; }")
+    assert isinstance(find_pattern("42", str(path)), list)
 
 
 # ============================================================================
