@@ -173,6 +173,9 @@ Understand what a function depends on
    # Visualize the call graph for the whole file
    emend analyze graph src/app.py --format dot | dot -Tsvg > deps.svg
 
+Graph labels use short names when unique and qualified names when necessary
+to distinguish different symbols, such as two types with a ``run`` method.
+
 Find where a variable is mutated
 ---------------------------------
 

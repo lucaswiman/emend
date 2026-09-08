@@ -226,22 +226,27 @@ def generate_graph(
     graph = _get_or_build_fact_graph(scan_root)
     edge_pairs = graph.graph_datalog(file_path=rel_path)
 
-    # Build edges dict from Datalog results
+    # Keep identities until presentation so same-named methods cannot merge.
     edges: dict[str, list[str]] = {}
     for caller_qn, callee_qn in edge_pairs:
-        caller_name = caller_qn.rsplit('.', 1)[-1]
-        callee_name = callee_qn.rsplit('.', 1)[-1]
-        edges.setdefault(caller_name, [])
-        if callee_name not in edges[caller_name]:
-            edges[caller_name].append(callee_name)
+        edges.setdefault(caller_qn, [])
+        if callee_qn not in edges[caller_qn]:
+            edges[caller_qn].append(callee_qn)
 
     # Also include functions and classes with no calls
     syms = graph.symbols(file_path=rel_path)
     for s in syms:
         if s.kind in ("function", "async_function", "method", "async_method", "class"):
-            name = s.name
-            if name not in edges:
-                edges[name] = []
+            edges.setdefault(s.qualified_name, [])
+
+    from collections import Counter
+
+    names = {qn: qn.rsplit('.', 1)[-1]
+             for qn in set(edges) | {callee for callees in edges.values() for callee in callees}}
+    counts = Counter(names.values())
+    labels = {qn: name if counts[name] == 1 else qn for qn, name in names.items()}
+    edges = {labels[qn]: [labels[callee] for callee in callees]
+             for qn, callees in edges.items()}
 
     if format == "json":
         return json.dumps(edges, indent=2)

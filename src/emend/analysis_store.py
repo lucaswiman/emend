@@ -23,7 +23,7 @@ from emend.project_config import find_project_root
 from emend.symbol_projection import SymbolInfo, _symbol_info_view
 
 
-EXTRACTION_ARTIFACT_VERSION = "4"
+EXTRACTION_ARTIFACT_VERSION = "5"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 logger = logging.getLogger(__name__)
 

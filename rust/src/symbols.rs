@@ -697,6 +697,7 @@ fn collect_from_body(
     let cls_node_kind = cfg.class_node();
     let dec_node_kind = cfg.decorated_node();
     let method_node_kind = cfg.method_node();
+    let member_container_kind = cfg.member_container_node();
     let expr_stmt_kind = cfg.expression_statement_node();
 
     let mut cursor = node.walk();
@@ -733,6 +734,20 @@ fn collect_from_body(
             let (decorators, decorator_line_start) = extract_decorators(child, source, cfg);
             emit_class(child, child, source, depth, max_depth, path, selector_path,
                 defined_names_stack, decorators, decorator_line_start, cfg, &mut symbols);
+        } else if member_container_kind.map_or(false, |container| kind == container) {
+            // `impl Type` contributes methods to the existing type.  The container
+            // stays transparent so multiple impl blocks cannot duplicate the type.
+            let Some(owner_node) = cfg.member_container_owner(child) else {
+                continue;
+            };
+            let owner_path: Vec<String> = path.iter().cloned()
+                .chain(std::iter::once(node_text(owner_node, source).trim().to_string()))
+                .collect();
+            if let Some(body) = child.child_by_field_name(cfg.body_field()) {
+                let mut inner = collect_from_body(body, source, depth + 1, max_depth,
+                    &owner_path, selector_path, defined_names_stack, true, cfg);
+                symbols.append(&mut inner);
+            }
         } else if kind == "export_statement" {
             // TypeScript: `export function foo()`, `export class Bar`, etc.
             // The export_statement wraps the actual definition; recurse into it
@@ -1200,6 +1215,37 @@ class Animal {
 
         let class_sym = syms.iter().find(|s| s.name == "Animal").unwrap();
         assert_eq!(class_sym.kind, "class");
+    }
+
+    #[test]
+    fn test_rust_impl_methods_use_existing_type_path_across_blocks() {
+        let source = r#"
+struct Counter;
+
+impl Counter {
+    fn increment(&mut self) {}
+}
+
+impl Counter {
+    fn value(&self) -> i32 { 0 }
+}
+
+trait Reset { fn reset(&mut self); }
+trait Reinitialize { fn reset(&mut self); }
+impl Reset for Counter { fn reset(&mut self) {} }
+impl Reinitialize for Counter { fn reset(&mut self) {} }
+"#;
+        let syms = collect_symbols_from_source(source, usize::MAX, &None, "rs");
+
+        assert_eq!(syms.iter().filter(|s| s.name == "Counter").count(), 1);
+        let increment = syms.iter().find(|s| s.name == "increment").unwrap();
+        let value = syms.iter().find(|s| s.name == "value").unwrap();
+        assert_eq!(increment.kind, "method");
+        assert_eq!(increment.path, vec!["Counter", "increment"]);
+        assert_eq!(value.kind, "method");
+        assert_eq!(value.path, vec!["Counter", "value"]);
+        assert!(syms.iter().all(|s| s.name != "reset"),
+            "trait methods must not collapse onto an ambiguous Counter::reset identity");
     }
 
     #[test]

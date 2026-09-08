@@ -154,7 +154,7 @@ def _walk_symbols(
             kind=kind,
             line=d["line"],
             end_line=d["end_line"],
-            parent=parent_qn,
+            parent=qn.rpartition(".")[0] if len(path_parts) > 1 else parent_qn,
         ))
 
         # Extract decorators — strip @ prefix and arguments so that
@@ -770,12 +770,14 @@ def _extract_file_facts(
 
     # Method-call location conventions are shared with the public builders:
     # 0-based lines and explicit sentinels for module-level code.
-    raw_method_refs = [
-        (qn, line, col, 0, 0, kind, None)
-        for qn, line, col, kind in file_refs
-    ]
+    # Receiver identity is lexical (c.method), even when the call target is
+    # resolved to its definition (Counter.method).
+    raw_method_refs = (
+        scope_resolver.references_in_file(abs_path, lexical=True)
+        if scope_resolver is not None else []
+    )
     for fact in _build_method_call_facts(
-        raw_method_refs, rel_path, content_block_ranges, normalize_qn=False,
+        raw_method_refs, rel_path, content_block_ranges, normalize_qn=True,
     ):
         result["method_calls"].append([
             fact.file_path, fact.func_qn, fact.receiver, fact.method,
