@@ -90,17 +90,15 @@ class TestGenerateGraphRust:
             f"Expected process->helper edge in DOT output:\n{result}"
         )
 
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AssertionError,
+        reason="Rust impl methods are not collected as call-graph nodes",
+    )
     def test_graph_with_impl_methods(self, tmp_path):
-        """Call graph with Rust impl methods documents current limitation.
-
-        TODO: Rust impl block methods require impl_item collection support (Phase 8+).
-        Currently the graph includes the struct type (Service) as a node but not
-        the individual impl methods (run, compute). This test documents the current
-        behavior and uses free functions to verify edges are tracked correctly.
-        """
+        """Call graphs include Rust impl methods and their edges."""
         from emend.transform import generate_graph
 
-        # Verify that impl methods are NOT yet surfaced as graph nodes (current behavior)
         f = tmp_path / "service.rs"
         f.write_text(
             "struct Service;\n"
@@ -119,17 +117,7 @@ class TestGenerateGraphRust:
         result = generate_graph(str(f), format="json")
         data = json.loads(result)
 
-        # TODO: Rust impl block methods require impl_item collection support (Phase 8+).
-        # Currently only the struct type appears as a node, not the impl methods.
-        # The struct itself is present in the graph.
-        assert "Service" in data, (
-            f"Expected 'Service' struct in graph data: {list(data)}"
-        )
-        # run and compute are NOT yet surfaced as graph nodes (known limitation)
-        assert "run" not in data and "compute" not in data, (
-            f"Impl methods run/compute should not be in graph yet "
-            f"(impl_item collection not implemented), but found in {list(data)}"
-        )
+        assert data.get("compute") == [] and "compute" in data.get("run", [])
 
     def test_graph_plain_multiple_callees(self, tmp_path):
         """Plain output lists multiple callees for a Rust function."""
@@ -221,14 +209,13 @@ class TestGenerateGraphRust:
         assert "pong" in data["ping"], f"Expected pong in ping's callees: {data['ping']}"
         assert "ping" in data["pong"], f"Expected ping in pong's callees: {data['pong']}"
 
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AssertionError,
+        reason="Rust impl methods are not collected as call-graph nodes",
+    )
     def test_graph_nested_impl_and_free_functions(self, tmp_path):
-        """Graph with free functions and impl methods documents current limitation.
-
-        TODO: Rust impl block methods require impl_item collection support (Phase 8+).
-        Currently free functions appear in the graph but impl methods do not. This test
-        verifies that free functions are correctly included while documenting the
-        limitation for impl methods.
-        """
+        """Graph edges connect Rust impl methods to free functions."""
         from emend.transform import generate_graph
 
         f = tmp_path / "mixed.rs"
@@ -247,16 +234,4 @@ class TestGenerateGraphRust:
         result = generate_graph(str(f), format="json")
         data = json.loads(result)
 
-        # Free function helper should appear as a node
-        assert "helper" in data, f"Expected 'helper' (free function) in {list(data)}"
-
-        # TODO: Rust impl block methods require impl_item collection support (Phase 8+).
-        # `run` is an impl method and is currently NOT surfaced as a graph node.
-        # Only the struct (Processor) appears, not the method.
-        assert "run" not in data, (
-            f"Impl method 'run' should not be in graph yet "
-            f"(impl_item collection not implemented), but found in {list(data)}"
-        )
-        assert "Processor" in data, (
-            f"Expected 'Processor' struct in graph: {list(data)}"
-        )
+        assert "helper" in data and "helper" in data.get("run", [])
