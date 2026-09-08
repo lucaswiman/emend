@@ -35,9 +35,9 @@ from emend.duplicate_heuristics import (
 # ---------------------------------------------------------------------------
 
 # Cached payloads include the containing function/class symbol. Bump this whenever
-# the payload shape changes so stale rows cannot produce different output from
+# the payload shape or canonicalization changes so stale rows cannot differ from
 # the cold (fresh-parse) path.
-DUP_CACHE_VERSION = "4"
+DUP_CACHE_VERSION = "5"
 
 # Canonicalizer: node kinds that are candidate roots
 _FUNCTION_KINDS: frozenset[str] = frozenset({
@@ -242,7 +242,9 @@ def canonicalize_subtree(
 
         kind_seq.append(n.kind)
 
-        if n.child_count == 0:
+        # string_content may have escape children without nodes for the text
+        # between them. Traversing only children silently drops that text.
+        if n.child_count == 0 or n.kind == "string_content":
             text = n.text()
             if n.kind == "identifier" and not preserve_name:
                 qn = qn_at.get(n.start_point)
