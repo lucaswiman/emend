@@ -150,7 +150,8 @@ impl PyScopeResolver {
     }
 
     /// Returns all references in a file as (target_qn, line, col, start_byte, end_byte, kind, in_annotation).
-    fn references_in_file(&self, path: &str) -> Vec<(String, usize, usize, usize, usize, &'static str, bool)> {
+    #[pyo3(signature = (path, lexical=false))]
+    fn references_in_file(&self, path: &str, lexical: bool) -> Vec<(String, usize, usize, usize, usize, &'static str, bool)> {
         let path = PathBuf::from(path);
         self.inner
             .file_scopes
@@ -158,7 +159,7 @@ impl PyScopeResolver {
             .map(|fs| {
                 fs.references
                     .iter()
-                    .map(|r| (r.qn.name.clone(), r.line, r.column, r.byte_offset, r.end_byte, r.kind.as_str(), r.in_annotation))
+                    .map(|r| ((if lexical { &r.lexical_qn } else { &r.qn.name }).clone(), r.line, r.column, r.byte_offset, r.end_byte, r.kind.as_str(), r.in_annotation))
                     .collect()
             })
             .unwrap_or_default()

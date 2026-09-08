@@ -3,9 +3,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
-
 class TestGenerateGraphRust:
     """generate_graph() works on Rust projects."""
 
@@ -90,11 +87,6 @@ class TestGenerateGraphRust:
             f"Expected process->helper edge in DOT output:\n{result}"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="Rust impl methods are not collected as call-graph nodes",
-    )
     def test_graph_with_impl_methods(self, tmp_path):
         """Call graphs include Rust impl methods and their edges."""
         from emend.transform import generate_graph
@@ -209,11 +201,6 @@ class TestGenerateGraphRust:
         assert "pong" in data["ping"], f"Expected pong in ping's callees: {data['ping']}"
         assert "ping" in data["pong"], f"Expected ping in pong's callees: {data['pong']}"
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="Rust impl methods are not collected as call-graph nodes",
-    )
     def test_graph_nested_impl_and_free_functions(self, tmp_path):
         """Graph edges connect Rust impl methods to free functions."""
         from emend.transform import generate_graph

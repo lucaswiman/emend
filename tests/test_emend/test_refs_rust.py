@@ -15,6 +15,45 @@ def _make_selector(file_path, *symbol_path):
     )
 
 
+def test_method_identity_survives_fact_caching(tmp_path, monkeypatch):
+    from emend import analysis_extraction
+    from emend.analysis_store import AnalysisStore
+    from emend.transform import find_callers, find_callees, generate_graph
+    import json
+
+    source = """struct A;
+struct B;
+fn alpha() {}
+fn beta() {}
+impl A { fn run(&self) { alpha(); } }
+impl B { fn run(&self) { beta(); } }
+fn entry(a: &A, b: &B) {
+    a.run();
+    b.run();
+}
+"""
+    path = tmp_path / "lib.rs"
+    path.write_text(source)
+    store = AnalysisStore.open(tmp_path)
+    original = store.query_facts()
+    for owner, line, callee in [("A", 8, "alpha"), ("B", 9, "beta")]:
+        selector = _make_selector(path, owner, "run")
+        assert [r.line for r in find_callers(selector)] == [line]
+        assert {c.name for c in find_callees(selector)} == {callee}
+    assert {(m.receiver, m.method) for m in original.method_calls()
+            if m.func_qn == "lib.entry"} == {("a", "run"), ("b", "run")}
+    graph = json.loads(generate_graph(str(path), format="json"))
+    assert graph["lib.A.run"] == ["alpha"]
+    assert graph["lib.B.run"] == ["beta"]
+
+    path.write_text(source.replace("a.run();", "b.run();"))
+    assert not store.query_facts().calls_to("lib.A.run")
+    monkeypatch.setattr(analysis_extraction, "_extract_file_facts",
+                        lambda *a, **kw: pytest.fail("unchanged content was re-extracted"))
+    path.write_text(source)
+    assert store.query_facts().calls_to("lib.A.run") == original.calls_to("lib.A.run")
+
+
 class TestFindReferencesRust:
     """find_references() works on Rust projects."""
 
@@ -158,11 +197,6 @@ class TestFindReferencesRust:
             f"All reads_only refs should have is_write=False, got {reads_only}"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="Rust path-qualified references are not resolved across files",
-    )
     def test_refs_cross_file(self, tmp_path):
         """find_references finds references to a Rust function across files."""
         from emend.transform import find_references
@@ -228,11 +262,6 @@ class TestFindCallersRust:
             f"Expected caller on line 6, got caller lines {caller_lines}"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="Rust method calls are not attributed to their impl methods",
-    )
     def test_callers_finds_method_callers(self, tmp_path):
         """find_callers attributes obj.method() calls to the impl method."""
         from emend.transform import find_callers
@@ -293,11 +322,6 @@ class TestFindCallersRust:
             f"Expected call on line 6, got caller lines {caller_lines}"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="Rust path-qualified calls are not attributed across files",
-    )
     def test_callers_cross_file(self, tmp_path):
         """find_callers attributes a path-qualified cross-file call."""
         from emend.transform import find_callers
@@ -366,11 +390,6 @@ class TestFindCalleesRust:
             f"Expected 'utility' in callees, got {callee_names}"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="Rust method-call callees are reported as receiver names",
-    )
     def test_callees_method_calls(self, tmp_path):
         """find_callees reports method names from obj.method() calls."""
         from emend.transform import find_callees
@@ -414,11 +433,6 @@ class TestFindCalleesRust:
             f"Expected no callees for pure arithmetic function, got {callees}"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="Rust impl method bodies are not traversed for callees",
-    )
     def test_callees_impl_method(self, tmp_path):
         """find_callees traverses a Rust impl method body."""
         from emend.transform import find_callees

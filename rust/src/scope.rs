@@ -21,6 +21,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+type MethodTargets = HashMap<(String, String), Option<String>>;
+
 const PYTHON_CONFIG_TOML: &str = include_str!("../../languages/python/config.toml");
 const TS_CONFIG_TOML: &str = include_str!("../../languages/typescript/config.toml");
 const RUST_CONFIG_TOML: &str = include_str!("../../languages/rust/config.toml");
@@ -129,6 +131,10 @@ pub struct Scope {
     pub start_line: usize,
     pub end_line: usize,
     pub bindings: HashMap<String, Binding>,
+    /// Existing type owning this transparent member scope, if unambiguous.
+    pub owner_name: Option<String>,
+    pub is_member_container: bool,
+    pub opaque_types: std::collections::HashSet<String>,
 }
 
 /// A name binding in a specific scope.
@@ -141,6 +147,9 @@ pub struct Binding {
     pub byte_offset: usize,
     pub signature: Option<String>,
     pub type_annotation: Option<String>,
+    /// Nominal receiver type known directly from source syntax.
+    pub receiver_type: Option<String>,
+    pub receiver_type_rebindings: Vec<(usize, Option<String>)>,
     pub returns: Option<String>,
     pub is_async: bool,
     pub created_scope: Option<ScopeId>,
@@ -198,6 +207,8 @@ pub struct Reference {
     pub byte_offset: usize,
     pub end_byte: usize,
     pub qn: QualifiedName,
+    /// Lexical spelling at the reference site, before semantic resolution.
+    pub lexical_qn: String,
     pub kind: ReferenceKind,
     /// True when this reference appears in a type-annotation context
     /// (e.g. parameter type, return type, variable annotation).
@@ -326,6 +337,21 @@ pub struct PatternMatchingSection {
     pub call: String,
     #[serde(default)]
     pub attribute: String,
+    /// Path-expression node assembled from `path` and `name` fields.
+    #[serde(default)]
+    pub scoped_identifier: String,
+    #[serde(default)]
+    pub path_field: String,
+    #[serde(default)]
+    pub name_field: String,
+    #[serde(default)]
+    pub separator: String,
+    /// Receiver token accepted as the root of an attribute expression.
+    #[serde(default)]
+    pub self_receiver_node: String,
+    /// Other token node kinds accepted as roots of qualified paths.
+    #[serde(default)]
+    pub qualified_root_nodes: Vec<String>,
     #[serde(default)]
     pub identifier: String,
     /// Additional node types that should be treated as identifiers for
@@ -556,6 +582,23 @@ pub struct SymbolsSection {
     #[serde(default)] pub key_field: Option<String>,
     /// Extra function-like node used inside class bodies (TypeScript: "method_definition").
     #[serde(default)] pub method_node: Option<String>,
+    /// Transparent container defining members for an existing type (Rust: `impl_item`).
+    #[serde(default)] pub member_container_node: Option<String>,
+    /// Field on the transparent container containing the existing type's name.
+    #[serde(default)] pub member_container_owner_field: Option<String>,
+    /// Accepted node kind for an unambiguous existing-type owner.
+    #[serde(default)] pub member_container_owner_node: Option<String>,
+    /// Simple nominal type syntax accepted for receiver inference.
+    #[serde(default)] pub receiver_type_node: Option<String>,
+    /// Wrapper around a receiver type (Rust: `reference_type`).
+    #[serde(default)] pub receiver_type_wrapper_node: Option<String>,
+    #[serde(default)] pub receiver_type_wrapper_field: Option<String>,
+    /// Constructor expression and its nominal-name field.
+    #[serde(default)] pub receiver_constructor_node: Option<String>,
+    #[serde(default)] pub receiver_constructor_name_field: Option<String>,
+    #[serde(default)] pub receiver_generic_parameters_field: Option<String>,
+    #[serde(default)] pub receiver_generic_parameter_node: Option<String>,
+    #[serde(default)] pub receiver_type_alias_node: Option<String>,
     #[serde(default)] pub param_types: Vec<ParamTypeConfig>,
     #[serde(default)] pub param_separators: Vec<ParamSeparatorConfig>,
     #[serde(default)] pub statements: StatementsConfig,
@@ -604,6 +647,31 @@ impl SymbolsSection {
     pub fn method_node(&self) -> Option<&str> {
         self.method_node.as_deref()
     }
+    pub fn member_container_node(&self) -> Option<&str> {
+        self.member_container_node.as_deref()
+    }
+    pub fn member_container_owner_field(&self) -> &str {
+        self.member_container_owner_field.as_deref().unwrap_or("type")
+    }
+    pub fn member_container_owner_node(&self) -> Option<&str> {
+        self.member_container_owner_node.as_deref()
+    }
+    /// Shared owner policy for symbol projection and reference resolution.
+    /// Omit trait/generic/qualified owners until their identities can be resolved.
+    pub fn member_container_owner<'a>(&self, node: tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
+        if node.child_by_field_name(self.superclasses_field()).is_some() { return None; }
+        node.child_by_field_name(self.member_container_owner_field())
+            .filter(|owner| self.member_container_owner_node()
+                .map_or(true, |expected| owner.kind() == expected))
+    }
+    pub fn receiver_type_node(&self) -> Option<&str> { self.receiver_type_node.as_deref() }
+    pub fn receiver_type_wrapper_node(&self) -> Option<&str> { self.receiver_type_wrapper_node.as_deref() }
+    pub fn receiver_type_wrapper_field(&self) -> &str { self.receiver_type_wrapper_field.as_deref().unwrap_or("type") }
+    pub fn receiver_constructor_node(&self) -> Option<&str> { self.receiver_constructor_node.as_deref() }
+    pub fn receiver_constructor_name_field(&self) -> &str { self.receiver_constructor_name_field.as_deref().unwrap_or("name") }
+    pub fn receiver_generic_parameters_field(&self) -> &str { self.receiver_generic_parameters_field.as_deref().unwrap_or("type_parameters") }
+    pub fn receiver_generic_parameter_node(&self) -> Option<&str> { self.receiver_generic_parameter_node.as_deref() }
+    pub fn receiver_type_alias_node(&self) -> Option<&str> { self.receiver_type_alias_node.as_deref() }
 
     /// Returns param type configs; falls back to Python defaults when empty.
     pub fn effective_param_types(&self) -> std::borrow::Cow<'_, [ParamTypeConfig]> {
@@ -657,6 +725,17 @@ impl SymbolsSection {
             decorator_node: Some("decorator".to_string()),
             expression_statement_node: Some("expression_statement".to_string()),
             method_node: None,
+            member_container_node: None,
+            member_container_owner_field: None,
+            member_container_owner_node: None,
+            receiver_type_node: None,
+            receiver_type_wrapper_node: None,
+            receiver_type_wrapper_field: None,
+            receiver_constructor_node: None,
+            receiver_constructor_name_field: None,
+            receiver_generic_parameters_field: None,
+            receiver_generic_parameter_node: None,
+            receiver_type_alias_node: None,
             param_types: Self::python_param_types_default(),
             param_separators: Self::python_param_separators_default(),
             statements: StatementsConfig {
@@ -1083,7 +1162,18 @@ impl<'a> BuildContext<'a> {
     /// Insert a binding only if the name is not already bound.
     fn add_binding_if_absent(&mut self, scope_id: ScopeId, binding: Binding) {
         if let Some(scope) = self.scope_mut(scope_id) {
-            scope.bindings.entry(binding.name.clone()).or_insert(binding);
+            match scope.bindings.entry(binding.name.clone()) {
+                std::collections::hash_map::Entry::Vacant(entry) => { entry.insert(binding); }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if entry.get().receiver_type.is_some()
+                        || !entry.get().receiver_type_rebindings.is_empty()
+                        || binding.receiver_type.is_some()
+                    {
+                        entry.get_mut().receiver_type_rebindings
+                            .push((binding.byte_offset, binding.receiver_type));
+                    }
+                }
+            }
         }
     }
 
@@ -1386,11 +1476,24 @@ impl ScopeResolver {
             start_line: root_node.start_position().row,
             end_line: root_node.end_position().row,
             bindings: HashMap::new(),
+            owner_name: None,
+            is_member_container: false,
+            opaque_types: Default::default(),
         });
 
         // Walk the tree-sitter CST and build scopes
         let mut cursor = root_node.walk();
         self.walk_node(&mut cursor, module_id, &mut ctx);
+
+        // Rust use-trees are recursive and cannot be represented by the
+        // generic single-node import configuration.  Merge their leaves into
+        // the same local-name map used by reference resolution.
+        if self.config.language.name == "rust" {
+            ctx.imports.clear();
+            for (binding, _) in self.collect_rust_imports(tree, source) {
+                ctx.imports.insert(binding.local_name.clone(), binding);
+            }
+        }
 
         // Second pass: resolve all identifier/attribute references to QNs.
         let (references, all_qnames) = self.collect_file_references(
@@ -1412,6 +1515,22 @@ impl ScopeResolver {
     // Reference collection (second pass)
     // -----------------------------------------------------------------------
 
+    /// Return whether `node` is the configured root/name/path component of a
+    /// qualified expression. Such components are emitted once by their
+    /// aggregate parent rather than as independent references.
+    fn is_qualified_component(&self, node: &tree_sitter::Node) -> bool {
+        let cfg = &self.config.pattern_matching;
+        node.parent().is_some_and(|parent| {
+            (!cfg.scoped_identifier.is_empty()
+                && parent.kind() == cfg.scoped_identifier
+                && (parent.child_by_field_name(&cfg.path_field) == Some(*node)
+                    || parent.child_by_field_name(&cfg.name_field) == Some(*node)))
+                || (!cfg.attribute.is_empty()
+                    && parent.kind() == cfg.attribute
+                    && parent.child_by_field_name(&cfg.attr_field) == Some(*node))
+        })
+    }
+
     /// Collect all identifier/attribute references in a file and resolve
     /// them to qualified names.  Returns (references, all_qnames).
     fn collect_file_references(
@@ -1429,6 +1548,18 @@ impl ScopeResolver {
 
         let mut refs = Vec::new();
         let mut qn_set = HashSet::new();
+        let mut method_targets = MethodTargets::new();
+        for scope in scopes {
+            if let (Some(owner), Some(parent)) = (&scope.owner_name, scope.parent) {
+                let owner_qn = self.compute_qn_str(scopes, scope_index, module_path, parent, owner);
+                for binding in scope.bindings.values().filter(|b| b.kind == BindingKind::FunctionDef) {
+                    let target = self.compute_qn_str(scopes, scope_index, module_path, scope.id, &binding.name);
+                    // Multiple candidates are ambiguous, never a first-match guess.
+                    method_targets.entry((owner_qn.clone(), binding.name.clone()))
+                        .and_modify(|target| *target = None).or_insert(Some(target));
+                }
+            }
+        }
 
         // Add definition QNs to the set too.
         // (Definitions are already recorded but their QNs should be in all_qnames.)
@@ -1436,7 +1567,7 @@ impl ScopeResolver {
         let root = tree.root_node();
         self.walk_references(
             &mut root.walk(), file_path, source_bytes,
-            module_path, scopes, scope_index, imports,
+            module_path, scopes, scope_index, imports, &method_targets,
             ScopeId(0), // Start with Module scope
             false, // not in import
             false, // not in annotation
@@ -1457,6 +1588,7 @@ impl ScopeResolver {
         scopes: &[Scope],
         scope_index: &HashMap<ScopeId, usize>,
         imports: &HashMap<String, ImportBinding>,
+        method_targets: &MethodTargets,
         current_scope: ScopeId,
         in_import: bool,
         in_annotation: bool,
@@ -1496,6 +1628,7 @@ impl ScopeResolver {
                         column: child.start_position().column,
                         byte_offset: child.start_byte(),
                         end_byte: child.end_byte(),
+                        lexical_qn: qn.clone(),
                         qn: QualifiedName { name: qn },
                         kind: ReferenceKind::Import,
                         in_annotation: false,
@@ -1510,6 +1643,7 @@ impl ScopeResolver {
                             column: name_node.start_position().column,
                             byte_offset: name_node.start_byte(),
                             end_byte: name_node.end_byte(),
+                            lexical_qn: qn.clone(),
                             qn: QualifiedName { name: qn },
                             kind: ReferenceKind::Import,
                             in_annotation: false,
@@ -1533,6 +1667,7 @@ impl ScopeResolver {
                     column: mod_node.start_position().column,
                     byte_offset: mod_node.start_byte(),
                     end_byte: mod_node.end_byte(),
+                    lexical_qn: qn.clone(),
                     qn: QualifiedName { name: qn },
                     kind: ReferenceKind::Import,
                     in_annotation: false,
@@ -1557,7 +1692,7 @@ impl ScopeResolver {
                     // These resolve to symbols in the module
                     self.walk_references(
                         &mut child.walk(), file_path, source, module_path,
-                        scopes, scope_index, imports, current_scope, true,
+                        scopes, scope_index, imports, method_targets, current_scope, true,
                         false, // imports are not annotations
                         refs, qn_set,
                     );
@@ -1587,7 +1722,7 @@ impl ScopeResolver {
             let name = node_text(node, source);
             let is_keyword = self.config.language.keywords.iter().any(|k| k == name);
 
-            if !is_attr_name && !is_keyword {
+            if !is_attr_name && !self.is_qualified_component(&node) && !is_keyword {
                 let kind = self.classify_reference(&node, in_import);
                 
                 if let Some(qn) = self.resolve_identifier(
@@ -1603,6 +1738,7 @@ impl ScopeResolver {
                         column: node.start_position().column,
                         byte_offset: node.start_byte(),
                         end_byte: node.end_byte(),
+                        lexical_qn: name.to_string(),
                         qn: QualifiedName { name: qn },
                         kind,
                         in_annotation,
@@ -1611,16 +1747,27 @@ impl ScopeResolver {
             }
         }
 
-        // Process attribute access nodes (e.g., `obj.attr`)
-        if !self.config.pattern_matching.attribute.is_empty() && node_kind == self.config.pattern_matching.attribute {
-            // Build the full dotted name and resolve.
+        // Process configured aggregate paths (e.g. `obj.attr` or Rust
+        // `utils::compute`) exactly once. Receiver-type resolution applies
+        // only to attribute expressions.
+        let path_cfg = &self.config.pattern_matching;
+        let is_attribute = !path_cfg.attribute.is_empty() && node_kind == path_cfg.attribute;
+        let is_scoped_path = !path_cfg.scoped_identifier.is_empty()
+            && node_kind == path_cfg.scoped_identifier;
+        if (is_attribute || is_scoped_path) && !self.is_qualified_component(&node) {
             let kind = self.classify_reference(&node, in_import);
             if let Some(full_name) = self.collect_dotted_name(&node, source) {
-                if let Some(qn) = self.resolve_dotted_name(
+                let receiver_qn = if is_attribute {
+                    self.resolve_receiver_method(
+                        &node, source, module_path, scopes, scope_index, imports, method_targets, current_scope,
+                    )
+                } else {
+                    None
+                };
+                if let Some(qn) = receiver_qn.or_else(|| self.resolve_dotted_name(
                     &full_name, node.start_byte(), module_path,
-                    scopes, scope_index, imports,
-                    current_scope,
-                ) {
+                    scopes, scope_index, imports, current_scope,
+                )) {
                     qn_set.insert(qn.clone());
                     refs.push(Reference {
                         file: file_path.to_path_buf(),
@@ -1629,6 +1776,7 @@ impl ScopeResolver {
                         column: node.start_position().column,
                         byte_offset: node.start_byte(),
                         end_byte: node.end_byte(),
+                        lexical_qn: full_name,
                         qn: QualifiedName { name: qn },
                         kind,
                         in_annotation,
@@ -1682,7 +1830,7 @@ impl ScopeResolver {
 
                 self.walk_references(
                     cursor, file_path, source, module_path,
-                    scopes, scope_index, imports, next_scope, child_in_import,
+                    scopes, scope_index, imports, method_targets, next_scope, child_in_import,
                     child_in_annotation,
                     refs, qn_set,
                 );
@@ -1705,8 +1853,6 @@ impl ScopeResolver {
         }
 
         let call_node = self.config.pattern_matching.call.as_str();
-        let attr_node = self.config.pattern_matching.attribute.as_str();
-
         if let Some(parent) = node.parent() {
             let pk = parent.kind();
 
@@ -1727,26 +1873,8 @@ impl ScopeResolver {
                 }
             }
 
-            // ── Attribute / member is the call target ─────────────────
-            if pk == attr_node || pk == "attribute" || pk == "member_expression" || pk == "field_expression" {
-                if let Some(grandparent) = parent.parent() {
-                    let gpk = grandparent.kind();
-                    if gpk == call_node || gpk == "call" || gpk == "call_expression" {
-                        if let Some(func) = grandparent.child_by_field_name("function") {
-                            if func.id() == parent.id() {
-                                return ReferenceKind::Call;
-                            }
-                        } else {
-                            if let Some(first) = grandparent.named_child(0) {
-                                if first.id() == parent.id() {
-                                    return ReferenceKind::Call;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
+            // The aggregate attribute node is classified as the call target;
+            // its receiver child remains a read, never a second call.
             // ── Definition nodes (config-driven via cfg.definition_nodes) ──
             let def_nodes = &self.config.cfg.definition_nodes;
             if def_nodes.iter().any(|dn| dn == pk) {
@@ -1837,26 +1965,31 @@ impl ScopeResolver {
         false
     }
 
-    /// Collect a dotted attribute name from an `attribute` node.
-    /// Returns the full dotted string (e.g., "os.path.join") or None.
+    /// Collect a configured aggregate path from an attribute or scoped-name
+    /// node (e.g. `os.path.join` or `utils::compute`).
     fn collect_dotted_name(&self, node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
-        // tree-sitter attribute node: `object.attribute`
-        // object can be another attribute (for chained access) or identifier
-        let attr_name = node.child_by_field_name("attribute")?;
-        let attr_text = node_text(attr_name, source);
-
-        let object = node.child_by_field_name("object")?;
-        match object.kind() {
-            "identifier" => {
-                let obj_text = node_text(object, source);
-                Some(format!("{}.{}", obj_text, attr_text))
-            }
-            "attribute" => {
-                let prefix = self.collect_dotted_name(&object, source)?;
-                Some(format!("{}.{}", prefix, attr_text))
-            }
-            _ => None, // Can't resolve (e.g., `foo()[0].bar`)
-        }
+        let cfg = &self.config.pattern_matching;
+        let (root_field, leaf_field, separator) = if node.kind() == cfg.attribute {
+            (&cfg.object_field, &cfg.attr_field, ".")
+        } else if node.kind() == cfg.scoped_identifier {
+            (&cfg.path_field, &cfg.name_field, cfg.separator.as_str())
+        } else {
+            return None;
+        };
+        let leaf = node.child_by_field_name(leaf_field)?;
+        let root = node.child_by_field_name(root_field)?;
+        let root_text = if root.kind() == cfg.attribute || root.kind() == cfg.scoped_identifier {
+            self.collect_dotted_name(&root, source)?
+        } else if root.kind() == cfg.identifier
+            || cfg.extra_identifiers.iter().any(|kind| kind == root.kind())
+            || (!cfg.self_receiver_node.is_empty() && root.kind() == cfg.self_receiver_node)
+            || cfg.qualified_root_nodes.iter().any(|kind| kind == root.kind())
+        {
+            node_text(root, source).to_string()
+        } else {
+            return None;
+        };
+        Some(format!("{root_text}{separator}{}", node_text(leaf, source)))
     }
 
     /// Resolve a simple identifier to its qualified name.
@@ -1884,7 +2017,7 @@ impl ScopeResolver {
             }
             return Some(if let Some(ref imported_name) = imp.imported_name {
                 // `from foo import bar` → foo.bar
-                format!("{}.{}", imp.module_path, imported_name)
+                format!("{}{}{}", imp.module_path, self.config.qualified_names.module_separator, imported_name)
             } else {
                 // `import foo` → foo
                 imp.module_path.clone()
@@ -1910,7 +2043,13 @@ impl ScopeResolver {
         imports: &HashMap<String, ImportBinding>,
         scope_id: ScopeId,
     ) -> Option<String> {
-        let parts: Vec<&str> = dotted.splitn(2, '.').collect();
+        let configured_separator = self.config.pattern_matching.separator.as_str();
+        let separator = if !configured_separator.is_empty() && dotted.contains(configured_separator) {
+            configured_separator
+        } else {
+            "."
+        };
+        let parts: Vec<&str> = dotted.splitn(2, separator).collect();
         if parts.len() < 2 {
             return self.resolve_identifier(dotted, _byte_offset, module_path, scopes, scope_index, imports, scope_id);
         }
@@ -1924,10 +2063,10 @@ impl ScopeResolver {
             }
             return Some(if let Some(ref imported_name) = imp.imported_name {
                 // `from foo import bar` + `bar.baz` → `foo.bar.baz`
-                format!("{}.{}.{}", imp.module_path, imported_name, rest)
+                format!("{}{}{}{}{}", imp.module_path, separator, imported_name, separator, rest)
             } else {
                 // `import os` + `os.path.join` → `os.path.join`
-                format!("{}.{}", imp.module_path, rest)
+                format!("{}{}{}", imp.module_path, separator, rest)
             });
         }
 
@@ -1935,10 +2074,102 @@ impl ScopeResolver {
         if let Some(root_qn) = self.resolve_in_scope_chain(
             root, scope_id, module_path, scopes, scope_index,
         ) {
-            return Some(format!("{}.{}", root_qn, rest));
+            return Some(format!("{}{}{}", root_qn, separator, rest));
         }
 
         None
+    }
+
+    /// Resolve a method call only when the receiver's nominal type is explicit
+    /// in syntax. This intentionally does not guess from a method's short name.
+    pub(crate) fn resolve_receiver_method(
+        &self,
+        node: &tree_sitter::Node,
+        source: &[u8],
+        module_path: &str,
+        scopes: &[Scope],
+        scope_index: &HashMap<ScopeId, usize>,
+        imports: &HashMap<String, ImportBinding>,
+        method_targets: &MethodTargets,
+        scope_id: ScopeId,
+    ) -> Option<String> {
+        let cfg = &self.config.pattern_matching;
+        if cfg.attribute.is_empty() || cfg.attr_field.is_empty() { return None; }
+        let receiver = node.child_by_field_name(&cfg.object_field)?;
+        let method = node.child_by_field_name(&cfg.attr_field)?;
+        let method_name = node_text(method, source);
+
+        let owner_qn = if !cfg.self_receiver_node.is_empty()
+            && receiver.kind() == cfg.self_receiver_node
+        {
+            let mut current = Some(scope_id);
+            let mut found = None;
+            while let Some(sid) = current {
+                let candidate = &scopes[*scope_index.get(&sid)?];
+                if candidate.is_member_container {
+                    let owner = candidate.owner_name.as_ref()?;
+                    let parent = candidate.parent?;
+                    found = Some(self.compute_qn_str(scopes, scope_index, module_path, parent, owner));
+                    break;
+                }
+                current = candidate.parent;
+            }
+            found?
+        } else {
+            let receiver_name = node_text(receiver, source);
+            let mut current = Some(scope_id);
+            let mut nominal = None;
+            while let Some(sid) = current {
+                let scope = &scopes[*scope_index.get(&sid)?];
+                if let Some(binding) = scope.bindings.get(receiver_name) {
+                    if binding.byte_offset <= node.start_byte() {
+                        nominal = binding.receiver_type_rebindings.iter()
+                            .filter(|(offset, _)| *offset <= node.start_byte())
+                            .max_by_key(|(offset, _)| *offset)
+                            .map(|(_, ty)| ty.clone())
+                            .unwrap_or_else(|| binding.receiver_type.clone());
+                        break;
+                    }
+                }
+                current = scope.parent;
+            }
+            let nominal = nominal?;
+            // Generic parameters and unexpanded aliases are type bindings,
+            // not evidence for a same-named concrete type in an outer scope.
+            let mut current = Some(scope_id);
+            while let Some(sid) = current {
+                let scope = &scopes[*scope_index.get(&sid)?];
+                if scope.opaque_types.contains(&nominal) { return None; }
+                if scope.bindings.get(&nominal).is_some_and(|b| b.kind == BindingKind::ClassDef) { break; }
+                current = scope.parent;
+            }
+            self.resolve_identifier(&nominal, node.start_byte(), module_path,
+                scopes, scope_index, imports, scope_id)?
+        };
+
+        method_targets.get(&(owner_qn, method_name.to_string())).cloned().flatten()
+    }
+
+    fn receiver_type_from_type_node(&self, node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
+        let cfg = &self.config.symbols;
+        if cfg.receiver_type_node() == Some(node.kind()) {
+            return Some(node_text(*node, source).to_string());
+        }
+        if cfg.receiver_type_wrapper_node() == Some(node.kind()) {
+            let inner = node.child_by_field_name(cfg.receiver_type_wrapper_field())?;
+            if cfg.receiver_type_node() == Some(inner.kind()) {
+                return Some(node_text(inner, source).to_string());
+            }
+        }
+        None
+    }
+
+    fn receiver_type_from_constructor(&self, node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
+        let cfg = &self.config.symbols;
+        if cfg.receiver_constructor_node() != Some(node.kind()) { return None; }
+        let name = node.child_by_field_name(cfg.receiver_constructor_name_field())?;
+        if cfg.receiver_type_node() != Some(name.kind()) { return None; }
+        Some(node_text(name, source).to_string())
     }
 
     /// Find the innermost scope containing a byte offset.
@@ -2050,6 +2281,11 @@ impl ScopeResolver {
                     }
                 }
                 ScopeKind::Class if self.config.qualified_names.class_member_prefix => {
+                    if let Some(owner) = &scope.owner_name {
+                        parts.push(owner.clone());
+                        current = scope.parent;
+                        continue;
+                    }
                     if let Some(parent_id) = scope.parent {
                         if let Some(&pidx) = scope_index.get(&parent_id) {
                             let parent = &scopes[pidx];
@@ -2086,6 +2322,14 @@ impl ScopeResolver {
                     current_scope
                 } else {
                     let scope_id = ctx.alloc_scope_id();
+                    let is_member_container = self.config.symbols.member_container_node()
+                        .map_or(false, |kind| kind == node_kind);
+                    let owner_name = if is_member_container {
+                        self.config.symbols.member_container_owner(node)
+                            .map(|owner| ctx.text(owner).to_string())
+                    } else {
+                        None
+                    };
                     ctx.push_scope(Scope {
                         id: scope_id,
                         kind: creator.kind,
@@ -2095,10 +2339,17 @@ impl ScopeResolver {
                         start_line: node.start_position().row,
                         end_line: node.end_position().row,
                         bindings: HashMap::new(),
+                        owner_name,
+                        is_member_container,
+                        opaque_types: Default::default(),
                     });
 
                     // Function/class names are bound in the ENCLOSING scope
-                    if creator.kind == ScopeKind::Function || creator.kind == ScopeKind::Class {
+                    if (creator.kind == ScopeKind::Function || creator.kind == ScopeKind::Class)
+                        && !is_member_container
+                        && !ctx.scope(current_scope).map_or(false, |scope|
+                            scope.is_member_container && scope.owner_name.is_none())
+                    {
                         let name_field = self.config.symbols.name_field();
                         let mut name_node = node.child_by_field_name(name_field);
                         
@@ -2164,6 +2415,8 @@ impl ScopeResolver {
                                 byte_offset: name_node.start_byte(),
                                 signature,
                                 type_annotation: None,
+                                receiver_type: None,
+                                receiver_type_rebindings: Vec::new(),
                                 returns,
                                 is_async,
                                 created_scope: Some(scope_id),
@@ -2203,6 +2456,26 @@ impl ScopeResolver {
             };
 
 
+        // Record unresolved type declarations once during scope construction.
+        let cfg = &self.config.symbols;
+        if let (Some(kind), Some(generics)) = (cfg.receiver_generic_parameter_node(),
+            node.child_by_field_name(cfg.receiver_generic_parameters_field()))
+        {
+            let mut cursor = generics.walk();
+            for parameter in generics.named_children(&mut cursor).filter(|n| n.kind() == kind) {
+                if let Some(name) = parameter.child_by_field_name(cfg.name_field()) {
+                    let name = ctx.text(name).to_string();
+                    ctx.scope_mut(scope_for_children).unwrap().opaque_types.insert(name);
+                }
+            }
+        }
+        if cfg.receiver_type_alias_node() == Some(node_kind) {
+            if let Some(name) = node.child_by_field_name(cfg.name_field()) {
+                let name = ctx.text(name).to_string();
+                ctx.scope_mut(scope_for_children).unwrap().opaque_types.insert(name);
+            }
+        }
+
         // Collect imports
         if node_kind == self.config.imports.import_statement
             || (!self.config.imports.import_from.is_empty()
@@ -2224,7 +2497,11 @@ impl ScopeResolver {
             if let Some(rule) = rule_list.iter().find(|r| r.node == node_kind) {
                 if let Some(target) = node.child_by_field_name(&rule.target) {
                     let type_annotation = node.child_by_field_name("type").map(|n| ctx.text(n).to_string());
-                    self.collect_binding_targets(ctx, &target, scope_for_children, kind, type_annotation);
+                    let receiver_type = node.child_by_field_name("type")
+                        .and_then(|ty| self.receiver_type_from_type_node(&ty, ctx.source))
+                        .or_else(|| node.child_by_field_name("value")
+                            .and_then(|value| self.receiver_type_from_constructor(&value, ctx.source)));
+                    self.collect_binding_targets(ctx, &target, scope_for_children, kind, type_annotation, receiver_type);
                 } else {
                     // Fallback: collect all as_pattern aliases in nested structures.
                     // In tree-sitter-python, `with_clause` contains multiple `with_item`
@@ -2233,7 +2510,7 @@ impl ScopeResolver {
                     let as_pattern_kind = &self.config.pattern_matching.as_pattern;
                     let aliases = Self::find_all_as_pattern_aliases(&node, as_pattern_kind);
                     for alias in aliases {
-                        self.collect_binding_targets(ctx, &alias, scope_for_children, kind, None);
+                        self.collect_binding_targets(ctx, &alias, scope_for_children, kind, None, None);
                     }
                 }
             }
@@ -2252,6 +2529,8 @@ impl ScopeResolver {
                         byte_offset: child.start_byte(),
                         signature: None,
                         type_annotation: None,
+                        receiver_type: None,
+                        receiver_type_rebindings: Vec::new(),
                         returns: None,
                         is_async: false,
                         created_scope: None,
@@ -2272,6 +2551,8 @@ impl ScopeResolver {
                         byte_offset: child.start_byte(),
                         signature: None,
                         type_annotation: None,
+                        receiver_type: None,
+                        receiver_type_rebindings: Vec::new(),
                         returns: None,
                         is_async: false,
                         created_scope: None,
@@ -2301,6 +2582,7 @@ impl ScopeResolver {
         scope_id: ScopeId,
         kind: BindingKind,
         type_annotation: Option<String>,
+        receiver_type: Option<String>,
     ) {
         match node.kind() {
             "identifier" => {
@@ -2314,6 +2596,8 @@ impl ScopeResolver {
                     byte_offset: node.start_byte(),
                     signature: None,
                     type_annotation,
+                    receiver_type,
+                    receiver_type_rebindings: Vec::new(),
                     returns: None,
                     is_async: false,
                     created_scope: None,
@@ -2343,7 +2627,7 @@ impl ScopeResolver {
                 for_each_child(node, |child| {
                     let ck = child.kind();
                     if ck != "," && ck != "(" && ck != ")" && ck != "[" && ck != "]" && ck != "as" {
-                        self.collect_binding_targets(ctx, &child, scope_id, kind, None);
+                        self.collect_binding_targets(ctx, &child, scope_id, kind, None, None);
                     }
                 });
             }
@@ -2412,6 +2696,8 @@ impl ScopeResolver {
 
                 if let Some(n) = name_node {
                     let name = ctx.text(n).to_string();
+                    let receiver_type = child.child_by_field_name("type")
+                        .and_then(|ty| self.receiver_type_from_type_node(&ty, ctx.source));
                     let binding = Binding {
                         name: name.clone(),
                         kind: BindingKind::Parameter,
@@ -2420,6 +2706,8 @@ impl ScopeResolver {
                         byte_offset: n.start_byte(),
                         signature: None,
                         type_annotation: None,
+                        receiver_type,
+                        receiver_type_rebindings: Vec::new(),
                         returns: None,
                         is_async: false,
                         created_scope: None,
@@ -3040,7 +3328,14 @@ impl ScopeResolver {
                 return;
             }
 
-            // Recurse into children to find top-level use_declarations/mod_items.
+            // Only source-file children contribute to the file-level import
+            // map. Function-local aliases need scope-aware shadowing and must
+            // not leak into unrelated functions.
+            if nk != "source_file" {
+                return;
+            }
+
+            // Recurse into direct children to find top-level declarations.
             let mut cursor = node.walk();
             if cursor.goto_first_child() {
                 loop {
@@ -3184,6 +3479,11 @@ impl ScopeResolver {
                     }
                 }
                 ScopeKind::Class if self.config.qualified_names.class_member_prefix => {
+                    if let Some(owner) = &scope.owner_name {
+                        parts.push(owner.clone());
+                        current = scope.parent;
+                        continue;
+                    }
                     if let Some(parent_id) = scope.parent {
                         if let Some(&pidx) = scope_index.get(&parent_id) {
                             let parent = &scopes[pidx];
@@ -3516,6 +3816,12 @@ impl LanguageConfig {
                 decorated_def: "decorated_definition".to_string(),
                 call: "call".to_string(),
                 attribute: "attribute".to_string(),
+                scoped_identifier: String::new(),
+                path_field: String::new(),
+                name_field: String::new(),
+                separator: String::new(),
+                self_receiver_node: String::new(),
+                qualified_root_nodes: vec![],
                 identifier: "identifier".to_string(),
                 extra_identifiers: vec![],
                 assignment: "assignment".to_string(),
@@ -3816,6 +4122,77 @@ class E:
             "nested method closure should resolve foo() to module global, got: {:?}",
             call_refs
         );
+    }
+
+    #[test]
+    fn test_rust_impl_scope_uses_owner_without_fake_or_ambiguous_qns() {
+        let source = r#"
+struct Counter;
+impl Counter { fn value(&self) -> i32 { 0 } }
+trait A { fn reset(&self); }
+trait B { fn reset(&self); }
+impl A for Counter { fn reset(&self) {} }
+impl B for Counter { fn reset(&self) {} }
+"#;
+        let tree = crate::pattern::parse_by_extension(source, "rs").unwrap();
+        let config = config_for_ext("rs").clone();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/counter.rs");
+        resolver.index_file(&path, source, &tree);
+
+        let definitions: Vec<_> = resolver.file_scopes[&path]
+            .definitions.iter().map(|(qn, _)| qn.name.as_str()).collect();
+        assert!(definitions.contains(&"counter::Counter::value"), "{definitions:?}");
+        assert_eq!(definitions.iter().filter(|qn| **qn == "counter::Counter").count(), 1);
+        assert!(!definitions.iter().any(|qn| qn.ends_with("::reset")), "{definitions:?}");
+    }
+
+    #[test]
+    fn test_rust_receiver_methods_require_syntax_known_matching_owner() {
+        let source = r#"
+struct A; struct B;
+impl A { fn run(&self) { self.stop(); } fn stop(&self) {} }
+impl B { fn run(&self) {} }
+struct T; impl T { fn run(&self) {} }
+fn entry(typed_a: &A, b: &B, unknown: impl Run, a: &A) {
+    typed_a.run(); b.run(); unknown.run();
+    let made = A {}; made.run();
+    a.run();
+    let a = B {};
+    a.run();
+    let borrowed: &A = typed_a; borrowed.run();
+}
+trait Run { fn run(&self); }
+fn generic<T: Run>(item: T) { item.run(); let local: T = item; local.run(); }
+fn aliases() { type T = B; let alias: T = B {}; alias.run(); }
+fn sequential() {
+    let changing = A {}; changing.run();
+    let changing = B {}; changing.run();
+}
+"#;
+        let tree = crate::pattern::parse_by_extension(source, "rs").unwrap();
+        let config = config_for_ext("rs").clone();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/lib.rs");
+        resolver.index_file(&path, source, &tree);
+        let calls: Vec<_> = resolver.file_scopes[&path].references.iter()
+            .filter(|r| r.kind == ReferenceKind::Call)
+            .map(|r| (r.lexical_qn.as_str(), r.qn.name.as_str(), r.line))
+            .collect();
+
+        assert!(calls.iter().any(|(l, q, _)| (*l, *q) == ("self.stop", "lib::A::stop")), "{calls:?}");
+        assert!(calls.iter().any(|(l, q, _)| (*l, *q) == ("typed_a.run", "lib::A::run")), "{calls:?}");
+        assert!(calls.iter().any(|(l, q, _)| (*l, *q) == ("b.run", "lib::B::run")), "{calls:?}");
+        assert!(calls.iter().any(|(l, q, _)| (*l, *q) == ("made.run", "lib::A::run")), "{calls:?}");
+        assert!(calls.iter().any(|(l, q, _)| (*l, *q) == ("borrowed.run", "lib::A::run")), "{calls:?}");
+        assert!(!calls.iter().any(|(lexical, qn, _)| *lexical == "unknown.run"
+            && (*qn == "lib::A::run" || *qn == "lib::B::run")), "{calls:?}");
+        assert!(!calls.iter().any(|(lexical, qn, _)| ["item.run", "local.run", "alias.run"].contains(lexical)
+            && *qn == "lib::T::run"), "{calls:?}");
+        assert!(calls.iter().any(|(l, q, line)| (*l, *q, *line) == ("a.run", "lib::A::run", 9)), "{calls:?}");
+        assert!(calls.iter().any(|(l, q, line)| (*l, *q, *line) == ("a.run", "lib::B::run", 11)), "{calls:?}");
+        assert_eq!(calls.iter().filter(|(l, _, _)| *l == "changing.run")
+            .map(|(_, q, _)| *q).collect::<Vec<_>>(), vec!["lib::A::run", "lib::B::run"]);
     }
 
     #[test]
@@ -4142,5 +4519,47 @@ def handler():
             "Should track 'except ... as e' binding. Bindings: {:?}",
             func_scope.bindings.keys().collect::<Vec<_>>()
         );
+    }
+
+    fn parse_rust(source: &str) -> tree_sitter::Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .expect("Rust grammar");
+        parser.parse(source, None).expect("Rust parse")
+    }
+
+    #[test]
+    fn rust_scoped_call_is_one_qualified_reference() {
+        let source = "mod utils; fn main() { utils::compute(); }";
+        let tree = parse_rust(source);
+        let config = LanguageConfig::from_toml(RUST_CONFIG_TOML).unwrap();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/main.rs");
+        resolver.index_file(&path, source, &tree);
+
+        let refs = &resolver.file_scopes[&path].references;
+        let calls: Vec<_> = refs.iter().filter(|reference| reference.kind == ReferenceKind::Call).collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].lexical_qn, "utils::compute");
+        assert_eq!(calls[0].qn.name, "utils::compute");
+    }
+
+    #[test]
+    fn rust_use_alias_resolves_without_leaking_block_aliases() {
+        let source = "use crate::utils::compute as run; fn a() { use one::work as local; local(); } fn b() { use two::work as local; local(); } fn main() { run(); }";
+        let tree = parse_rust(source);
+        let config = LanguageConfig::from_toml(RUST_CONFIG_TOML).unwrap();
+        let mut resolver = ScopeResolver::new(config, PathBuf::from("/project"));
+        let path = PathBuf::from("/project/main.rs");
+        resolver.index_file(&path, source, &tree);
+
+        let file = &resolver.file_scopes[&path];
+        assert_eq!(file.imports["run"].module_path, "crate::utils");
+        assert_eq!(file.imports["run"].imported_name.as_deref(), Some("compute"));
+        assert!(!file.imports.contains_key("local"));
+        assert!(file.references.iter().any(|reference| {
+            reference.lexical_qn == "run" && reference.qn.name == "crate::utils::compute"
+        }));
     }
 }
