@@ -44,8 +44,8 @@ def _with_blocks(node, leaves):
         yield ("block", "end")
 
 
-def find_inconsistencies(files, *, min_similarity=0.85):
-    """Find function bodies differing in at most two small token regions.
+def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_changed_tokens=20):
+    """Find function bodies differing in a small number of token regions.
 
     Five-token shingles retrieve pairs before sequence alignment. Very common
     shingles (>40 functions) are ignored to bound boilerplate candidate fanout.
@@ -114,7 +114,7 @@ def find_inconsistencies(files, *, min_similarity=0.85):
                 {"kind": kind, "left": a["tokens"][i:j], "right": b["tokens"][k:l]}
                 for kind, i, j, k, l in matcher.get_opcodes() if kind != "equal"
             ]
-            if len(changes) > 2 or sum(max(len(c["left"]), len(c["right"])) for c in changes) > 20:
+            if len(changes) > max_regions or sum(max(len(c["left"]), len(c["right"])) for c in changes) > max_changed_tokens:
                 continue
             findings.append({
                 "left": a["location"], "right": b["location"],

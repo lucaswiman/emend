@@ -5,7 +5,7 @@ import pytest
 from emend.inconsistency import find_inconsistencies
 
 
-@pytest.mark.parametrize("change", ["guard", "operator", "literal", "rename", "docstring", "indentation", "fstring", "comma"])
+@pytest.mark.parametrize("change", ["guard", "operator", "literal", "rename", "docstring", "indentation", "fstring", "comma", "multi"])
 def test_near_clone_differences(tmp_path, change):
     original = '''def process(items):
     result = []
@@ -27,12 +27,16 @@ def test_near_clone_differences(tmp_path, change):
         "indentation": original.replace("    save(result)", "        save(result)"),
         "fstring": original.replace("    result =", '    f"{audit()}"\n    result ='),
         "comma": original.replace("save(result)", "save(result,)"),
+        "multi": original.replace("allowed", "authorized").replace("transform", "convert").replace("save", "persist"),
     }
     files = [tmp_path / "a.py", tmp_path / "b.py"]
     for path, content in zip(files, [original, variants[change]]):
         path.write_text(content)
     findings = find_inconsistencies(files)
-    assert len(findings) == (0 if change in {"rename", "docstring", "comma"} else 1)
+    assert len(findings) == (0 if change in {"rename", "docstring", "comma", "multi"} else 1)
+    if change == "multi":
+        relaxed = find_inconsistencies(files, max_regions=3)
+        assert len(relaxed) == 1 and len(relaxed[0]["changes"]) == 3
     if findings:
         finding = findings[0]
         assert finding["left"].endswith("a.py:1::process")
