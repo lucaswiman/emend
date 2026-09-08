@@ -18,7 +18,7 @@ import json
 import logging
 import posixpath
 import re
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -71,6 +71,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 FACT_GRAPH_SCHEMA_VERSION = "10"
+
+
+@dataclass(frozen=True)
+class DeadSymbolFact(SymbolFact):
+    """A query result, not a stored fact; empty causes identify a direct root."""
+
+    root_causes: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -1515,7 +1522,8 @@ class FactGraph:
         exclude_reference_files: list[str] | None = None,
         entry_point_prefixes: list[str] | None = None,
         entry_point_qualified_names: list[str] | None = None,
-    ) -> tuple[list[SymbolFact], list[CfgBlockFact]]:
+        include_transitive: bool = False,
+    ) -> tuple[list[DeadSymbolFact], list[CfgBlockFact]]:
         """Unified dead code detection via Datalog.
 
         Combines unreachable-block analysis with unreferenced-symbol detection
@@ -1527,6 +1535,9 @@ class FactGraph:
         4. Returns a tuple of (dead symbols, unreachable blocks).
 
         String literal filtering stays as a Python post-filter (caller's responsibility).
+        With include_transitive, also return dependencies of direct roots that
+        have no other live references, recording all contributing root names.
+        Unrooted recursive components stay conservative (not reported).
         """
         # Per-invocation seeds must remain query-local.  The stored relations
         # contain only project configuration; putting CLI arguments into them
@@ -1594,7 +1605,7 @@ class FactGraph:
             # Live references: from reachable code via pre-computed relations
             # (ref_by_block keyed on (fp, fq, bid, sq) joins efficiently with
             # reachable_block keyed on (fp, fq, bid))
-            "live_ref[sq] := "
+            "reference_edge[fq, sq] := "
             "*ref_by_block[fp, fq, bid, sq], "
             "*reachable_block[fp, fq, bid], "
             f"sq != fq{excl_clauses}\n"
@@ -1602,37 +1613,43 @@ class FactGraph:
             # Without receiver types, any reachable member call may target a
             # same-named private method, including calls through local aliases.
             # Exact member names avoid suffix collisions.
-            "live_private_method_name[method_name] := "
+            "live_private_method_name[fq, method_name] := "
             "*method_call[fp, fq, _, method_name, bid, _], "
             "*reachable_block[fp, fq, bid]"
             f"{excl_clauses}\n"
 
-            "live_private_method_name[method_name] := "
-            '*method_call[fp, "<module>", _, method_name, _, _]'
+            'live_private_method_name[fq, method_name] := '
+            '*method_call[fp, fq, _, method_name, _, _], fq == "<module>"'
             f"{excl_clauses}\n"
-
-            "live_ref[target_qn] := "
-            "live_private_method_name[method_name], "
-            "*symbol[target_qn, _, method_name, method_kind, _, _, _], "
-            'method_kind in ["method", "async_method"], '
-            'starts_with(method_name, "_"), not starts_with(method_name, "__")\n'
 
             # Non-call uses such as ``callbacks = [self._helper]`` join on a
             # materialized member name, avoiding a suffix-based cross product.
-            "live_ref[target_qn] := "
+            "live_private_method_name[fq, method_name] := "
             "*noncall_private_member_ref[fp, fq, bid, method_name], "
-            "*reachable_block[fp, fq, bid], "
+            f"*reachable_block[fp, fq, bid]{excl_clauses}\n"
+
+            "private_method[method_name, target_qn] := "
             "*symbol[target_qn, _, method_name, method_kind, _, _, _], "
             'method_kind in ["method", "async_method"], '
-            'starts_with(method_name, "_"), not starts_with(method_name, "__")'
-            f"{excl_clauses}\n"
+            'starts_with(method_name, "_"), not starts_with(method_name, "__")\n'
+            "method_count[name, count(qn)] := private_method[name, qn]\n"
+            "reference_edge[fq, target] := live_private_method_name[fq, name], "
+            "method_count[name, 1], private_method[name, target]\n"
+            # Ambiguous name-only matches keep all targets alive, but cannot
+            # establish a causal dependency. This also avoids a callers x
+            # same-named-methods cross product when producing root summaries.
+            "external_ref[target] := live_private_method_name[_, name], "
+            "method_count[name, n], n > 1, private_method[name, target]\n"
 
             # Live references: from module level (no function context)
             # Exclude self-references where the reference is the symbol's own definition
-            'live_ref[sq] := '
+            'external_ref[sq] := '
             '*module_level_ref[sq, ref_fp, ref_line], '
             '*symbol[sq, sym_fp, _, _, sym_line, _, _], '
             f'not (ref_fp == sym_fp, ref_line == sym_line){excl_clauses_ref}\n'
+
+            'live_ref[qn] := reference_edge[_, qn]\n'
+            'live_ref[qn] := external_ref[qn]\n'
 
             # Entry points: dunder methods
             'entry_point[qn] := '
@@ -1678,34 +1695,57 @@ class FactGraph:
             'live_container[qn] := entry_point[qn]\n'
 
             # Dead top-level symbols.
-            "dead[qn, fp, name, kind, line, end_line, parent] := "
+            "eligible[qn, fp, name, kind, line, end_line, parent] := "
             "*symbol[qn, fp, name, kind, line, end_line, parent], "
             'parent == "", '
-            "not live_ref[qn], "
             "not entry_point[qn]\n"
 
             # Private methods on live classes. Public methods stay conservative
             # because frameworks, protocols, and subclasses commonly invoke
             # them without a statically visible reference.
-            "dead[qn, fp, name, kind, line, end_line, parent] := "
+            "eligible[qn, fp, name, kind, line, end_line, parent] := "
             "*symbol[qn, fp, name, kind, line, end_line, parent], "
             'parent != "", '
             'kind in ["method", "async_method"], '
             'starts_with(name, "_"), not starts_with(name, "__"), '
             "live_container[parent], "
-            "not live_ref[qn], "
             "not entry_point[qn]\n"
 
-            "?[fp, name, qn, kind, line, end_line, parent] := "
-            "dead[qn, fp, name, kind, line, end_line, parent]"
+            "root[qn] := eligible[qn, _, _, _, _, _, _], not live_ref[qn]\n"
+            "reported[qn, causes] := root[qn], causes = []\n"
+        )
+
+        if include_transitive:
+            query += (
+                # First bound the analysis to dependencies of known roots.
+                # Then retain every node reachable from an outside reference.
+                # This handles shared callees and cycles without iterative
+                # deletion or assuming every non-entry-point function is dead.
+                "candidate[qn] := root[qn]\n"
+                "candidate[target] := candidate[source], reference_edge[source, target], "
+                "eligible[target, _, _, _, _, _, _]\n"
+                "retained[qn] := candidate[qn], external_ref[qn]\n"
+                "retained[target] := candidate[target], reference_edge[source, target], "
+                "not candidate[source]\n"
+                "retained[target] := retained[source], reference_edge[source, target], candidate[target]\n"
+                "unused[qn] := candidate[qn], not retained[qn]\n"
+                "cause[root, root] := root[root]\n"
+                "cause[root, target] := cause[root, source], reference_edge[source, target], unused[target]\n"
+                "causes[qn, collect(root)] := cause[root, qn], not root[qn]\n"
+                "reported[qn, roots] := causes[qn, roots]\n"
+            )
+        query += (
+            "?[fp, name, qn, kind, line, end_line, parent, roots] := "
+            "reported[qn, roots], eligible[qn, fp, name, kind, line, end_line, parent]"
         )
 
         result = self._client.run(query)
         dead_symbols = [
-            SymbolFact(
+            DeadSymbolFact(
                 file_path=r[0], name=r[1], qualified_name=r[2],
                 kind=r[3], line=r[4], end_line=r[5],
                 parent=r[6] if r[6] else None,
+                root_causes=tuple(sorted(r[7])),
             )
             for r in result["rows"]
         ]

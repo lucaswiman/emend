@@ -1,7 +1,7 @@
 """Dead code detection: symbols, blocks, modules, and safe deletion."""
 from __future__ import annotations
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -27,6 +27,8 @@ class DeadSymbol:
     selector: str  # e.g. "file.py::func_name"
     reason: str  # Why it's flagged (e.g. "no references found")
     last_reference_commit: str | None = None  # git commit that last touched this symbol
+    root_causes: tuple[str, ...] = ()
+    dependents: list[DeadSymbol] = field(default_factory=list)
 
 
 @dataclass
@@ -95,6 +97,10 @@ def dead_code_result_to_dict(
     }
     if result.last_reference_commit:
         data["last_reference_commit"] = result.last_reference_commit
+    if result.root_causes:
+        data["root_causes"] = list(result.root_causes)
+    if result.dependents:
+        data["dependents"] = [dead_code_result_to_dict(item) for item in result.dependents]
     return data
 
 
@@ -1170,6 +1176,7 @@ def find_dead_code(
     entry_point_names: list[str] | None = None,
     exclude_paths: list[str] | None = None,
     unused_modules: bool = True,
+    include_transitive: bool = False,
 ) -> Iterator[DeadSymbol | DeadBlock | DeadModule]:
     """Find potentially dead (unreferenced) code in a project.
 
@@ -1206,6 +1213,8 @@ def find_dead_code(
             Symbols defined in these paths are never reported.
         unused_modules: If True (default), also report Python module files that
             have no incoming imports from non-excluded project files.
+        include_transitive: Report dependencies of unused roots separately.
+            By default they are attached to their roots as brief summaries.
 
     Yields:
         DeadBlock items for unreachable code blocks, then DeadSymbol objects
@@ -1296,7 +1305,7 @@ def find_dead_code(
         graph, project_root_resolved, all_ep_type_methods,
     ))
 
-    raw_dead, raw_unreachable = graph.dead_code_unified(
+    query_options = dict(
         entry_point_decorators=all_ep_decorators + all_ep_basenames,
         entry_point_names=all_ep_names,
         entry_point_prefixes=all_ep_prefixes,
@@ -1304,7 +1313,9 @@ def find_dead_code(
         exclude_reference_segments=excl_ref_segments if excl_ref_segments else None,
         exclude_reference_files=excluded_test_files or None,
         entry_point_qualified_names=sorted(exact_entry_points) or None,
+        include_transitive=True,
     )
+    raw_dead, raw_unreachable = graph.dead_code_unified(**query_options)
 
     # Build a language-plugin-backed cache for noqa checking.  This keeps
     # dead-code suppression aligned with lint and avoids treating arbitrary
@@ -1369,6 +1380,7 @@ def find_dead_code(
             line=sym.line,
             selector=f"{abs_fp}::{sym.qualified_name}",
             reason="no references found",
+            root_causes=sym.root_causes,
         ))
 
     # String-literal post-filter
@@ -1378,6 +1390,30 @@ def find_dead_code(
             exclude_test_references,
         )
 
+    by_qn = {symbol.selector.split("::", 1)[1]: symbol for symbol in dead_symbols}
+    protected = {symbol.qualified_name for symbol in raw_dead} - by_qn.keys()
+    if protected and any(symbol.root_causes for symbol in raw_dead):
+        # A suppressed/filtered root or intermediate helper must not make its
+        # dependencies look unused. Re-evaluate against the same cached facts,
+        # treating these reporting exclusions conservatively as entry points.
+        query_options["entry_point_qualified_names"] = sorted(exact_entry_points | protected)
+        raw_dead, _ = graph.dead_code_unified(**query_options)
+        surviving = {symbol.qualified_name: symbol for symbol in raw_dead}
+        by_qn = {qn: symbol for qn, symbol in by_qn.items() if qn in surviving}
+        for qn, symbol in by_qn.items():
+            symbol.root_causes = surviving[qn].root_causes
+
+    # Never attach a dependency to a root outside this filtered report.
+    by_qn = {qn: symbol for qn, symbol in by_qn.items() if set(symbol.root_causes) <= by_qn.keys()}
+    for symbol in by_qn.values():
+        if symbol.root_causes:
+            symbol.reason = "only referenced by unused code; roots: " + ", ".join(symbol.root_causes)
+            if not include_transitive:
+                for root in symbol.root_causes:
+                    by_qn[root].dependents.append(symbol)
+    for symbol in by_qn.values():
+        symbol.dependents.sort(key=lambda item: item.selector)
+    dead_symbols = [symbol for symbol in by_qn.values() if include_transitive or not symbol.root_causes]
     dead_symbols.sort(key=lambda symbol: (symbol.file_path, symbol.line))
 
     logger.info(

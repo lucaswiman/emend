@@ -603,6 +603,19 @@ root unless absolute. Leading ``./`` and trailing ``/`` are optional.
 Matching directories exclude all descendants, but not similarly named siblings
 (for example, ``migrations`` does not exclude ``migrations_backup``).
 
+Unused symbols are reported as root findings by default. Symbols referenced
+only by those roots are summarized on one indented line (up to five names,
+then a remaining count), rather than reported as additional independent
+findings. ``--include-transitive`` lists these dependencies separately with
+their root causes. JSON keeps complete details in each root's ``dependents``
+array; the expanded form instead has ``root_causes`` on each dependent.
+
+These are conditional findings: a missed framework entry point can make its
+dependencies appear unused too. Registering or suppressing that root protects
+its dependencies. Shared dependencies can appear under multiple roots; cycles
+without an unreferenced root are not inferred dead. Callback registrations
+and other non-call references also count as uses.
+
 See :doc:`commands` for the full ``analyze deadcode`` command reference.
 
 

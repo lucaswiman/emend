@@ -915,15 +915,19 @@ class TestGraphDatalog:
 class TestDeadCodeUnified:
     """Test dead_code_unified() Datalog query method."""
 
-    def test_unified_finds_unreferenced(self):
-        g = _make_graph_with_cfg()
+    def test_unified_finds_unreferenced(self, tmp_path):
+        (tmp_path / "lib.py").write_text(
+            "def root():\n    helper()\n"
+            "def helper():\n    leaf()\n"
+            "def leaf():\n    return 1\n"
+        )
+        g = FactGraph.build_from_project(str(tmp_path))
         dead, _ = g.dead_code_unified()
-        dead_qns = {s.qualified_name for s in dead}
-        # app.main has no callers; app.helper and lib.compute are only
-        # referenced from within app.main, which is itself dead, so they
-        # cascade to dead. lib.MyClass.__init__ is a dunder entry point and
-        # lib.MyClass is referenced via import, so both are excluded.
-        assert dead_qns == {"app.main", "app.helper", "lib.compute"}
+        assert {s.qualified_name for s in dead} == {"lib.root"}
+        expanded, _ = g.dead_code_unified(include_transitive=True)
+        assert {s.qualified_name: s.root_causes for s in expanded} == {
+            "lib.root": (), "lib.helper": ("lib.root",), "lib.leaf": ("lib.root",),
+        }
 
     def test_unified_respects_entry_point_decorators(self):
         g = _make_graph_with_cfg()

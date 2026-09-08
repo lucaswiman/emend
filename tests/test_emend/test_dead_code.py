@@ -48,6 +48,77 @@ def dead_module_names(project: Path, **kwargs) -> set[str]:
     }
 
 
+def test_unused_dependencies_are_summaries_not_independent_findings(tmp_path, run_emend_cmd):
+    project = make_project(tmp_path, {"lib.py": (
+        "def root():\n    branch()\n    shared()\n    callback()\n"
+        "def other():\n    shared()\n"
+        "def branch():\n    cycle()\n"
+        "def cycle():\n    branch()\n"
+        "def shared():\n    return 1\n"
+        "def callback():\n    return 2\n"
+        "registry = [callback]\n"
+        "def isolated_a():\n    isolated_b()\n"
+        "def isolated_b():\n    isolated_a()\n"
+    )})
+    args = ["deadcode", str(project), "--no-unused-modules", "--no-last-reference"]
+    report = json.loads(run_emend_cmd(args + ["--json"]).stdout)
+    roots = {item["name"]: item for item in report}
+    assert set(roots) == {"root", "other"}
+    assert {item["name"] for item in roots["root"]["dependents"]} == {"branch", "cycle", "shared"}
+    assert [item["name"] for item in roots["other"]["dependents"]] == ["shared"]
+    text = run_emend_cmd(args).stdout
+    assert "    only used by unused code:" in text
+    assert "branch (function)" not in text
+    expanded = json.loads(run_emend_cmd(args + ["--include-transitive", "--json"]).stdout)
+    assert {item["name"] for item in expanded} == {"root", "other", "branch", "cycle", "shared"}
+    assert all("no references" not in item["reason"] for item in expanded if item["name"] not in roots)
+    # Marking a missed framework entry point live must also spare its callees.
+    spared = json.loads(run_emend_cmd(args + ["--entry-point-name", "root", "--json"]).stdout)
+    assert [item["name"] for item in spared] == ["other"]
+    assert not spared[0].get("dependents")
+
+
+@pytest.mark.parametrize("suppression", ["# noqa: emend:deadcode", "string", "path"])
+@pytest.mark.parametrize("target", ["root", "helper"])
+def test_suppressed_unused_dependencies_do_not_propagate(tmp_path, suppression, target):
+    from emend.transform import find_dead_code
+
+    project = make_project(tmp_path, {"lib.py": (
+        f"def root():  {suppression if target == 'root' and suppression.startswith('#') else ''}\n    helper()\n"
+        f"def helper():  {suppression if target == 'helper' and suppression.startswith('#') else ''}\n    leaf()\n"
+        "def leaf():\n    return 1\n"
+        + (f'registry = "{target}"\n' if suppression == "string" else '')
+    )})
+    results = list(find_dead_code(
+        str(project), unused_modules=False, show_last_reference=False,
+        exclude_paths=["lib.py"] if suppression == "path" else None,
+    ))
+    assert [item.name for item in results] == ([] if suppression == "path" or target == "root" else ["root"])
+    assert all(not item.dependents for item in results)
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_unused_private_methods_have_bounded_summaries(tmp_path, run_emend_cmd, ambiguous):
+    helpers = "".join(f"    def _helper{i}(self):\n        return {i}\n" for i in range(7))
+    project = make_project(tmp_path, {"lib.py": (
+        "class Worker:\n    def _root(self):\n"
+        + "".join(f"        self._helper{i}()\n" for i in range(7))
+        + helpers
+        + "worker = Worker()\n"
+        + ("class Other:\n" + helpers + "other = Other()\n" if ambiguous else "")
+    )})
+    args = ["deadcode", str(project), "--no-last-reference", "--no-unused-modules"]
+    text = run_emend_cmd(args).stdout
+    assert "_root (method)" in text
+    assert "_helper0 (method)" not in text
+    assert (", +2 more" in text) is not ambiguous
+    assert len(text.strip().splitlines()) == (1 if ambiguous else 2)
+    result, = json.loads(run_emend_cmd(args + ["--json"]).stdout)
+    assert {item["name"] for item in result.get("dependents", [])} == (
+        set() if ambiguous else {f"_helper{i}" for i in range(7)}
+    )
+
+
 def test_scan_subdirectory_retains_external_references(tmp_path):
     from emend.transform import find_dead_code
 
