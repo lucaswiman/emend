@@ -6,10 +6,10 @@ import pytest
 from emend.component_selector import ExtendedSelector
 
 
-def _make_selector(file_path, symbol_name):
+def _make_selector(file_path, *symbol_path):
     return ExtendedSelector(
         file_path=str(file_path),
-        symbol_path=[symbol_name],
+        symbol_path=list(symbol_path),
         component=None,
         accessor=None,
     )
@@ -158,6 +158,11 @@ class TestFindReferencesRust:
             f"All reads_only refs should have is_write=False, got {reads_only}"
         )
 
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AssertionError,
+        reason="Rust path-qualified references are not resolved across files",
+    )
     def test_refs_cross_file(self, tmp_path):
         """find_references finds references to a Rust function across files."""
         from emend.transform import find_references
@@ -186,10 +191,8 @@ class TestFindReferencesRust:
         refs = list(find_references(selector, project_path=str(project)))
 
         ref_files = {Path(r.file_path).name for r in refs}
-        assert len(refs) >= 1, f"Expected at least one reference, got {refs}"
-        # The definition should always be found
-        assert "lib.rs" in ref_files, (
-            f"Expected lib.rs in ref files, got {ref_files}"
+        assert {"lib.rs", "main.rs"} <= ref_files, (
+            f"Expected definition and cross-file usage, got {ref_files}"
         )
 
 
@@ -225,14 +228,13 @@ class TestFindCallersRust:
             f"Expected caller on line 6, got caller lines {caller_lines}"
         )
 
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AssertionError,
+        reason="Rust method calls are not attributed to their impl methods",
+    )
     def test_callers_finds_method_callers(self, tmp_path):
-        """find_callers documents current limitation with c.method() Rust syntax.
-
-        TODO: method resolution via obj.method() requires type inference (Phase 8+).
-        The scope resolver cannot resolve `c` to `Counter`, so `c.increment()` is
-        not attributed as a call to Counter::increment. This test documents that
-        the callers list is empty for this case with the current implementation.
-        """
+        """find_callers attributes obj.method() calls to the impl method."""
         from emend.transform import find_callers
 
         project = tmp_path / "project"
@@ -257,17 +259,10 @@ class TestFindCallersRust:
             "}\n"
         )
 
-        selector = _make_selector(lib_rs, "increment")
+        selector = _make_selector(lib_rs, "Counter", "increment")
         callers = list(find_callers(selector, project_path=str(project)))
 
-        # TODO: method resolution via obj.method() requires type inference (Phase 8+).
-        # With the current scope resolver, c.increment() cannot be attributed to
-        # Counter::increment because c's type is not resolved. The callers list is
-        # expected to be empty until type inference is implemented.
-        assert len(callers) == 0, (
-            f"Expected no callers for increment (method-via-object resolution not yet "
-            f"implemented), but got {callers}"
-        )
+        assert {r.line for r in callers} == {13, 14}
 
     def test_callers_same_file(self, tmp_path):
         """find_callers finds calls to the target within its own file."""
@@ -298,15 +293,13 @@ class TestFindCallersRust:
             f"Expected call on line 6, got caller lines {caller_lines}"
         )
 
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AssertionError,
+        reason="Rust path-qualified calls are not attributed across files",
+    )
     def test_callers_cross_file(self, tmp_path):
-        """find_callers documents current limitation with Rust path-qualified calls.
-
-        TODO: Rust `use` import / path-qualified call resolution (utils::compute)
-        requires module-path-aware scope resolution (Phase 8+). The scope resolver
-        does not currently handle `mod utils; ... utils::compute(5)` cross-file
-        call attribution. This test documents that the callers list is empty for
-        this case and that direct (unqualified) cross-file calls do work.
-        """
+        """find_callers attributes a path-qualified cross-file call."""
         from emend.transform import find_callers
 
         project = tmp_path / "project"
@@ -332,14 +325,7 @@ class TestFindCallersRust:
         selector = _make_selector(utils_rs, "compute")
         callers = list(find_callers(selector, project_path=str(project)))
 
-        # TODO: Rust path-qualified calls (utils::compute) require module-path-aware
-        # scope resolution (Phase 8+). The scope resolver treats `utils::compute` as
-        # a qualified identifier and does not resolve it to the `compute` symbol in
-        # utils.rs. The callers list is expected to be empty until this is implemented.
-        assert len(callers) == 0, (
-            f"Expected no callers for compute (Rust path-qualified call resolution not "
-            f"yet implemented), but got {callers}"
-        )
+        assert [(Path(r.file_path).name, r.line) for r in callers] == [("main.rs", 4)]
 
 
 class TestFindCalleesRust:
@@ -380,14 +366,13 @@ class TestFindCalleesRust:
             f"Expected 'utility' in callees, got {callee_names}"
         )
 
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AssertionError,
+        reason="Rust method-call callees are reported as receiver names",
+    )
     def test_callees_method_calls(self, tmp_path):
-        """find_callees with obj.method() Rust syntax uses direct function calls.
-
-        TODO: method resolution via self/obj requires type inference (Phase 8+).
-        The scope resolver returns the object names (items, result) as references
-        rather than the method names (clone, push) for obj.method() call patterns.
-        This test uses direct function calls to verify callees detection works.
-        """
+        """find_callees reports method names from obj.method() calls."""
         from emend.transform import find_callees
 
         project = tmp_path / "project"
@@ -395,16 +380,10 @@ class TestFindCalleesRust:
 
         lib_rs = project / "lib.rs"
         lib_rs.write_text(
-            "fn double(x: i32) -> i32 {\n"
-            "    x * 2\n"
-            "}\n"
-            "\n"
-            "fn negate(x: i32) -> i32 {\n"
-            "    -x\n"
-            "}\n"
-            "\n"
-            "fn process(x: i32) -> i32 {\n"
-            "    negate(double(x))\n"
+            "fn process(items: &mut Vec<i32>) -> Vec<i32> {\n"
+            "    let result = items.clone();\n"
+            "    items.push(1);\n"
+            "    result\n"
             "}\n"
         )
 
@@ -412,10 +391,7 @@ class TestFindCalleesRust:
         callees = find_callees(selector, project_path=str(project))
 
         callee_names = {c.name for c in callees}
-        # process calls double and negate directly (no obj.method() needed)
-        assert "double" in callee_names or "negate" in callee_names, (
-            f"Expected double or negate in callees, got {callee_names}"
-        )
+        assert {"clone", "push"} <= callee_names
 
     def test_callees_no_calls(self, tmp_path):
         """find_callees returns empty list for a Rust function with no calls."""
@@ -438,14 +414,13 @@ class TestFindCalleesRust:
             f"Expected no callees for pure arithmetic function, got {callees}"
         )
 
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AssertionError,
+        reason="Rust impl method bodies are not traversed for callees",
+    )
     def test_callees_impl_method(self, tmp_path):
-        """find_callees with Rust impl methods documents current limitation.
-
-        TODO: Rust impl block method callees require impl_item traversal support
-        (Phase 8+). The scope resolver does not currently traverse into impl block
-        method bodies to find callees. This test documents the limitation and uses
-        a free function calling other free functions instead.
-        """
+        """find_callees traverses a Rust impl method body."""
         from emend.transform import find_callees
 
         project = tmp_path / "project"
@@ -457,10 +432,6 @@ class TestFindCalleesRust:
             "    x > 0\n"
             "}\n"
             "\n"
-            "fn format_value(x: i32) -> String {\n"
-            "    format!(\"value={}\", x)\n"
-            "}\n"
-            "\n"
             "struct Processor;\n"
             "\n"
             "impl Processor {\n"
@@ -468,19 +439,12 @@ class TestFindCalleesRust:
             "        validate(x)\n"
             "    }\n"
             "}\n"
-            "\n"
-            "fn process(x: i32) -> bool {\n"
-            "    validate(x)\n"
-            "}\n"
         )
 
-        # TODO: Rust impl block method callees require impl_item traversal support
-        # (Phase 8+). The scope resolver returns empty callees for impl methods.
-        # Using a free function `process` (which calls validate) as a workaround.
-        selector = _make_selector(lib_rs, "process")
+        selector = _make_selector(lib_rs, "Processor", "run")
         callees = find_callees(selector, project_path=str(project))
 
         callee_names = {c.name for c in callees}
         assert "validate" in callee_names, (
-            f"Expected 'validate' in callees of process(), got {callee_names}"
+            f"Expected 'validate' in callees of run(), got {callee_names}"
         )
