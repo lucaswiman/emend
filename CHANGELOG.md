@@ -2,10 +2,38 @@
 
 ## Unreleased
 
-- Unified pattern compilation on tree-sitter, removing the Python AST compiler
-  while preserving partial headers, definition globs, and metavariable captures.
-- Corrected exception-handler captures for patterns such as `except $E as $ERR:`.
-- Moved the remaining Python import extraction to the Rust tree-sitter backend.
+## 0.5.1 (2026-09-08)
+
+### Upgrade note
+
+- Removed the obsolete `trace --max-iterations` option. Use
+  `--max-chain-depth` to bound flow traversal.
+
+### Analysis and language support
+
+- Extended structural patterns across Python, TypeScript, and Rust while
+  preserving partial definitions, globs, wildcards, and captures. Malformed
+  trailing syntax is now rejected, and exception-alias captures are correct.
+- Added Rust resolution for inherent methods, qualified calls, top-level `use`
+  aliases, and method calls whose receiver type is available from syntax.
+- Corrected flow behavior across overwrites, branches, sanitizers, effects,
+  cross-file calls and returns, including endpoints with multiple captures.
+- Fixed duplicate detection to preserve semantic differences and report real
+  maximal statement runs without treating comments as code.
+
+### Dead code
+
+- Made `--exclude-path` resolve relative to the project root and avoid matching
+  similarly named siblings. Relative imports and member references now count.
+- Reports dependencies used only by unused code briefly under their unused
+  roots. Use `--include-transitive` to list them as separate findings.
+
+### Reliability
+
+- Analysis and editor results now refresh after file additions, edits, branch
+  changes, and unsaved-buffer updates while reusing identical-content work.
+- Fixed empty batch replacements, symlink traversal cycles, and cache results
+  leaking between different files or mutable callers.
 
 ## 0.5.0 (2026-09-01)
 
