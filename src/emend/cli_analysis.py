@@ -443,7 +443,7 @@ def dead_code_cmd(
     ] = None,
     exclude_path: Annotated[
         Optional[list[str]],
-        typer.Option("--exclude-path", help="Directories to exclude entirely from analysis (repeatable)")
+        typer.Option("--exclude-path", help="Directory paths or globs to exclude from results, relative to the project root unless absolute (repeatable)")
     ] = None,
     unused_modules: Annotated[
         bool,
@@ -452,6 +452,9 @@ def dead_code_cmd(
             help="Report Python modules that are never imported",
         ),
     ] = True,
+    include_transitive: Annotated[
+        bool, typer.Option("--include-transitive", help="List transitively unused symbols separately instead of summarizing them under roots")
+    ] = False,
 ):
     """Find potentially dead (unreferenced) code in a project.
 
@@ -474,6 +477,8 @@ def dead_code_cmd(
     --include-test-references to count them. Private symbols/methods and
     unused modules are reported by default; use --exclude-private or
     --no-unused-modules to opt out.
+    Dependencies used only by unused roots are summarized underneath them;
+    use --include-transitive for separate findings with their root causes.
 
     Use --entry-point-decorator and --entry-point-name to add custom
     exclusions beyond the built-in heuristics.
@@ -507,6 +512,7 @@ def dead_code_cmd(
             entry_point_names=entry_point_name,
             exclude_paths=exclude_path,
             unused_modules=unused_modules,
+            include_transitive=include_transitive,
         )
 
         if json_output:
@@ -528,6 +534,12 @@ def dead_code_cmd(
                     line = f"{d.file_path}:{d.line}  {d.name} ({d.kind}) - {d.reason}"
                     if d.last_reference_commit:
                         line += f"\n    last commit: {d.last_reference_commit}"
+                    if d.dependents:
+                        names = [item.selector.split("::", 1)[1] for item in d.dependents[:5]]
+                        summary = ", ".join(names)
+                        if len(d.dependents) > 5:
+                            summary += f", +{len(d.dependents) - 5} more"
+                        line += f"\n    only used by unused code: {summary}"
                 print(line, flush=True)
                 count += 1
             if count == 0:
