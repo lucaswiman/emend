@@ -936,21 +936,19 @@ def _python_metadata_entry_points(project_root: str) -> set[str]:
     return targets
 
 
-def _path_is_excluded(file_path: str, patterns: list[str] | None) -> bool:
+def _path_is_excluded(file_path: str, patterns: list[str] | None, project_root: str) -> bool:
     if not patterns:
         return False
-    for pattern in patterns:
-        candidates = (pattern, pattern + "*")
-        if any(fnmatch.fnmatch(file_path, candidate) for candidate in candidates):
-            return True
-        if "**" in pattern:
-            relaxed = pattern.replace("**", "*")
-            if any(
-                fnmatch.fnmatch(file_path, candidate)
-                for candidate in (relaxed, relaxed + "*")
-            ):
-                return True
-    return False
+    from emend.checks.rules_config import path_matches_glob
+
+    path = Path(file_path)
+    # Anchor relative patterns to the project, and match whole ancestors so
+    # directory globs exclude descendants without matching sibling prefixes.
+    return any(
+        path_matches_glob(candidate, Path(project_root) / pattern)
+        for pattern in patterns
+        for candidate in (path, *path.parents)
+    )
 
 
 def _has_python_main_guard(file_path: Path) -> bool:
@@ -1203,7 +1201,8 @@ def find_dead_code(
         entry_point_names: Additional function/class names to treat as entry
             points (e.g. ``["plugin_init"]``).  Symbols with these names are
             never flagged as dead code.
-        exclude_paths: Directories to exclude entirely from dead code analysis.
+        exclude_paths: Directory paths or globs, relative to the project root
+            unless absolute, to exclude from dead code results.
             Symbols defined in these paths are never reported.
         unused_modules: If True (default), also report Python module files that
             have no incoming imports from non-excluded project files.
@@ -1352,7 +1351,7 @@ def find_dead_code(
             continue
 
         # Exclude paths filter
-        if _path_is_excluded(abs_fp, exclude_paths):
+        if _path_is_excluded(abs_fp, exclude_paths, project_root_resolved):
             continue
 
         # noqa suppression
@@ -1439,7 +1438,7 @@ def find_dead_code(
             if not Path(ub.file_path).is_absolute()
             else ub.file_path
         )
-        if not Path(abs_fp).is_relative_to(scan_root) or _path_is_excluded(abs_fp, exclude_paths):
+        if not Path(abs_fp).is_relative_to(scan_root) or _path_is_excluded(abs_fp, exclude_paths, project_root_resolved):
             continue
         loc = block_loc_index.get((ub.file_path, f"{ub.func_qn}:{ub.block_id}"))
         if loc is None:
@@ -1548,7 +1547,7 @@ def find_dead_code(
             continue
         if _is_test_file(str(abs_path)):
             continue
-        if _path_is_excluded(str(abs_path), exclude_paths):
+        if _path_is_excluded(str(abs_path), exclude_paths, project_root_resolved):
             continue
         if not include_private and abs_path.stem.startswith("_"):
             continue

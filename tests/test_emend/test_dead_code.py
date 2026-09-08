@@ -1648,28 +1648,31 @@ class TestExcludePaths:
         })
         assert dc_config.exclude_paths == ["scripts/"]
 
-    def test_cli_exclude_path(self, tmp_path, run_emend_cmd):
-        """CLI --exclude-path excludes directories from analysis."""
-        project = make_project_dir(tmp_path)
-        scripts = project / "scripts"
-        scripts.mkdir()
-
-        (project / "lib.py").write_text(
-            "def truly_unused():\n"
-            "    return 1\n"
-        )
-        (scripts / "run.py").write_text(
-            "def script_func():\n"
-            "    return 2\n"
-        )
-
+    @pytest.mark.parametrize("pattern", [
+        "./src/package/migrations", "src/package/migrations/",
+        "absolute", "**/migrations/", "src/*/migrations", "./src/**/migrations/",
+    ])
+    @pytest.mark.parametrize("inside_project", [True, False])
+    def test_cli_exclude_path(self, tmp_path, run_emend_cmd, monkeypatch, pattern, inside_project):
+        """Exclude descendants, not similarly named siblings, relative to the project."""
+        project = make_project(tmp_path, {
+            f"src/package/{directory}/nested/run.py":
+                f"def {name}():\n    return 1\n    print('unreachable')\n"
+            for directory, name in [("migrations", "script_func"), ("migrations_backup", "truly_unused")]
+        })
+        monkeypatch.chdir(project if inside_project else tmp_path)
+        if pattern == "absolute":
+            pattern = str(project / "src/package/migrations")
         result = run_emend_cmd([
             "deadcode", str(project),
-            "--exclude-path", str(scripts),
+            "--exclude-path=" + pattern,
             "--no-last-reference",
         ])
-        assert "truly_unused" in result.stdout
         assert "script_func" not in result.stdout
+        assert "migrations/nested/run.py" not in result.stdout
+        assert "unreachable" in result.stdout
+        assert "truly_unused (function)" in result.stdout
+        assert "module is never imported" in result.stdout
 
     def test_exclude_paths_glob_pattern(self, tmp_path):
         """Glob patterns like **/scripts/ work in exclude-paths."""

@@ -598,6 +598,11 @@ Dead code detection is also available as a standalone command with additional op
    emend analyze deadcode . --exclude-path frontends/devtools/
    emend analyze deadcode . --exclude-private --no-unused-modules
 
+``--exclude-path`` accepts directory paths or globs, relative to the project
+root unless absolute. Leading ``./`` and trailing ``/`` are optional.
+Matching directories exclude all descendants, but not similarly named siblings
+(for example, ``migrations`` does not exclude ``migrations_backup``).
+
 See :doc:`commands` for the full ``analyze deadcode`` command reference.
 
 

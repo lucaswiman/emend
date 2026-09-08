@@ -443,7 +443,7 @@ def dead_code_cmd(
     ] = None,
     exclude_path: Annotated[
         Optional[list[str]],
-        typer.Option("--exclude-path", help="Directories to exclude entirely from analysis (repeatable)")
+        typer.Option("--exclude-path", help="Directory paths or globs to exclude from results, relative to the project root unless absolute (repeatable)")
     ] = None,
     unused_modules: Annotated[
         bool,
