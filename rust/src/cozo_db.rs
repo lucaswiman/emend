@@ -5,7 +5,7 @@
 
 use cozo::*;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyTuple};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
@@ -156,6 +156,40 @@ impl PyCozoDb {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("CozoDB query error: {}", e))
             })?;
         named_rows_to_py(py, result)
+    }
+
+    /// Run several scripts in one transaction, converting each parameter
+    /// batch only when its script is ready to execute.
+    fn run_transaction(&self, operations: &Bound<'_, PyList>) -> PyResult<()> {
+        let transaction = self.db.multi_transaction(true);
+        for operation in operations.iter() {
+            let converted = (|| -> PyResult<_> {
+                let operation = operation.downcast_into::<PyTuple>()?;
+                let query: String = operation.get_item(0)?.extract()?;
+                let params = operation.get_item(1)?.downcast_into::<PyDict>()?;
+                Ok((query, py_params(Some(&params))?))
+            })();
+            let (query, params) = match converted {
+                Ok(converted) => converted,
+                Err(error) => {
+                    let _ = transaction.abort();
+                    return Err(error);
+                }
+            };
+            if let Err(error) = transaction.run_script(&query, params) {
+                let _ = transaction.abort();
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "CozoDB query error: {}",
+                    error
+                )));
+            }
+        }
+        transaction.commit().map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "CozoDB transaction error: {}",
+                error
+            ))
+        })
     }
 
     /// Close the database (no-op for in-memory).

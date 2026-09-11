@@ -45,12 +45,31 @@ def test_batched_fact_mutations_abort_as_one_transaction(tmp_path, request, pers
     )
 
     with pytest.raises(RuntimeError, match="CozoDB query error"):
-        graph._run_mutations([
-            (put, {"rows": [["a.after", "a.py", "after", "function", 2, 2, ""]]}),
-            ("?[x] := *missing_relation[x]", {}),
-        ])
+        graph._run_mutations(
+            [
+                (put, {"rows": [["a.after", "a.py", "after", "function", 2, 2, ""]]}),
+                ("?[x] := *missing_relation[x]", {}),
+            ]
+        )
 
     assert [symbol.name for symbol in graph.symbols()] == ["before"]
+
+
+def test_batched_fact_mutations_use_streaming_transaction():
+    class Client:
+        def __init__(self):
+            self.operations = None
+
+        def run_transaction(self, operations):
+            self.operations = operations
+
+    graph = FactGraph()
+    graph._client = client = Client()
+    operations = [("?[x] <- $rows", {"rows": [[1]]})]
+
+    graph._run_mutations(operations)
+
+    assert client.operations is operations
 
 
 def _make_graph() -> FactGraph:

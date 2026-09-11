@@ -8,6 +8,7 @@ import textwrap
 
 import pytest
 
+import emend.fact_graph as fact_graph_module
 from emend.fact_graph import (
     CallFact,
     CfgBlockFact,
@@ -400,12 +401,40 @@ def test_replace_extracted_coalesces_relation_mutations(monkeypatch):
     ]
 
 
+def test_replace_extracted_chunks_large_relations(monkeypatch):
+    graph = FactGraph()
+    captured = []
+    monkeypatch.setattr(graph, "_run_mutations", captured.extend)
+    monkeypatch.setattr(fact_graph_module, "_FACT_INSERT_BATCH_SIZE", 1)
+    graph.replace_extracted(
+        [
+            _empty_extracted(
+                "a.py",
+                [
+                    ["a.f", "a.py", "f", "function", 1, 1, ""],
+                    ["a.g", "a.py", "g", "function", 2, 2, ""],
+                ],
+            ),
+        ],
+        stored_paths=["a.py"],
+    )
+
+    inserts = [params for query, params in captured if ":put symbol" in query]
+    assert [params["rows"] for params in inserts] == [
+        [["a.f", "a.py", "f", "function", 1, 1, ""]],
+        [["a.g", "a.py", "g", "function", 2, 2, ""]],
+    ]
+
+
 def test_replace_extracted_preserves_last_symbol_for_duplicate_qn():
     graph = FactGraph()
-    graph.replace_extracted([
-        _empty_extracted("a.py", [["shared.f", "a.py", "f", "function", 1, 1, ""]]),
-        _empty_extracted("b.py", [["shared.f", "b.py", "f", "function", 2, 2, ""]]),
-    ], stored_paths=["a.py", "b.py"])
+    graph.replace_extracted(
+        [
+            _empty_extracted("a.py", [["shared.f", "a.py", "f", "function", 1, 1, ""]]),
+            _empty_extracted("b.py", [["shared.f", "b.py", "f", "function", 2, 2, ""]]),
+        ],
+        stored_paths=["a.py", "b.py"],
+    )
 
     assert graph.symbols() == [SymbolFact("b.py", "f", "shared.f", "function", 2, 2)]
 

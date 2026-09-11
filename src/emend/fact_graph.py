@@ -71,6 +71,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 FACT_GRAPH_SCHEMA_VERSION = "10"
+_FACT_INSERT_BATCH_SIZE = 25_000
 
 
 @dataclass(frozen=True)
@@ -722,27 +723,29 @@ class FactGraph:
 
         Caller is responsible for skipping empty inserts.
         """
-        operation = (
-            f"?[{cols}] <- $rows :put {relation} {{{schema}}}",
-            {"rows": rows},
-        )
-        if operations is None:
-            self._client.run(*operation)
-        else:
-            operations.append(operation)
+        query = f"?[{cols}] <- $rows :put {relation} {{{schema}}}"
+        for start in range(0, len(rows), _FACT_INSERT_BATCH_SIZE):
+            operation = (query, {"rows": rows[start : start + _FACT_INSERT_BATCH_SIZE]})
+            if operations is None:
+                self._client.run(*operation)
+            else:
+                operations.append(operation)
 
-    def _run_mutations(
-        self, operations: list[tuple[str, dict[str, Any]]]
-    ) -> None:
-        """Run generated mutations in Cozo's synchronous atomic script."""
+    def _run_mutations(self, operations: list[tuple[str, dict[str, Any]]]) -> None:
+        """Run generated mutations in one synchronous Cozo transaction."""
+        if not operations:
+            return
+        run_transaction = getattr(self._client, "run_transaction", None)
+        if run_transaction is not None:
+            run_transaction(operations)
+            return
         queries, bindings = [], {}
         for index, (query, params) in enumerate(operations):
             # These internal statements contain only parameter uses of '$'.
             prefix = f"mutation_{index}_"
             queries.append("{" + query.replace("$", "$" + prefix) + "}")
             bindings.update((prefix + key, value) for key, value in params.items())
-        if queries:
-            self._client.run("\n".join(queries), bindings)
+        self._client.run("\n".join(queries), bindings)
 
     def add_symbols_batch(self, facts: list[SymbolFact]) -> None:
         """Bulk-insert symbol facts."""
