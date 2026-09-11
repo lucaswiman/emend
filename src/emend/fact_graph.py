@@ -2348,123 +2348,120 @@ class FactGraph:
         # CozoDB `:rm` requires that the query variable names in `?[...]`
         # and `:rm relation { }` match the actual column names in the
         # stored relation schema.
-        for fp in file_paths:
-            for query in (
-                # decorator_on/func_summary join through symbol — remove first
-                "?[symbol_qn, decorator] := *decorator_on[symbol_qn, decorator], "
-                "*symbol[symbol_qn, file_path, _, _, _, _, _], "
-                "file_path == $fp  :rm decorator_on {symbol_qn, decorator}",
-                "?[func_qn, param_name] := *func_summary[func_qn, param_name, _, _, _], "
-                "*symbol[func_qn, file_path, _, _, _, _, _], "
-                "file_path == $fp  :rm func_summary {func_qn, param_name => }",
-                # symbol
-                "?[qualified_name] := *symbol[qualified_name, file_path, _, _, _, _, _], "
-                "file_path == $fp  :rm symbol {qualified_name => }",
-                # search_symbol
-                "?[file_path, module_qualified_name] := "
-                "*search_symbol[file_path, module_qualified_name, _, _, _, _, _, _, _, _, _, _], "
-                "file_path == $fp  :rm search_symbol {file_path, module_qualified_name => }",
-                # call
-                "?[caller_qn, callee_qn, file_path, line, col] := "
-                "*call[caller_qn, callee_qn, file_path, line, col, _, _], "
-                "file_path == $fp  :rm call {caller_qn, callee_qn, file_path, line, col => }",
-                # call_by_callee
-                "?[callee_qn, caller_qn, file_path, line, col] := "
-                "*call_by_callee[callee_qn, caller_qn, file_path, line, col, _, _], "
-                "file_path == $fp  :rm call_by_callee {callee_qn, caller_qn, file_path, line, col => }",
-                # call_by_file
-                "?[file_path, caller_qn, callee_qn, line, col] := "
-                "*call_by_file[file_path, caller_qn, callee_qn, line, col, _, _], "
-                "file_path == $fp  :rm call_by_file {file_path, caller_qn, callee_qn, line, col => }",
-                # reference
-                "?[symbol_qn, file_path, line, col] := "
-                "*reference[symbol_qn, file_path, line, col, _, _, _], "
-                "file_path == $fp  :rm reference {symbol_qn, file_path, line, col => }",
-                # trace_flow (all keys)
-                "?[source_var, sink_var, label, file_path, func_qn, source_line, sink_line] := "
-                "*trace_flow[source_var, sink_var, label, file_path, func_qn, source_line, sink_line], "
-                "file_path == $fp  :rm trace_flow "
-                "{source_var, sink_var, label, file_path, func_qn, source_line, sink_line}",
-                # type_binding
-                "?[symbol_qn, file_path, line, binding_kind] := "
-                "*type_binding[symbol_qn, file_path, line, binding_kind, _], "
-                "file_path == $fp  :rm type_binding {symbol_qn, file_path, line, binding_kind => }",
-                # cfg_edge (all keys)
-                "?[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line] := "
-                "*cfg_edge[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line], "
-                "file_path == $fp  :rm cfg_edge "
-                "{file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}",
-                # flow_event/flow_edge are file-owned occurrence relations.
-                "?[file_path, event_id] := "
-                "*flow_event[file_path, event_id, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _], "
-                "file_path == $fp  :rm flow_event {file_path, event_id => }",
-                "?[file_path, from_event, to_event, edge_kind] := "
-                "*flow_edge[file_path, from_event, to_event, edge_kind], "
-                "file_path == $fp  :rm flow_edge "
-                "{file_path, from_event, to_event, edge_kind}",
-                # def_use
-                "?[file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line] := "
-                "*def_use[file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line, _, _], "
-                "file_path == $fp  :rm def_use "
-                "{file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line => }",
-                # method_call (all keys)
-                "?[file_path, func_qn, receiver, method, block_id, line] := "
-                "*method_call[file_path, func_qn, receiver, method, block_id, line], "
-                "file_path == $fp  :rm method_call "
-                "{file_path, func_qn, receiver, method, block_id, line}",
-                # cfg_block
-                "?[file_path, func_qn, block_id] := "
-                "*cfg_block[file_path, func_qn, block_id, _, _], "
-                "file_path == $fp  :rm cfg_block {file_path, func_qn, block_id => }",
-                # source_loc
-                "?[file_path, loc_kind, loc_id] := "
-                "*source_loc[file_path, loc_kind, loc_id, _, _, _, _], "
-                "file_path == $fp  :rm source_loc {file_path, loc_kind, loc_id => }",
-                # ref_by_block (all keys)
-                "?[file_path, func_qn, block_id, symbol_qn] := "
-                "*ref_by_block[file_path, func_qn, block_id, symbol_qn], "
-                "file_path == $fp  :rm ref_by_block "
-                "{file_path, func_qn, block_id, symbol_qn}",
-                # noncall_private_member_ref (all keys)
-                "?[file_path, func_qn, block_id, member_name] := "
-                "*noncall_private_member_ref[file_path, func_qn, block_id, member_name], "
-                "file_path == $fp  :rm noncall_private_member_ref "
-                "{file_path, func_qn, block_id, member_name}",
-                # reachable_block (all keys)
-                "?[file_path, func_qn, block_id] := "
-                "*reachable_block[file_path, func_qn, block_id], "
-                "file_path == $fp  :rm reachable_block {file_path, func_qn, block_id}",
-                # module_level_ref
-                "?[symbol_qn, file_path, line] := "
-                "*module_level_ref[symbol_qn, file_path, line], "
-                "file_path == $fp  :rm module_level_ref {symbol_qn, file_path, line}",
-                # exported_symbol is keyed by its defining file.
-                "?[file_path, qualified_name] := "
-                "*exported_symbol[file_path, qualified_name], "
-                "file_path == $fp  :rm exported_symbol {file_path, qualified_name}",
-                # import (uses importing_file, not file_path)
-                "?[importing_file, imported_module, imported_name, line] := "
-                "*import[importing_file, imported_module, imported_name, line, _], "
-                "importing_file == $fp  :rm import "
-                "{importing_file, imported_module, imported_name, line => }",
-            ):
-                if operations is not None:
-                    operations.append((query, {"fp": fp}))
-                    continue
-                try:
-                    self._client.run(query, {"fp": fp})
-                except Exception:
-                    logger.debug("Fact removal query failed for %s", fp, exc_info=True)
+        for query in (
+            # decorator_on/func_summary join through symbol — remove first
+            "?[symbol_qn, decorator] := *decorator_on[symbol_qn, decorator], "
+            "*symbol[symbol_qn, file_path, _, _, _, _, _], "
+            "file_path in $fps  :rm decorator_on {symbol_qn, decorator}",
+            "?[func_qn, param_name] := *func_summary[func_qn, param_name, _, _, _], "
+            "*symbol[func_qn, file_path, _, _, _, _, _], "
+            "file_path in $fps  :rm func_summary {func_qn, param_name => }",
+            # symbol
+            "?[qualified_name] := *symbol[qualified_name, file_path, _, _, _, _, _], "
+            "file_path in $fps  :rm symbol {qualified_name => }",
+            # search_symbol
+            "?[file_path, module_qualified_name] := "
+            "*search_symbol[file_path, module_qualified_name, _, _, _, _, _, _, _, _, _, _], "
+            "file_path in $fps  :rm search_symbol {file_path, module_qualified_name => }",
+            # call
+            "?[caller_qn, callee_qn, file_path, line, col] := "
+            "*call[caller_qn, callee_qn, file_path, line, col, _, _], "
+            "file_path in $fps  :rm call {caller_qn, callee_qn, file_path, line, col => }",
+            # call_by_callee
+            "?[callee_qn, caller_qn, file_path, line, col] := "
+            "*call_by_callee[callee_qn, caller_qn, file_path, line, col, _, _], "
+            "file_path in $fps  :rm call_by_callee {callee_qn, caller_qn, file_path, line, col => }",
+            # call_by_file
+            "?[file_path, caller_qn, callee_qn, line, col] := "
+            "*call_by_file[file_path, caller_qn, callee_qn, line, col, _, _], "
+            "file_path in $fps  :rm call_by_file {file_path, caller_qn, callee_qn, line, col => }",
+            # reference
+            "?[symbol_qn, file_path, line, col] := "
+            "*reference[symbol_qn, file_path, line, col, _, _, _], "
+            "file_path in $fps  :rm reference {symbol_qn, file_path, line, col => }",
+            # trace_flow (all keys)
+            "?[source_var, sink_var, label, file_path, func_qn, source_line, sink_line] := "
+            "*trace_flow[source_var, sink_var, label, file_path, func_qn, source_line, sink_line], "
+            "file_path in $fps  :rm trace_flow "
+            "{source_var, sink_var, label, file_path, func_qn, source_line, sink_line}",
+            # type_binding
+            "?[symbol_qn, file_path, line, binding_kind] := "
+            "*type_binding[symbol_qn, file_path, line, binding_kind, _], "
+            "file_path in $fps  :rm type_binding {symbol_qn, file_path, line, binding_kind => }",
+            # cfg_edge (all keys)
+            "?[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line] := "
+            "*cfg_edge[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line], "
+            "file_path in $fps  :rm cfg_edge "
+            "{file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}",
+            # flow_event/flow_edge are file-owned occurrence relations.
+            "?[file_path, event_id] := "
+            "*flow_event[file_path, event_id, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _], "
+            "file_path in $fps  :rm flow_event {file_path, event_id => }",
+            "?[file_path, from_event, to_event, edge_kind] := "
+            "*flow_edge[file_path, from_event, to_event, edge_kind], "
+            "file_path in $fps  :rm flow_edge "
+            "{file_path, from_event, to_event, edge_kind}",
+            # def_use
+            "?[file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line] := "
+            "*def_use[file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line, _, _], "
+            "file_path in $fps  :rm def_use "
+            "{file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line => }",
+            # method_call (all keys)
+            "?[file_path, func_qn, receiver, method, block_id, line] := "
+            "*method_call[file_path, func_qn, receiver, method, block_id, line], "
+            "file_path in $fps  :rm method_call "
+            "{file_path, func_qn, receiver, method, block_id, line}",
+            # cfg_block
+            "?[file_path, func_qn, block_id] := "
+            "*cfg_block[file_path, func_qn, block_id, _, _], "
+            "file_path in $fps  :rm cfg_block {file_path, func_qn, block_id => }",
+            # source_loc
+            "?[file_path, loc_kind, loc_id] := "
+            "*source_loc[file_path, loc_kind, loc_id, _, _, _, _], "
+            "file_path in $fps  :rm source_loc {file_path, loc_kind, loc_id => }",
+            # ref_by_block (all keys)
+            "?[file_path, func_qn, block_id, symbol_qn] := "
+            "*ref_by_block[file_path, func_qn, block_id, symbol_qn], "
+            "file_path in $fps  :rm ref_by_block "
+            "{file_path, func_qn, block_id, symbol_qn}",
+            # noncall_private_member_ref (all keys)
+            "?[file_path, func_qn, block_id, member_name] := "
+            "*noncall_private_member_ref[file_path, func_qn, block_id, member_name], "
+            "file_path in $fps  :rm noncall_private_member_ref "
+            "{file_path, func_qn, block_id, member_name}",
+            # reachable_block (all keys)
+            "?[file_path, func_qn, block_id] := "
+            "*reachable_block[file_path, func_qn, block_id], "
+            "file_path in $fps  :rm reachable_block {file_path, func_qn, block_id}",
+            # module_level_ref
+            "?[symbol_qn, file_path, line] := "
+            "*module_level_ref[symbol_qn, file_path, line], "
+            "file_path in $fps  :rm module_level_ref {symbol_qn, file_path, line}",
+            # exported_symbol is keyed by its defining file.
+            "?[file_path, qualified_name] := "
+            "*exported_symbol[file_path, qualified_name], "
+            "file_path in $fps  :rm exported_symbol {file_path, qualified_name}",
+            # import (uses importing_file, not file_path)
+            "?[importing_file, imported_module, imported_name, line] := "
+            "*import[importing_file, imported_module, imported_name, line, _], "
+            "importing_file in $fps  :rm import "
+            "{importing_file, imported_module, imported_name, line => }",
+        ):
+            if operations is not None:
+                operations.append((query, {"fps": file_paths}))
+                continue
+            try:
+                self._client.run(query, {"fps": file_paths})
+            except Exception:
+                logger.debug("Fact removal query failed", exc_info=True)
 
-    def _insert_extracted_file_facts(
+    def _insert_extracted_facts(
         self,
-        extracted: ExtractedFile | dict[str, list[list[Any]]],
+        extracted_files: list[ExtractedFile | dict[str, list[list[Any]]]],
         *,
         operations: list[tuple[str, dict[str, Any]]] | None = None,
     ) -> None:
         """Insert the language-neutral rows returned by the canonical extractor."""
-        # Dict support is retained only for injected legacy/test extractors.
-        rows = extracted.rows if isinstance(extracted, ExtractedFile) else extracted
         specs = {
             "fg_sym": ("symbol", "qualified_name, file_path, name, kind, line, end_line, parent", "qualified_name => file_path, name, kind, line, end_line, parent"),
             "search_sym": (
@@ -2502,6 +2499,19 @@ class FactGraph:
                 "file_path, qualified_name",
             ),
         }
+        rows: dict[str, list[list[Any]]] = {key: [] for key in specs}
+        for extracted in extracted_files:
+            # Dict support is retained only for injected legacy/test extractors.
+            extracted_rows = (
+                extracted.rows if isinstance(extracted, ExtractedFile) else extracted
+            )
+            for key in specs:
+                rows[key].extend(extracted_rows.get(key, []))
+
+        # Unlike the other relations, symbol's key does not contain file_path.
+        # Preserve the former per-file :put behavior: a later file wins if two
+        # module mappings produce the same qualified name.
+        rows["fg_sym"] = list({row[0]: row for row in rows["fg_sym"]}.values())
         for key, (relation, cols, schema) in specs.items():
             relation_rows = rows.get(key, [])
             if relation_rows:
@@ -2532,8 +2542,7 @@ class FactGraph:
         """Replace path-owned rows using precomputed extraction artifacts."""
         operations: list[tuple[str, dict[str, Any]]] = []
         self.remove_files(stored_paths, operations=operations)
-        for extracted in extracted_files:
-            self._insert_extracted_file_facts(extracted, operations=operations)
+        self._insert_extracted_facts(extracted_files, operations=operations)
         self._run_mutations(operations)
 
     def update_files(
