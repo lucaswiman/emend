@@ -534,6 +534,10 @@ class AnalysisStore:
 
                 pending.append((index, revision, stored_path, key, content))
 
+            # Publish source blobs before parsing; type inference and other
+            # worktrees must be able to write their independent artifacts.
+            conn.commit()
+
             def extract(item):
                 index, revision, stored_path, key, content = item
                 return index, key, _extract_file_facts(revision, stored_path, content)
@@ -542,14 +546,14 @@ class AnalysisStore:
                 from concurrent.futures import ThreadPoolExecutor
 
                 with ThreadPoolExecutor() as pool:
-                    extracted_files = pool.map(extract, pending)
-                    for index, key, extracted in extracted_files:
-                        result[index] = extracted
-                        conn.execute(
-                            "INSERT OR REPLACE INTO extracted_file_artifact "
-                            "(artifact_key, payload) VALUES (?, ?)",
-                            (key, zlib.compress(pickle.dumps(extracted))),
-                        )
+                    extracted_files = list(pool.map(extract, pending))
+                for index, key, extracted in extracted_files:
+                    result[index] = extracted
+                    conn.execute(
+                        "INSERT OR REPLACE INTO extracted_file_artifact "
+                        "(artifact_key, payload) VALUES (?, ?)",
+                        (key, zlib.compress(pickle.dumps(extracted))),
+                    )
             conn.commit()
         finally:
             conn.close()
@@ -1062,13 +1066,36 @@ class AnalysisStore:
             include_overlays=include_overlays,
         )[resolved]
 
-    def _type_dependency_state(self, graph):
-        """Resolve local import edges in one immutable graph generation."""
+    def _type_dependency_state(self, graph=None, *, include_overlays=False):
+        """Resolve import dependencies without requiring graph materialization."""
         from emend.language_registry import registry_snapshot
 
         _, language_extensions = registry_snapshot()
+        if graph is None:
+            scan = self._scan_disk()
+            snapshot = (self._overlay_snapshot(scan.snapshot)
+                        if include_overlays and self._overlays else scan.snapshot)
+            contents = scan.contents | (
+                {path: value[2] for path, value in self._overlays.items()}
+                if include_overlays else {}
+            )
+            files = self._extract_revisions(snapshot.files, contents)
+            imports_by_path = {
+                file.revision.file_path: [(row[1], row[2])
+                                         for row in file.rows.get("imports", ())]
+                for file in files
+            }
+        else:
+            if not include_overlays and self._disk_graph is not None:
+                graph = self._disk_graph
+            snapshot = graph.snapshot
+            imports_by_path = {
+                revision.file_path: [(row.imported_module, row.imported_name)
+                                     for row in graph.imports_in(graph.stored_path(revision.file_path))]
+                for revision in snapshot.files
+            }
 
-        revisions = {revision.file_path: revision for revision in graph.snapshot.files}
+        revisions = {revision.file_path: revision for revision in snapshot.files}
         module_to_revision = {
             revision.module_name.replace("::", ".").replace("/", "."): revision
             for revision in revisions.values()
@@ -1157,12 +1184,7 @@ class AnalysisStore:
                 ambient_typescript - {revision.file_path}
                 if revision.language == "typescript" else set()
             )
-            try:
-                imports = graph.imports_in(graph.stored_path(revision.file_path))
-            except Exception:
-                imports = []
-            for imported in imports:
-                name = imported.imported_module
+            for name, imported_name in imports_by_path[revision.file_path]:
                 candidates = []
                 if revision.language == "python":
                     if name.startswith("."):
@@ -1175,9 +1197,9 @@ class AnalysisStore:
                             pass
                     name = name.lstrip(".").replace("::", ".").replace("/", ".")
                     candidates.append(module_revision(name))
-                    if imported.imported_name not in (None, "*"):
+                    if imported_name not in (None, "*"):
                         candidates.append(module_revision(
-                            f"{name}.{imported.imported_name}"
+                            f"{name}.{imported_name}"
                         ))
                 elif name.startswith("."):
                     base = (Path(revision.file_path).parent / name).resolve()
@@ -1244,16 +1266,14 @@ class AnalysisStore:
         include_overlays: bool = False,
         graph: object | None = None,
     ) -> dict[str, str]:
-        """Compute cache identities for a batch against one graph generation."""
-        if graph is None:
-            graph = self.query_facts()
-        if not include_overlays and graph is not self._disk_graph:
-            assert self._disk_graph is not None
-            graph = self._disk_graph
-        revisions, dependencies = self._type_dependency_state(graph)
-        return self._type_identities(
-            file_paths, content_hashes, revisions, dependencies
-        )
+        """Compute cache identities against one source generation."""
+        with self._refresh_lock:
+            revisions, dependencies = self._type_dependency_state(
+                graph, include_overlays=include_overlays
+            )
+            return self._type_identities(
+                file_paths, content_hashes, revisions, dependencies
+            )
 
     def type_file_inputs(
         self,
@@ -1265,11 +1285,9 @@ class AnalysisStore:
         """Capture identities, transitive sources, and project file membership."""
         with self._refresh_lock:
             paths = [str(Path(path).resolve()) for path in file_paths]
-            graph = graph or self.query_facts()
-            if not include_overlays:
-                assert self._disk_graph is not None
-                graph = self._disk_graph
-            revisions, dependencies = self._type_dependency_state(graph)
+            revisions, dependencies = self._type_dependency_state(
+                graph, include_overlays=include_overlays
+            )
             paths = [path for path in paths if path in revisions]
             identities = self._type_identities(
                 paths, None, revisions, dependencies
@@ -1283,7 +1301,7 @@ class AnalysisStore:
                         pending.append(child)
             return (
                 identities,
-                {path: graph.source_text(path) for path in inputs},
+                {path: self._revision_source(revisions[path]) for path in inputs},
                 set(revisions),
             )
 

@@ -442,9 +442,9 @@ def test_deadcode_computes_type_snapshot_context_once(tmp_path, monkeypatch):
         calls["scan"] += 1
         return original_scan()
 
-    def count_dependencies(graph):
+    def count_dependencies(*args, **kwargs):
         calls["dependencies"] += 1
-        return original_dependencies(graph)
+        return original_dependencies(*args, **kwargs)
 
     monkeypatch.setattr(type_oracle, "_type_shared_context", counted)
     monkeypatch.setattr(store, "_scan_disk", count_scan)
@@ -911,26 +911,33 @@ def test_type_batch_uses_one_snapshot_and_reuses_linked_worktree_payload(
     unrelated.write_text("other = 1\n")
 
     main_store = AnalysisStore.open(main)
-    query_calls = 0
-    original = main_store.query_facts
+    scan_calls = 0
+    original = main_store._scan_disk
 
     def counted():
-        nonlocal query_calls
-        query_calls += 1
+        nonlocal scan_calls
+        scan_calls += 1
         return original()
 
-    monkeypatch.setattr(main_store, "query_facts", counted)
+    monkeypatch.setattr(main_store, "_scan_disk", counted)
+    monkeypatch.setattr(AnalysisStore, "query_facts", lambda *a, **kw: pytest.fail(
+        "type cache inputs must not materialize a fact graph"
+    ))
     _FakeTypeOracle.calls = 0
     _FakeTypeOracle(main).infer_batch(
         [main / "one.py", main / "two.py"], project_root=main
     )
-    assert query_calls == 1 and _FakeTypeOracle.calls == 2
+    assert scan_calls == 1 and _FakeTypeOracle.calls == 2
     linked_paths = [linked / "one.py", linked / "two.py"]
     results = _FakeTypeOracle(linked).infer_batch(linked_paths, project_root=linked)
     assert _FakeTypeOracle.calls == 2
     assert results[str(linked_paths[0].resolve())].path == str(linked_paths[0].resolve())
     before = main_store.type_file_identity(target)
     unrelated.write_text("other = 2\n")
+    assert main_store.type_file_identity(target) == before
+    dependency.write_text("value = 'changed'\n")
+    assert main_store.type_file_identity(target) != before
+    dependency.write_text("value = 1\n")
     assert main_store.type_file_identity(target) == before
 
 

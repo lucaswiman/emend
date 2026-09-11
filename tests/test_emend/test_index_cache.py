@@ -302,6 +302,73 @@ class TestTypeCacheWarming:
         (proj / "b.py").write_text("y: float = 3.14\n")
         return proj
 
+    @pytest.mark.parametrize("failure", [None, "types", "facts"])
+    def test_types_overlap_fact_materialization(self, tmp_path, monkeypatch, failure):
+        from threading import Event, get_ident
+        from emend import analysis_extraction, type_oracle
+        from emend.fact_graph import FactGraph
+        from emend.analysis_store import AnalysisStore
+        from emend.transform import warm_caches
+
+        proj = self._make_project(tmp_path)
+        materializing, written = Event(), Event()
+        materialize = FactGraph.replace_extracted
+        extract = analysis_extraction._extract_file_facts
+        extracted = []
+
+        def checked_extract(*args):
+            with sqlite3.connect(AnalysisStore.open(proj).artifact_path, timeout=1) as conn:
+                conn.execute("CREATE TABLE IF NOT EXISTS extraction_probe (value INTEGER)")
+            extracted.append(args[0].file_path)
+            return extract(*args)
+
+        def checked_materialize(*args, **kwargs):
+            materializing.set()
+            assert written.wait(10), "type cache write blocked by fact indexing"
+            if failure == "facts":
+                raise RuntimeError("facts failed")
+            return materialize(*args, **kwargs)
+
+        class Oracle(type_oracle.TypeOracle):
+            def is_available(self):
+                return True
+
+            def infer_file(self, path, project_root=None):
+                raise AssertionError("expected batch inference")
+
+            def clear_cache(self):
+                pass
+
+            def infer_batch(self, paths, project_root, *, inputs=None):
+                assert len(self._prepare_file_keys(paths, project_root, inputs)) == 2
+                assert materializing.wait(10), "types and facts did not overlap"
+                # Independent cache writes must succeed during fact indexing.
+                with sqlite3.connect(AnalysisStore.open(proj).artifact_path, timeout=1) as conn:
+                    conn.execute("CREATE TABLE overlap_probe (value INTEGER)")
+                written.set()
+                if failure == "types":
+                    raise RuntimeError("types failed")
+                return dict.fromkeys(paths)
+
+        monkeypatch.setattr(type_oracle, "create_type_oracle", lambda **kw: Oracle())
+        monkeypatch.setattr(analysis_extraction, "_extract_file_facts", checked_extract)
+        monkeypatch.setattr(FactGraph, "replace_extracted", checked_materialize)
+        callback_threads = set()
+        def run():
+            return warm_caches(
+                str(proj), jobs=1, type_engine="auto", build_duplicates=False,
+                callback=lambda *args: callback_threads.add(get_ident()),
+            )
+
+        if failure:
+            with pytest.raises(RuntimeError, match=f"{failure} failed"):
+                run()
+        else:
+            assert run()["type_cached"] == 2
+        assert callback_threads == {get_ident()}
+        assert written.is_set()
+        assert sorted(extracted) == sorted(str(proj / name) for name in ("a.py", "b.py"))
+
     @pytest.mark.skipif(not _HAS_TYPE_ENGINE, reason="no type engine on PATH")
     def test_type_cache_populated(self, tmp_path):
         """warm_caches with auto engine writes rows to the type_cache table."""

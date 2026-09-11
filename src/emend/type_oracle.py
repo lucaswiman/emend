@@ -28,6 +28,8 @@ from emend.errors import BUG_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
+TypeBatchInputs = tuple[dict[str, str], dict[str, str], set[str]]
+
 
 # ---------------------------------------------------------------------------
 # LSP Client implementation
@@ -512,29 +514,20 @@ class TypeOracle(ABC):
         )
 
     def _prepare_file_keys(
-        self, paths: list[Path], project_root: Path | None
+        self, paths: list[Path], project_root: Path | None,
+        inputs: TypeBatchInputs | None = None,
     ) -> dict[str, str]:
         from emend.analysis_store import AnalysisStore
 
         root = project_root or (paths[0].parent if paths else Path.cwd())
         self._refresh_cache_context(root)
-        store = AnalysisStore.open(root)
-        # Pin both cache identities and source bytes to the same immutable
-        # owner graph.  This matters for LSP overlays: a second query after an
-        # edit could otherwise pair a new key with the old document contents.
-        graph = store.query_facts()
-        known = {revision.file_path for revision in graph.snapshot.files}
-        existing = [
-            path.resolve() for path in paths
-            if path.exists() or (
-                self._uses_overlay_source and str(path.resolve()) in known
+        # Identities and exact source bytes come from the same owner snapshot;
+        # eager indexing may prepare these before scheduling independent work.
+        if inputs is None:
+            inputs = AnalysisStore.open(root).type_file_inputs(
+                paths, include_overlays=self._uses_overlay_source,
             )
-        ]
-        identities, sources, project_paths = store.type_file_inputs(
-            existing,
-            include_overlays=self._uses_overlay_source,
-            graph=graph,
-        ) if existing else ({}, {}, set())
+        identities, sources, project_paths = inputs
         if self._uses_overlay_source:
             self._prepared_source_texts = sources
             self._prepared_project_paths = project_paths
@@ -549,7 +542,8 @@ class TypeOracle(ABC):
         """Check if the backing type checker is installed and usable."""
 
     def infer_batch(
-        self, paths: list[Path], project_root: Path | None = None
+        self, paths: list[Path], project_root: Path | None = None, *,
+        inputs: TypeBatchInputs | None = None,
     ) -> dict[str, FileTypes]:
         """Infer types for multiple files.
 
@@ -557,11 +551,14 @@ class TypeOracle(ABC):
         Subclasses may override for more efficient bulk processing (e.g.
         :class:`PyreflyAdapter` runs a single ``pyrefly check`` invocation).
 
+        ``inputs`` optionally pins the cache identities and source bytes from
+        ``AnalysisStore.type_file_inputs()`` before concurrent indexing begins.
+
         Returns a dict mapping resolved absolute path strings to
         :class:`FileTypes`.
         """
         results: dict[str, FileTypes] = {}
-        self._prepared_file_keys = self._prepare_file_keys(paths, project_root)
+        self._prepared_file_keys = self._prepare_file_keys(paths, project_root, inputs)
         try:
             for path in paths:
                 resolved = path.resolve()
@@ -1411,7 +1408,10 @@ class PyreflyAdapter(TypeOracle):
             except OSError:
                 pass
 
-    def infer_batch(self, paths: list[Path], project_root: Path | None = None) -> dict[str, FileTypes]:
+    def infer_batch(
+        self, paths: list[Path], project_root: Path | None = None, *,
+        inputs: TypeBatchInputs | None = None,
+    ) -> dict[str, FileTypes]:
         """Infer types for multiple files in a single pyrefly invocation.
 
         More efficient than calling infer_file() per file because pyrefly
@@ -1428,7 +1428,7 @@ class PyreflyAdapter(TypeOracle):
         # Resolve all paths up front for consistent dict keys.
         resolved = [p.resolve() for p in paths]
 
-        prepared_file_keys = self._prepare_file_keys(resolved, project_root)
+        prepared_file_keys = self._prepare_file_keys(resolved, project_root, inputs)
         for rp in resolved:
             if not rp.exists():
                 results[str(rp)] = FileTypes(path=str(rp))
@@ -1688,11 +1688,12 @@ class _LSPTypeOracle(TypeOracle):
         return ft
 
     def infer_batch(
-        self, paths: list[Path], project_root: Path | None = None
+        self, paths: list[Path], project_root: Path | None = None, *,
+        inputs: TypeBatchInputs | None = None,
     ) -> dict[str, FileTypes]:
         """Open one pinned snapshot in the LSP before querying any hover."""
         resolved = [path.resolve() for path in paths]
-        self._prepared_file_keys = self._prepare_file_keys(resolved, project_root)
+        self._prepared_file_keys = self._prepare_file_keys(resolved, project_root, inputs)
         results: dict[str, FileTypes] = {}
         try:
             missing = []

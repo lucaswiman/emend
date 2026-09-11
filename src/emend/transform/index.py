@@ -15,6 +15,7 @@ from emend.errors import BUG_EXCEPTIONS
 
 if TYPE_CHECKING:
     import sqlite3
+    from emend.type_oracle import TypeBatchInputs, TypeOracle
 
 logger = logging.getLogger(__name__)
 
@@ -1289,45 +1290,7 @@ def _warm_caches_impl(
     except Exception:
         logger.debug("warm_caches: file_manifest update failed", exc_info=True)
 
-    # Phase 3: type indexing — populate the shared type_cache table.
-    # Runs in the main process.  Pyrefly handles its own parallelism
-    # internally; LSP adapters (pyright, ty) are inherently sequential.
-    if type_engine and type_engine.lower() != "none":
-        from emend.type_oracle import (
-            create_type_oracle,
-            TypeEngineUnavailableError,
-        )
-
-        oracle = create_type_oracle(
-            engine=type_engine, project_root=Path(project_root)
-        )
-        engine_name = type(oracle).__name__.replace("Adapter", "").lower()
-
-        if not oracle.is_available():
-            raise TypeEngineUnavailableError(
-                f"Type inference engine '{engine_name}' is not installed or not on PATH. "
-                f"Install it (pyrefly, ty, or pyright) and re-run, or pass "
-                f"--type-engine=none to skip type indexing."
-            )
-
-        stats["type_engine"] = engine_name
-        all_paths = [Path(f) for f, _ in file_contents]
-        project_root_path = Path(project_root)
-
-        announce_phase(f"Type analysis ({engine_name})")
-        t_type = time.monotonic()
-        results = oracle.infer_batch(all_paths, project_root=project_root_path)
-        stats["type_cached"] = len(results)
-        if callback:
-            for p in all_paths:
-                callback("types", str(p))
-
-        logger.info(
-            "warm_caches: type-indexed %d files via %s in %.3fs",
-            stats["type_cached"], engine_name, time.monotonic() - t_type,
-        )
-
-    # Phase 4: rebuild FTS5 trigram index for fast symbol search.
+    # Rebuild FTS5 before starting the independent type/fact analyses.
     if build_fts:
         announce_phase("Full-text search index")
         try:
@@ -1349,17 +1312,44 @@ def _warm_caches_impl(
             logger.debug("warm_caches: FTS rebuild skipped: %s", exc, exc_info=True)
             stats["fts_indexed"] = 0
 
-    # Phase 5: the analysis owner is the sole facts refresh path.
-    announce_phase("Facts database")
+    # Types need local import dependencies, but not a materialized fact graph.
+    # Derive those inputs once; facts reuse the same content-addressed artifacts.
+    # Progress callbacks and fact publication stay on the calling thread.
+    # The executor joins even on failure, so no cache writer outlives this call.
     from emend.analysis_store import AnalysisStore
-    t_facts = time.monotonic()
-    stats["snapshot_id"] = (
-        AnalysisStore.open(project_root).query_facts().snapshot.snapshot_id
-    )
-    logger.info(
-        "warm_caches: facts database refreshed in %.3fs",
-        time.monotonic() - t_facts,
-    )
+    store = AnalysisStore.open(project_root)
+    types_enabled = type_engine and type_engine.lower() != "none"
+    if types_enabled:
+        from emend.type_oracle import create_type_oracle, TypeEngineUnavailableError
+
+        oracle = create_type_oracle(engine=type_engine, project_root=Path(project_root))
+        engine_name = type(oracle).__name__.replace("Adapter", "").lower()
+        if not oracle.is_available():
+            raise TypeEngineUnavailableError(
+                f"Type inference engine '{engine_name}' is not installed or not on PATH. "
+                f"Install it (pyrefly, ty, or pyright) and re-run, or pass "
+                f"--type-engine=none to skip type indexing."
+            )
+        paths = [Path(f) for f, _ in file_contents]
+        announce_phase("Analysis inputs")
+        inputs = store.type_file_inputs(paths, include_overlays=oracle.supports_source_overrides)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        if types_enabled:
+            announce_phase(f"Type analysis ({engine_name}) + facts database")
+            types = pool.submit(_warm_type_cache, oracle, project_root, paths, inputs)
+        else:
+            announce_phase("Facts database")
+        t_facts = time.monotonic()
+        stats["snapshot_id"] = store.query_facts().snapshot.snapshot_id
+        logger.info(
+            "warm_caches: facts database refreshed in %.3fs",
+            time.monotonic() - t_facts,
+        )
+        if types_enabled:
+            stats.update(types.result())
+            if callback:
+                for file_path, _ in file_contents:
+                    callback("types", file_path)
 
     # Phase 6: duplicate analysis — compute and cache per-file duplicate payloads,
     # then materialize queryable facts into facts.db.
@@ -1382,6 +1372,21 @@ def _warm_caches_impl(
             stats["dup_cached"] = 0
 
     return stats
+
+
+def _warm_type_cache(
+    oracle: TypeOracle, project_root: str, paths: list[Path], inputs: TypeBatchInputs,
+) -> dict[str, int | str]:
+    """Run one oracle and persist its results, without touching CLI state."""
+    import time
+    engine_name = type(oracle).__name__.replace("Adapter", "").lower()
+    t_type = time.monotonic()
+    results = oracle.infer_batch(paths, project_root=Path(project_root), inputs=inputs)
+    logger.info(
+        "warm_caches: type-indexed %d files via %s in %.3fs",
+        len(results), engine_name, time.monotonic() - t_type,
+    )
+    return {"type_cached": len(results), "type_engine": engine_name}
 
 
 def warm_caches(
