@@ -1081,7 +1081,7 @@ class AnalysisStore:
             )
             files = self._extract_revisions(snapshot.files, contents)
             imports_by_path = {
-                file.revision.file_path: [(row[1], row[2])
+                file.revision.file_path: [(row[1], row[2] or None)
                                          for row in file.rows.get("imports", ())]
                 for file in files
             }
