@@ -127,8 +127,8 @@ impl PyCozoDb {
     /// - `path`: database file path (ignored for "mem")
     #[new]
     #[pyo3(signature = (engine="mem", path=""))]
-    fn new(engine: &str, path: &str) -> PyResult<Self> {
-        let db = DbInstance::new(engine, path, Default::default()).map_err(|e| {
+    fn new(py: Python<'_>, engine: &str, path: &str) -> PyResult<Self> {
+        let db = py.allow_threads(|| DbInstance::new(engine, path, Default::default())).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create CozoDB: {}", e))
         })?;
         Ok(PyCozoDb { db })
@@ -145,13 +145,14 @@ impl PyCozoDb {
         params: Option<&Bound<'_, PyDict>>,
         read_only: bool,
     ) -> PyResult<PyObject> {
-        let result = self
-            .db
-            .run_script(query, py_params(params)?, if read_only {
+        let params = py_params(params)?;
+        // Detach for native work: attached threads also block stop-the-world
+        // garbage collection on free-threaded Python, even without a GIL.
+        let result = py.allow_threads(|| self.db.run_script(query, params, if read_only {
                 ScriptMutability::Immutable
             } else {
                 ScriptMutability::Mutable
-            })
+            }))
             .map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("CozoDB query error: {}", e))
             })?;
@@ -160,8 +161,8 @@ impl PyCozoDb {
 
     /// Run several scripts in one transaction, converting each parameter
     /// batch only when its script is ready to execute.
-    fn run_transaction(&self, operations: &Bound<'_, PyList>) -> PyResult<()> {
-        let transaction = self.db.multi_transaction(true);
+    fn run_transaction(&self, py: Python<'_>, operations: &Bound<'_, PyList>) -> PyResult<()> {
+        let transaction = py.allow_threads(|| self.db.multi_transaction(true));
         for operation in operations.iter() {
             let converted = (|| -> PyResult<_> {
                 let operation = operation.downcast_into::<PyTuple>()?;
@@ -172,19 +173,19 @@ impl PyCozoDb {
             let (query, params) = match converted {
                 Ok(converted) => converted,
                 Err(error) => {
-                    let _ = transaction.abort();
+                    let _ = py.allow_threads(|| transaction.abort());
                     return Err(error);
                 }
             };
-            if let Err(error) = transaction.run_script(&query, params) {
-                let _ = transaction.abort();
+            if let Err(error) = py.allow_threads(|| transaction.run_script(&query, params)) {
+                let _ = py.allow_threads(|| transaction.abort());
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "CozoDB query error: {}",
                     error
                 )));
             }
         }
-        transaction.commit().map_err(|error| {
+        py.allow_threads(|| transaction.commit()).map_err(|error| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "CozoDB transaction error: {}",
                 error

@@ -96,6 +96,34 @@ def test_batched_fact_mutations_use_streaming_transaction():
     assert client.operations is operations
 
 
+@pytest.mark.parametrize("transaction", [False, True])
+def test_native_database_wait_does_not_stall_python_gc(transaction):
+    import gc
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from emend.emend_core import PyCozoDb
+
+    db, started = PyCozoDb(), Event()
+    def query():
+        started.set()
+        script = "?[x] <- [[1]] :sleep 2"
+        if transaction:
+            db.run_transaction([(script, {})])
+        else:
+            db.run(script)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(query)
+        assert started.wait(5)
+        time.sleep(0.05)  # Let the worker enter the deliberately slow native call.
+        assert not pending.done()
+        before = time.monotonic()
+        gc.collect()
+        assert time.monotonic() - before < 1, "native query held Python's GC barrier"
+        pending.result()
+
+
 def _make_graph() -> FactGraph:
     """Build a small graph for testing."""
     g = FactGraph()
