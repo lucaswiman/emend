@@ -17,6 +17,7 @@
 //! scope tree and binding table, then patches the QN index.
 
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -207,6 +208,10 @@ pub struct Reference {
     pub byte_offset: usize,
     pub end_byte: usize,
     pub qn: QualifiedName,
+    /// Whether scope analysis found a local, import, or builtin target.
+    pub resolved: bool,
+    /// Stable identity of the exact lexical import binding, when applicable.
+    pub import_binding_id: Option<String>,
     /// Lexical spelling at the reference site, before semantic resolution.
     pub lexical_qn: String,
     pub kind: ReferenceKind,
@@ -253,6 +258,9 @@ pub struct FileScope {
     pub module_path: String,
     pub scopes: Vec<Scope>,
     pub imports: HashMap<String, ImportBinding>,
+    /// All import bindings with lexical provenance; unlike `imports`, this
+    /// retains shadowed bindings in nested scopes.
+    pub scoped_imports: Vec<ScopedImportBinding>,
     pub definitions: Vec<(QualifiedName, Location)>,
     /// All references (identifiers/attributes) resolved to QNs.
     pub references: Vec<Reference>,
@@ -267,6 +275,16 @@ pub struct ImportBinding {
     pub module_path: String,
     pub imported_name: Option<String>,
     pub is_star: bool,
+}
+
+/// One import binding at an exact source/scope location.
+#[derive(Debug, Clone)]
+pub struct ScopedImportBinding {
+    pub binding_id: String,
+    pub scope_id: ScopeId,
+    pub byte_offset: usize,
+    pub line: usize,
+    pub binding: ImportBinding,
 }
 
 /// A name imported within a single import statement.
@@ -872,6 +890,10 @@ pub struct ExportsSection {
     pub public_by_default: bool,
     pub private_prefix: String,
     #[serde(default)]
+    pub export_statement: Option<String>,
+    #[serde(default)]
+    pub visibility_node: Option<String>,
+    #[serde(default)]
     pub dunder_is_public: bool,
 }
 
@@ -1105,6 +1127,7 @@ struct BuildContext<'a> {
     scope_index: HashMap<ScopeId, usize>,
     next_scope_id: u32,
     imports: HashMap<String, ImportBinding>,
+    scoped_imports: Vec<ScopedImportBinding>,
     definitions: Vec<(QualifiedName, Location)>,
 }
 
@@ -1117,6 +1140,7 @@ impl<'a> BuildContext<'a> {
             scope_index: HashMap::new(),
             next_scope_id: 0,
             imports: HashMap::new(),
+            scoped_imports: Vec::new(),
             definitions: Vec::new(),
         }
     }
@@ -1178,8 +1202,32 @@ impl<'a> BuildContext<'a> {
     }
 
     /// Insert an import binding.
-    fn add_import(&mut self, binding: ImportBinding) {
-        self.imports.insert(binding.local_name.clone(), binding);
+    fn add_import(
+        &mut self,
+        scope_id: ScopeId,
+        byte_offset: usize,
+        line: usize,
+        binding: ImportBinding,
+    ) {
+        let binding_id = format!(
+            "{}:{}:{}:{}:{}",
+            scope_id.0,
+            byte_offset,
+            binding.local_name,
+            binding.module_path,
+            binding.imported_name.as_deref().unwrap_or(""),
+        );
+        if scope_id.0 == 0 {
+            self.imports
+                .insert(binding.local_name.clone(), binding.clone());
+        }
+        self.scoped_imports.push(ScopedImportBinding {
+            binding_id,
+            scope_id,
+            byte_offset,
+            line,
+            binding,
+        });
     }
 }
 
@@ -1502,14 +1550,22 @@ impl ScopeResolver {
         // the same local-name map used by reference resolution.
         if self.config.language.name == "rust" {
             ctx.imports.clear();
-            for (binding, _) in self.collect_rust_imports(tree, source) {
-                ctx.imports.insert(binding.local_name.clone(), binding);
+            ctx.scoped_imports.clear();
+            for (binding, line, byte_offset) in self.collect_rust_imports(tree, source) {
+                let scope_id = ctx.scopes.iter()
+                    .filter(|scope| {
+                        scope.start_byte <= byte_offset && byte_offset < scope.end_byte
+                    })
+                    .min_by_key(|scope| scope.end_byte.saturating_sub(scope.start_byte))
+                    .map_or(module_id, |scope| scope.id);
+                ctx.add_import(scope_id, byte_offset, line, binding);
             }
         }
 
         // Second pass: resolve all identifier/attribute references to QNs.
         let (references, all_qnames) = self.collect_file_references(
-            tree, path, source, &module_path, &ctx.scopes, &ctx.scope_index, &ctx.imports,
+            tree, path, source, &module_path, &ctx.scopes, &ctx.scope_index,
+            &ctx.scoped_imports,
         );
 
         FileScope {
@@ -1517,6 +1573,7 @@ impl ScopeResolver {
             module_path,
             scopes: ctx.scopes,
             imports: ctx.imports,
+            scoped_imports: ctx.scoped_imports,
             definitions: ctx.definitions,
             references,
             all_qnames,
@@ -1553,7 +1610,7 @@ impl ScopeResolver {
         module_path: &str,
         scopes: &[Scope],
         scope_index: &HashMap<ScopeId, usize>,
-        imports: &HashMap<String, ImportBinding>,
+        imports: &[ScopedImportBinding],
     ) -> (Vec<Reference>, Vec<String>) {
         use std::collections::HashSet;
         let source_bytes = source.as_bytes();
@@ -1599,7 +1656,7 @@ impl ScopeResolver {
         module_path: &str,
         scopes: &[Scope],
         scope_index: &HashMap<ScopeId, usize>,
-        imports: &HashMap<String, ImportBinding>,
+        imports: &[ScopedImportBinding],
         method_targets: &MethodTargets,
         current_scope: ScopeId,
         in_import: bool,
@@ -1622,7 +1679,8 @@ impl ScopeResolver {
         let is_plain_import = node_kind == cfg_imports.import_statement
             && (cfg_imports.import_from.is_empty() || node_kind != cfg_imports.import_from);
         let is_from_import = !cfg_imports.import_from.is_empty()
-            && node_kind == cfg_imports.import_from;
+            && node_kind == cfg_imports.import_from
+            || cfg_imports.fixed_modules.contains_key(node_kind);
 
         // Track whether we're inside an import statement.
         let child_in_import = in_import || is_plain_import || is_from_import;
@@ -1642,6 +1700,8 @@ impl ScopeResolver {
                         end_byte: child.end_byte(),
                         lexical_qn: qn.clone(),
                         qn: QualifiedName { name: qn },
+                        resolved: true,
+                        import_binding_id: None,
                         kind: ReferenceKind::Import,
                         in_annotation: false,
                     });
@@ -1657,6 +1717,8 @@ impl ScopeResolver {
                             end_byte: name_node.end_byte(),
                             lexical_qn: qn.clone(),
                             qn: QualifiedName { name: qn },
+                            resolved: true,
+                            import_binding_id: None,
                             kind: ReferenceKind::Import,
                             in_annotation: false,
                         });
@@ -1681,6 +1743,8 @@ impl ScopeResolver {
                     end_byte: mod_node.end_byte(),
                     lexical_qn: qn.clone(),
                     qn: QualifiedName { name: qn },
+                    resolved: true,
+                    import_binding_id: None,
                     kind: ReferenceKind::Import,
                     in_annotation: false,
                 });
@@ -1737,11 +1801,12 @@ impl ScopeResolver {
             if !is_attr_name && !self.is_qualified_component(&node) && !is_keyword {
                 let kind = self.classify_reference(&node, in_import);
                 
-                if let Some(qn) = self.resolve_identifier(
+                let resolved = self.resolve_identifier_detail(
                     name, node.start_byte(), module_path,
                     scopes, scope_index, imports,
                     current_scope,
-                ) {
+                );
+                if let Some((qn, import_binding_id)) = resolved {
                     qn_set.insert(qn.clone());
                     refs.push(Reference {
                         file: file_path.to_path_buf(),
@@ -1752,6 +1817,22 @@ impl ScopeResolver {
                         end_byte: node.end_byte(),
                         lexical_qn: name.to_string(),
                         qn: QualifiedName { name: qn },
+                        resolved: true,
+                        import_binding_id,
+                        kind,
+                        in_annotation,
+                    });
+                } else {
+                    refs.push(Reference {
+                        file: file_path.to_path_buf(),
+                        line: node.start_position().row + 1,
+                        column: node.start_position().column,
+                        byte_offset: node.start_byte(),
+                        end_byte: node.end_byte(),
+                        lexical_qn: name.to_string(),
+                        qn: QualifiedName { name: name.to_string() },
+                        resolved: false,
+                        import_binding_id: None,
                         kind,
                         in_annotation,
                     });
@@ -1776,10 +1857,13 @@ impl ScopeResolver {
                 } else {
                     None
                 };
-                if let Some(qn) = receiver_qn.or_else(|| self.resolve_dotted_name(
-                    &full_name, node.start_byte(), module_path,
-                    scopes, scope_index, imports, current_scope,
-                )) {
+                let resolved = receiver_qn
+                    .map(|qn| (qn, None))
+                    .or_else(|| self.resolve_dotted_name_detail(
+                        &full_name, node.start_byte(), module_path,
+                        scopes, scope_index, imports, current_scope,
+                    ));
+                if let Some((qn, import_binding_id)) = resolved {
                     qn_set.insert(qn.clone());
                     refs.push(Reference {
                         file: file_path.to_path_buf(),
@@ -1790,6 +1874,22 @@ impl ScopeResolver {
                         end_byte: node.end_byte(),
                         lexical_qn: full_name,
                         qn: QualifiedName { name: qn },
+                        resolved: true,
+                        import_binding_id,
+                        kind,
+                        in_annotation,
+                    });
+                } else {
+                    refs.push(Reference {
+                        file: file_path.to_path_buf(),
+                        line: node.start_position().row + 1,
+                        column: node.start_position().column,
+                        byte_offset: node.start_byte(),
+                        end_byte: node.end_byte(),
+                        lexical_qn: full_name.clone(),
+                        qn: QualifiedName { name: full_name },
+                        resolved: false,
+                        import_binding_id: None,
                         kind,
                         in_annotation,
                     });
@@ -2005,56 +2105,95 @@ impl ScopeResolver {
     }
 
     /// Resolve a simple identifier to its qualified name.
-    fn resolve_identifier(
+    fn visible_import<'a>(
         &self,
         name: &str,
-        _byte_offset: usize,
+        byte_offset: usize,
+        scope_id: ScopeId,
+        scopes: &[Scope],
+        scope_index: &HashMap<ScopeId, usize>,
+        imports: &'a [ScopedImportBinding],
+    ) -> Option<&'a ScopedImportBinding> {
+        let mut ancestors = Vec::new();
+        let mut current = Some(scope_id);
+        while let Some(id) = current {
+            ancestors.push(id);
+            current = scope_index
+                .get(&id)
+                .and_then(|index| scopes[*index].parent);
+        }
+        imports
+            .iter()
+            .filter(|import| {
+                import.binding.local_name == name
+                    && import.byte_offset <= byte_offset
+                    && ancestors.contains(&import.scope_id)
+            })
+            .max_by_key(|import| {
+                let distance = ancestors
+                    .iter()
+                    .position(|scope| *scope == import.scope_id)
+                    .unwrap_or(usize::MAX);
+                (Reverse(distance), import.byte_offset)
+            })
+    }
+
+    fn resolve_identifier_detail(
+        &self,
+        name: &str,
+        byte_offset: usize,
         module_path: &str,
         scopes: &[Scope],
         scope_index: &HashMap<ScopeId, usize>,
-        imports: &HashMap<String, ImportBinding>,
+        imports: &[ScopedImportBinding],
         scope_id: ScopeId,
-    ) -> Option<String> {
+    ) -> Option<(String, Option<String>)> {
         // 1. Look up in scope tree (innermost first)
         if let Some(qn) = self.resolve_in_scope_chain(
             name, scope_id, module_path, scopes, scope_index,
         ) {
-            return Some(qn);
+            return Some((qn, None));
         }
 
         // 2. Check imports
-        if let Some(imp) = imports.get(name) {
-            if imp.is_star {
+        if let Some(scoped) = self.visible_import(
+            name, byte_offset, scope_id, scopes, scope_index, imports,
+        ) {
+            let imp = &scoped.binding;
+            if imp.is_star && imp.local_name == "*" {
                 return None; // Can't resolve star imports
             }
-            return Some(if let Some(ref imported_name) = imp.imported_name {
+            let qn = if imp.is_star {
+                imp.module_path.clone()
+            } else if let Some(ref imported_name) = imp.imported_name {
                 // `from foo import bar` → foo.bar
                 format!("{}{}{}", imp.module_path, self.config.qualified_names.module_separator, imported_name)
             } else {
                 // `import foo` → foo
                 imp.module_path.clone()
-            });
+            };
+            return Some((qn, Some(scoped.binding_id.clone())));
         }
 
         // 3. Builtins (common ones)
         if self.config.builtins.names.iter().any(|b| b == name) {
-            return Some(format!("builtins.{}", name));
+            return Some((format!("builtins.{}", name), None));
         }
 
         None
     }
 
     /// Resolve a dotted name (e.g., "os.path.join") to its qualified name.
-    fn resolve_dotted_name(
+    fn resolve_dotted_name_detail(
         &self,
         dotted: &str,
         _byte_offset: usize,
         module_path: &str,
         scopes: &[Scope],
         scope_index: &HashMap<ScopeId, usize>,
-        imports: &HashMap<String, ImportBinding>,
+        imports: &[ScopedImportBinding],
         scope_id: ScopeId,
-    ) -> Option<String> {
+    ) -> Option<(String, Option<String>)> {
         let configured_separator = self.config.pattern_matching.separator.as_str();
         let separator = if !configured_separator.is_empty() && dotted.contains(configured_separator) {
             configured_separator
@@ -2063,30 +2202,38 @@ impl ScopeResolver {
         };
         let parts: Vec<&str> = dotted.splitn(2, separator).collect();
         if parts.len() < 2 {
-            return self.resolve_identifier(dotted, _byte_offset, module_path, scopes, scope_index, imports, scope_id);
+            return self.resolve_identifier_detail(
+                dotted, _byte_offset, module_path, scopes, scope_index, imports, scope_id,
+            );
         }
         let root = parts[0];
         let rest = parts[1];
 
         // Check imports for root
-        if let Some(imp) = imports.get(root) {
-            if imp.is_star {
+        if let Some(scoped) = self.visible_import(
+            root, _byte_offset, scope_id, scopes, scope_index, imports,
+        ) {
+            let imp = &scoped.binding;
+            if imp.is_star && imp.local_name == "*" {
                 return None;
             }
-            return Some(if let Some(ref imported_name) = imp.imported_name {
+            let qn = if imp.is_star {
+                format!("{}{}{}", imp.module_path, separator, rest)
+            } else if let Some(ref imported_name) = imp.imported_name {
                 // `from foo import bar` + `bar.baz` → `foo.bar.baz`
                 format!("{}{}{}{}{}", imp.module_path, separator, imported_name, separator, rest)
             } else {
                 // `import os` + `os.path.join` → `os.path.join`
                 format!("{}{}{}", imp.module_path, separator, rest)
-            });
+            };
+            return Some((qn, Some(scoped.binding_id.clone())));
         }
 
         // Check local bindings for root
         if let Some(root_qn) = self.resolve_in_scope_chain(
             root, scope_id, module_path, scopes, scope_index,
         ) {
-            return Some(format!("{}{}{}", root_qn, separator, rest));
+            return Some((format!("{}{}{}", root_qn, separator, rest), None));
         }
 
         None
@@ -2101,7 +2248,7 @@ impl ScopeResolver {
         module_path: &str,
         scopes: &[Scope],
         scope_index: &HashMap<ScopeId, usize>,
-        imports: &HashMap<String, ImportBinding>,
+        imports: &[ScopedImportBinding],
         method_targets: &MethodTargets,
         scope_id: ScopeId,
     ) -> Option<String> {
@@ -2155,8 +2302,8 @@ impl ScopeResolver {
                 if scope.bindings.get(&nominal).is_some_and(|b| b.kind == BindingKind::ClassDef) { break; }
                 current = scope.parent;
             }
-            self.resolve_identifier(&nominal, node.start_byte(), module_path,
-                scopes, scope_index, imports, scope_id)?
+            self.resolve_identifier_detail(&nominal, node.start_byte(), module_path,
+                scopes, scope_index, imports, scope_id)?.0
         };
 
         method_targets.get(&(owner_qn, method_name.to_string())).cloned().flatten()
@@ -2492,8 +2639,9 @@ impl ScopeResolver {
         if node_kind == self.config.imports.import_statement
             || (!self.config.imports.import_from.is_empty()
                 && node_kind == self.config.imports.import_from)
+            || self.config.imports.fixed_modules.contains_key(node_kind)
         {
-            self.collect_import(ctx, &node);
+            self.collect_import(ctx, &node, scope_for_children);
         }
 
         // Collect assignments and other bindings
@@ -2745,17 +2893,25 @@ impl ScopeResolver {
     }
 
     /// Collect imports from an import statement node.
-    fn collect_import(&self, ctx: &mut BuildContext, node: &tree_sitter::Node) {
+    fn collect_import(
+        &self,
+        ctx: &mut BuildContext,
+        node: &tree_sitter::Node,
+        scope_id: ScopeId,
+    ) {
         let imports = &self.config.imports;
         let node_kind = node.kind();
+        let byte_offset = node.start_byte();
+        let line = node.start_position().row + 1;
 
         // Is this a bare `import X` style (no "from")?
         let is_plain_import = node_kind == imports.import_statement
             && (imports.import_from.is_empty() || node_kind != imports.import_from);
 
         // Is this a `from X import Y` style?
-        let is_from_import = !imports.import_from.is_empty()
-            && node_kind == imports.import_from;
+        let is_from_import = (!imports.import_from.is_empty()
+            && node_kind == imports.import_from)
+            || imports.fixed_modules.contains_key(node_kind);
 
         if is_plain_import {
             for_each_child(node, |child| {
@@ -2789,7 +2945,7 @@ impl ScopeResolver {
                     (local, text)
                 };
 
-                ctx.add_import(ImportBinding {
+                ctx.add_import(scope_id, byte_offset, line, ImportBinding {
                     local_name,
                     module_path,
                     imported_name: None,
@@ -2797,13 +2953,19 @@ impl ScopeResolver {
                 });
             });
         } else if is_from_import {
-            let module_path = node
+            let module_node = node
                 .child_by_field_name(&imports.module_field)
-                .map(|n| ctx.text(n).to_string())
+                ;
+            let module_path = imports.fixed_modules.get(node_kind).cloned()
+                .or_else(|| module_node.map(|n| ctx.text(n).to_string()))
                 .unwrap_or_default();
+            let module_node_id = module_node.map(|node| node.id());
 
             let mut found_any = false;
             for_each_child(node, |child| {
+                if module_node_id == Some(child.id()) {
+                    return;
+                }
                 let ck = child.kind();
                 let is_star = !imports.star_import.is_empty() && ck == imports.star_import;
                 let is_aliased = imports.aliased_import.as_deref() == Some(ck);
@@ -2812,7 +2974,7 @@ impl ScopeResolver {
 
                 if is_star {
                     found_any = true;
-                    ctx.add_import(ImportBinding {
+                    ctx.add_import(scope_id, byte_offset, line, ImportBinding {
                         local_name: "*".to_string(),
                         module_path: module_path.clone(),
                         imported_name: None,
@@ -2821,7 +2983,7 @@ impl ScopeResolver {
                 } else if is_plain_name {
                     found_any = true;
                     let name = ctx.text(child).to_string();
-                    ctx.add_import(ImportBinding {
+                    ctx.add_import(scope_id, byte_offset, line, ImportBinding {
                         local_name: name.clone(),
                         module_path: module_path.clone(),
                         imported_name: Some(name),
@@ -2839,7 +3001,7 @@ impl ScopeResolver {
                         } else {
                             imported.clone()
                         };
-                        ctx.add_import(ImportBinding {
+                        ctx.add_import(scope_id, byte_offset, line, ImportBinding {
                             local_name: local,
                             module_path: module_path.clone(),
                             imported_name: Some(imported),
@@ -2855,7 +3017,9 @@ impl ScopeResolver {
             // identifier nodes inside the import tree.
             if !found_any && !module_path.is_empty() {
                 let ident_kind = imports.identifier.as_deref().unwrap_or("identifier");
-                Self::collect_nested_import_names(node, ident_kind, &module_path, ctx);
+                Self::collect_nested_import_names(
+                    node, ident_kind, &module_path, scope_id, byte_offset, line, ctx,
+                );
             }
         }
     }
@@ -2868,6 +3032,9 @@ impl ScopeResolver {
         node: &tree_sitter::Node,
         ident_kind: &str,
         module_path: &str,
+        scope_id: ScopeId,
+        byte_offset: usize,
+        line: usize,
         ctx: &mut BuildContext,
     ) {
         let mut cursor = node.walk();
@@ -2876,21 +3043,48 @@ impl ScopeResolver {
         }
         loop {
             let child = cursor.node();
-            if child.kind() == ident_kind {
+            if child.kind() == "import_specifier" {
+                let imported = child
+                    .child_by_field_name("name")
+                    .map(|name| ctx.text(name).to_string());
+                if let Some(imported) = imported {
+                    let local_name = child
+                        .child_by_field_name("alias")
+                        .map(|alias| ctx.text(alias).to_string())
+                        .unwrap_or_else(|| imported.clone());
+                    ctx.add_import(scope_id, byte_offset, line, ImportBinding {
+                        local_name,
+                        module_path: module_path.to_string(),
+                        imported_name: Some(imported),
+                        is_star: false,
+                    });
+                }
+            } else if child.kind() == "namespace_import" {
+                if let Some(name) = child.named_child(0) {
+                    ctx.add_import(scope_id, byte_offset, line, ImportBinding {
+                        local_name: ctx.text(name).to_string(),
+                        module_path: module_path.to_string(),
+                        imported_name: Some("*".to_string()),
+                        is_star: true,
+                    });
+                }
+            } else if child.kind() == ident_kind && node.kind() == "import_clause" {
                 // Skip the source string literal
                 let name = ctx.text(child).to_string();
                 // Don't register if name looks like a module path string
                 if !name.contains('/') && !name.contains('.') {
-                    ctx.add_import(ImportBinding {
+                    ctx.add_import(scope_id, byte_offset, line, ImportBinding {
                         local_name: name.clone(),
                         module_path: module_path.to_string(),
-                        imported_name: Some(name),
+                        imported_name: Some("default".to_string()),
                         is_star: false,
                     });
                 }
             } else {
                 // Recurse into child
-                Self::collect_nested_import_names(&child, ident_kind, module_path, ctx);
+                Self::collect_nested_import_names(
+                    &child, ident_kind, module_path, scope_id, byte_offset, line, ctx,
+                );
             }
             if !cursor.goto_next_sibling() {
                 break;
@@ -3053,7 +3247,7 @@ impl ScopeResolver {
         &self,
         tree: &tree_sitter::Tree,
         source: &str,
-    ) -> Vec<(ImportBinding, usize)> {
+    ) -> Vec<(ImportBinding, usize, usize)> {
         let source_bytes = source.as_bytes();
         let mut result = Vec::new();
 
@@ -3096,7 +3290,8 @@ impl ScopeResolver {
             prefix: &str,
             src: &[u8],
             line: usize,
-            result: &mut Vec<(ImportBinding, usize)>,
+            byte_offset: usize,
+            result: &mut Vec<(ImportBinding, usize, usize)>,
         ) {
             match node.kind() {
                 // `use std::io;`  —  the argument is a scoped_identifier
@@ -3118,6 +3313,7 @@ impl ScopeResolver {
                                 is_star: false,
                             },
                             line,
+                            byte_offset,
                         ));
                     } else {
                         result.push((
@@ -3128,6 +3324,7 @@ impl ScopeResolver {
                                 is_star: false,
                             },
                             line,
+                            byte_offset,
                         ));
                     }
                 }
@@ -3148,6 +3345,7 @@ impl ScopeResolver {
                             is_star: false,
                         },
                         line,
+                        byte_offset,
                     ));
                 }
 
@@ -3192,6 +3390,7 @@ impl ScopeResolver {
                             is_star: true,
                         },
                         line,
+                        byte_offset,
                     ));
                 }
 
@@ -3219,6 +3418,7 @@ impl ScopeResolver {
                                     is_star: false,
                                 },
                                 line,
+                                byte_offset,
                             ));
                         } else {
                             let local_name = alias.clone().unwrap_or_else(|| full.clone());
@@ -3230,6 +3430,7 @@ impl ScopeResolver {
                                     is_star: false,
                                 },
                                 line,
+                                byte_offset,
                             ));
                         }
                     }
@@ -3245,7 +3446,7 @@ impl ScopeResolver {
                         prefix.to_string()
                     };
                     if let Some(list_node) = node.child_by_field_name("list") {
-                        expand_use_tree(list_node, &new_prefix, src, line, result);
+                        expand_use_tree(list_node, &new_prefix, src, line, byte_offset, result);
                     }
                 }
 
@@ -3272,6 +3473,7 @@ impl ScopeResolver {
                                                 is_star: false,
                                             },
                                             line,
+                                            byte_offset,
                                         ));
                                     } else if !prefix.is_empty() {
                                         result.push((
@@ -3282,10 +3484,11 @@ impl ScopeResolver {
                                                 is_star: false,
                                             },
                                             line,
+                                            byte_offset,
                                         ));
                                     }
                                 } else {
-                                    expand_use_tree(child, prefix, src, line, result);
+                                    expand_use_tree(child, prefix, src, line, byte_offset, result);
                                 }
                             }
                             if !cursor.goto_next_sibling() {
@@ -3299,11 +3502,11 @@ impl ScopeResolver {
             }
         }
 
-        // Walk the tree top-level to find `use_declaration` and `mod_item` nodes.
-        fn walk_top(
+        // Walk the full tree so block-local bindings retain their lexical scope.
+        fn walk_imports(
             node: tree_sitter::Node,
             src: &[u8],
-            result: &mut Vec<(ImportBinding, usize)>,
+            result: &mut Vec<(ImportBinding, usize, usize)>,
         ) {
             let nk = node.kind();
 
@@ -3311,7 +3514,7 @@ impl ScopeResolver {
                 let line = node.start_position().row + 1;
                 // The `argument` field holds the use tree.
                 if let Some(arg) = node.child_by_field_name("argument") {
-                    expand_use_tree(arg, "", src, line, result);
+                    expand_use_tree(arg, "", src, line, node.start_byte(), result);
                 }
                 return;
             }
@@ -3333,25 +3536,21 @@ impl ScopeResolver {
                                 is_star: false,
                             },
                             line,
+                            node.start_byte(),
                         ));
                     }
                 }
-                // Don't recurse into mod_item children at this level.
-                return;
+                if node.child_by_field_name("body").is_none() {
+                    return;
+                }
             }
 
-            // Only source-file children contribute to the file-level import
-            // map. Function-local aliases need scope-aware shadowing and must
-            // not leak into unrelated functions.
-            if nk != "source_file" {
-                return;
-            }
-
-            // Recurse into direct children to find top-level declarations.
+            // Recurse into lexical containers; scope assignment happens after
+            // collection from the occurrence's source position.
             let mut cursor = node.walk();
             if cursor.goto_first_child() {
                 loop {
-                    walk_top(cursor.node(), src, result);
+                    walk_imports(cursor.node(), src, result);
                     if !cursor.goto_next_sibling() {
                         break;
                     }
@@ -3359,7 +3558,7 @@ impl ScopeResolver {
             }
         }
 
-        walk_top(tree.root_node(), source_bytes, &mut result);
+        walk_imports(tree.root_node(), source_bytes, &mut result);
         result
     }
 
@@ -3799,6 +3998,8 @@ impl LanguageConfig {
                 all_variable: Some("__all__".to_string()),
                 public_by_default: true,
                 private_prefix: "_".to_string(),
+                export_statement: None,
+                visibility_node: None,
                 dunder_is_public: true,
             },
             builtins: BuiltinsSection {

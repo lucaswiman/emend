@@ -29,6 +29,29 @@ fn parse(source: &str, lang_name: &str) -> Option<Tree> {
     get_parser(lang_name).parse(source.as_bytes(), None)
 }
 
+/// Parse with the compiled grammar selected by an immutable language config.
+/// The actual extension chooses TSX for JSX-bearing TypeScript/JavaScript.
+pub(crate) fn parse_for_config(
+    source: &str,
+    ext: &str,
+    config: &crate::scope::LanguageConfig,
+) -> Result<Option<Tree>, String> {
+    let configured = config.language.tree_sitter_grammar.as_str();
+    let grammar = match configured {
+        "tree-sitter-python" | "python" => "python",
+        "tree-sitter-typescript" | "typescript" if matches!(ext, "tsx" | "jsx") => "tsx",
+        "tree-sitter-typescript" | "typescript" => "typescript",
+        "tree-sitter-rust" | "rust" => "rust",
+        "tree-sitter-html" | "html" => "html",
+        "tree-sitter-css" | "css" => "css",
+        "tree-sitter-sequel" | "tree-sitter-sql" | "sql" => "sql",
+        "tree-sitter-jinja2" | "jinja2" => "jinja2",
+        "tree-sitter-souffle" | "datalog" => "datalog",
+        other => return Err(format!("tree-sitter grammar {other:?} is not compiled in")),
+    };
+    Ok(parse(source, grammar))
+}
+
 pub(crate) fn parse_python(source: &str) -> Option<Tree> {
     parse(source, "python")
 }

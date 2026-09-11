@@ -17,12 +17,16 @@ from emend.fact_graph import ImportFact
 
 def _facts(path: str, src: str) -> list[ImportFact]:
     from emend.analysis_extraction import _extract_file_facts
-    from emend.language_registry import detect_language
+    from emend.analysis_snapshot import FileRevision
+    from emend.language_registry import detect_language, language_config_snapshot
 
-    ext = Path(path).suffix.lstrip(".") or "py"
+    language = detect_language(path) or "python"
+    revision = FileRevision.create(
+        Path.cwd(), Path(path).resolve(), "test", language, Path(path).stem,
+        analysis_config=language_config_snapshot(language),
+    )
     extracted = _extract_file_facts(
-        str(Path(path).resolve()), path, ext, src, str(Path.cwd()),
-        Path(path).stem, detect_language(path),
+        revision, path, src,
     )
     return [
         ImportFact(

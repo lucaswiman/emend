@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
-from emend.analysis_snapshot import ExtractedFile, FileRevision
+from pathlib import Path
+from emend.analysis_snapshot import (
+    ExtractedFile,
+    FileRevision,
+)
 
 
 def _normalize_qn(qn: str) -> str:
@@ -16,34 +19,24 @@ def _normalize_qn(qn: str) -> str:
 
 
 def _extract_file_facts(
-    abs_path: str,
-    rel_path: str,
-    ext: str,
+    revision: FileRevision,
+    stored_path: str,
     content: str,
-    project_root: str,
-    module_name: str,
-    language: str | None = None,
 ) -> ExtractedFile:
     """Return the canonical native fact batch for one source revision."""
     from emend import emend_core
-    from emend.language_registry import detect_language
 
-    effective_language = language or detect_language(abs_path) or "python"
+    config = revision.analysis_config
+    assert config is not None
+    ext = Path(revision.file_path).suffix.lstrip(".") or "py"
     extracted = emend_core.extract_file_fact_rows(
         content,
         ext,
-        abs_path,
-        rel_path,
-        project_root,
-        module_name,
-        effective_language,
-    )
-    revision = FileRevision.create(
-        project_root,
-        abs_path,
-        hashlib.md5(content.encode(), usedforsecurity=False).hexdigest(),
-        ext,
-        module_name,
+        revision.file_path,
+        stored_path,
+        revision.module_name,
+        revision.language,
+        config.payload,
     )
     return ExtractedFile(
         revision=revision,

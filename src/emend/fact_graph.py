@@ -16,17 +16,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import posixpath
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from emend.errors import BUG_EXCEPTIONS
-from emend.analysis_extraction import (
-    _extract_file_facts,
-    _normalize_qn,
-)
+from emend.analysis_extraction import _extract_file_facts, _normalize_qn
 from emend.analysis_snapshot import (
     AnalysisSnapshot,
     CallFact,
@@ -933,101 +929,6 @@ class FactGraph:
             "file_path, qualified_name",
             rows,
         )
-
-    # -- Post-processing ---------------------------------------------------
-
-    def _resolve_builtin_refs(self) -> None:
-        """Resolve ``builtins.*`` references using import facts.
-
-        When a scope resolver can't resolve a cross-file import (typical
-        for TypeScript/Rust), it reports the callee as ``builtins.X``.
-        This method finds such references, matches them against import
-        facts, and adds corrected reference/call facts with the real
-        qualified name.
-        """
-        try:
-            builtin_calls = self._client.run(
-                "?[caller_qn, callee_qn, file_path, line, col, func_qn, block_id] := "
-                "*call[caller_qn, callee_qn, file_path, line, col, func_qn, block_id], "
-                "starts_with(callee_qn, 'builtins.')"
-            )["rows"]
-        except Exception:
-            logger.debug("builtins.* call query failed; skipping builtin ref resolution", exc_info=True)
-            return
-
-        if not builtin_calls:
-            return
-
-        try:
-            imports = self._client.run(
-                "?[importing_file, imported_name, imported_module] := "
-                "*import[importing_file, imported_module, imported_name, _, _], "
-                "imported_name != ''"
-            )["rows"]
-        except Exception:
-            logger.debug("import fact query failed; skipping builtin ref resolution", exc_info=True)
-            return
-
-        import_map: dict[tuple[str, str], str] = {}
-        for imp_file, imp_name, imp_module in imports:
-            import_map[(imp_file, imp_name)] = imp_module
-
-        new_calls: list[CallFact] = []
-        new_refs: list[ReferenceFact] = []
-
-        for caller_qn, callee_qn, file_path, line, col, func_qn, block_id in builtin_calls:
-            bare_name = callee_qn.split(".", 1)[-1] if "." in callee_qn else callee_qn
-            imp_module = import_map.get((file_path, bare_name))
-            if not imp_module:
-                continue
-
-            # Resolve import module path to a file module QN.
-            # Handle relative imports (./target, ../utils) by normalizing
-            # against the importing file's directory.
-            resolved_qn = self._resolve_import_to_qn(
-                imp_module, file_path, bare_name,
-            )
-            if not resolved_qn:
-                continue
-
-            new_calls.append(CallFact(
-                caller_qn=caller_qn, callee_qn=resolved_qn,
-                file_path=file_path, line=line, col=col,
-                func_qn=func_qn, block_id=block_id,
-            ))
-            new_refs.append(ReferenceFact(
-                symbol_qn=resolved_qn, file_path=file_path,
-                line=line, col=col, ref_kind="call",
-                func_qn=func_qn, block_id=block_id,
-            ))
-
-        if new_calls:
-            self.add_calls_batch(new_calls)
-        if new_refs:
-            self.add_references_batch(new_refs)
-
-    def _resolve_import_to_qn(
-        self,
-        import_source: str,
-        importing_file: str,
-        symbol_name: str,
-    ) -> str | None:
-        """Resolve an import source path to a symbol QN.
-
-        For relative imports like ``./target`` or ``../utils/helper``,
-        resolves relative to the importing file's directory.
-        """
-        # Strip leading ./ and resolve relative paths
-        source = import_source
-        if source.startswith("./") or source.startswith("../"):
-            # Resolve relative to the importing file's directory
-            imp_dir = posixpath.dirname(importing_file)
-            source = posixpath.normpath(posixpath.join(imp_dir, source))
-
-        # Normalize separators to dots
-        normalized = _normalize_qn(source)
-
-        return f"{normalized}.{symbol_name}"
 
     # -- Queries ----------------------------------------------------------
 
@@ -2557,21 +2458,43 @@ class FactGraph:
 
         # 2. Extract and insert new facts per file.  The persisted index uses
         # this same extractor, so analysis semantics cannot drift by builder.
+        from emend.analysis_linking import ModuleCatalog, link_extracted_files
+        from emend.analysis_snapshot import FileRevision
+        from emend.language_registry import (
+            detect_language,
+            get_module_separator,
+            registry_and_config_snapshots,
+        )
+
         extracted_files = []
+        revisions = []
         for abs_file_path, content in file_list:
             rel_path = stored_path(abs_file_path)
-            if project_root:
-                from emend.project_config import module_name_for_file
+            from emend.project_config import module_name_for_file
 
-                module_name = module_name_for_file(abs_file_path, project_root)
-            else:
-                module_name = Path(abs_file_path).stem
-            ext = Path(abs_file_path).suffix.lstrip(".") or "py"
+            root = resolved_project_root or Path(abs_file_path).resolve().parent
+            registry, configs = registry_and_config_snapshots(root)
+            file_language = detect_language(abs_file_path, registry=registry) or language
+            config = configs[file_language]
+            module_name = (
+                module_name_for_file(
+                    abs_file_path, root, language=file_language,
+                    module_separator=get_module_separator(file_language, config),
+                )
+                if resolved_project_root is not None
+                else Path(abs_file_path).stem
+            )
+            revision = FileRevision.create(
+                root, abs_file_path, hashlib.sha256(content.encode()).hexdigest(),
+                file_language, module_name, analysis_config=config,
+            )
+            revisions.append(revision)
             extracted_files.append(_extract_file_facts(
-                abs_file_path, rel_path, ext, content,
-                resolver_root or project_root or str(Path(abs_file_path).parent),
-                module_name,
+                revision, rel_path, content,
             ))
+        extracted_files = link_extracted_files(
+            extracted_files, ModuleCatalog.from_revisions(revisions)
+        )
         self.replace_extracted(
             extracted_files,
             stored_paths=[stored_path(fp) for fp, _ in file_list],

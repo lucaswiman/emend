@@ -172,6 +172,18 @@ def test_detect_exported_names_typescript(code, expected):
     assert detect_exported_names(code, "typescript") == expected
 
 
+def test_detect_exported_names_uses_actual_tsx_grammar_and_structural_exports():
+    code = (
+        "function local() {}\n"
+        "export {\n  local as publicName,\n};\n"
+        "export default\n"
+        "function View({x}: {x: number}) { return <div>{x}</div>; }\n"
+    )
+    assert detect_exported_names(code, "typescript", extension="tsx") == {
+        "local", "View",
+    }
+
+
 @pytest.mark.parametrize("code, expected", [
     ("def foo(): pass\n__all__ = ['foo']\n", {"foo"}),
     ("__all__ = ('foo', 'bar')", {"foo", "bar"}),

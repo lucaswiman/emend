@@ -1622,63 +1622,14 @@ pub fn build_cfgs_from_tree(
         return Vec::new();
     }
 
-    let source_bytes = source.as_bytes();
-    let mut cfgs = Vec::new();
-    collect_functions(tree.root_node(), source_bytes, cfg_sec, &mut cfgs);
-    cfgs
-}
-
-fn collect_functions(
-    node: tree_sitter::Node,
-    source: &[u8],
-    cfg_sec: &CfgSection,
-    cfgs: &mut Vec<FunctionCfg>,
-) {
-    let kind = node.kind();
-
-    // Is this a function node?
-    if cfg_sec.function_nodes.iter().any(|n| n == kind) {
-        cfgs.push(build_cfg(node, source, cfg_sec));
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            collect_functions(child, source, cfg_sec, cfgs);
-        }
-        return;
-    }
-
-    // Decorated definition wrapping a function or container
-    if !cfg_sec.decorated_node.is_empty() && kind == cfg_sec.decorated_node {
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            let ck = child.kind();
-            if cfg_sec.function_nodes.iter().any(|n| n == ck) {
-                cfgs.push(build_cfg(child, source, cfg_sec));
-                return;
-            }
-            if cfg_sec.container_nodes.iter().any(|n| n == ck) {
-                collect_functions(child, source, cfg_sec, cfgs);
-                return;
-            }
-        }
-        return;
-    }
-
-    // Recurse into all children
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_functions(child, source, cfg_sec, cfgs);
-    }
+    let mut scopes = Vec::new();
+    flow_scopes(tree.root_node(), cfg_sec, &mut scopes);
+    scopes.into_iter().map(|node| build_cfg(node, source.as_bytes(), cfg_sec)).collect()
 }
 
 // ---------------------------------------------------------------------------
 // Exact occurrence/value graph
 // ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy)]
-struct FlowScope<'a> {
-    node: tree_sitter::Node<'a>,
-    body: tree_sitter::Node<'a>,
-}
 
 #[derive(Debug)]
 struct CallRecord {
@@ -1687,11 +1638,9 @@ struct CallRecord {
     args: Vec<u32>,
 }
 
-fn flow_scopes<'a>(node: tree_sitter::Node<'a>, cfg: &CfgSection, out: &mut Vec<FlowScope<'a>>) {
+fn flow_scopes<'a>(node: tree_sitter::Node<'a>, cfg: &CfgSection, out: &mut Vec<tree_sitter::Node<'a>>) {
     if cfg.function_nodes.iter().any(|kind| kind == node.kind()) {
-        if let Some(body) = node.child_by_field_name(&cfg.body_field) {
-            out.push(FlowScope { node, body });
-        }
+        out.push(node);
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -2073,7 +2022,16 @@ pub fn build_flow_facts_from_tree(
     tree: &tree_sitter::Tree,
     lang: &LanguageConfig,
 ) -> FlowFacts {
-    if lang.cfg.function_nodes.is_empty() { return FlowFacts::default(); }
+    build_analysis_from_tree(source, tree, lang).1
+}
+
+/// Derive control-flow and value-flow facts together, building each CFG once.
+pub fn build_analysis_from_tree(
+    source: &str,
+    tree: &tree_sitter::Tree,
+    lang: &LanguageConfig,
+) -> (Vec<FunctionCfg>, FlowFacts) {
+    if lang.cfg.function_nodes.is_empty() { return (Vec::new(), FlowFacts::default()); }
     let bytes = source.as_bytes();
     let root = tree.root_node();
     let mut events = Vec::new();
@@ -2086,13 +2044,13 @@ pub fn build_flow_facts_from_tree(
 
     let mut scopes = Vec::new();
     flow_scopes(root, &lang.cfg, &mut scopes);
+    let cfgs: Vec<_> = scopes.iter().map(|&node| build_cfg(node, bytes, &lang.cfg)).collect();
     let mut functions: HashMap<String, Vec<(Vec<u32>, Vec<u32>)>> = HashMap::new();
-    for scope in scopes {
-        let name = scope.node.child_by_field_name("name")
-            .and_then(|n| n.utf8_text(bytes).ok()).unwrap_or("<anonymous>").to_string();
-        let start = scope.node.start_byte();
-        let cfg = build_cfg(scope.node, bytes, &lang.cfg);
-        let (e, d, c) = extract_scope(bytes, lang, &cfg, name.clone(), start, scope.body, Some(scope.node), &mut next_id);
+    for (node, cfg) in scopes.into_iter().zip(&cfgs) {
+        let Some(body) = node.child_by_field_name(&lang.cfg.body_field) else { continue };
+        let name = cfg.func_name.clone();
+        let start = node.start_byte();
+        let (e, d, c) = extract_scope(bytes, lang, cfg, name.clone(), start, body, Some(node), &mut next_id);
         let params = e.iter().filter(|v| v.role == "param_in").map(|v| v.id).collect();
         let returns = e.iter().filter(|v| v.role == "return_out").map(|v| v.id).collect();
         functions.entry(name).or_default().push((params, returns));
@@ -2110,12 +2068,23 @@ pub fn build_flow_facts_from_tree(
     }
     let mut seen = HashSet::new();
     edges.retain(|e| seen.insert((e.from, e.to, e.kind.clone())));
-    FlowFacts { events, edges }
+    (cfgs, FlowFacts { events, edges })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decorated_functions_retain_nested_control_flow() {
+        let source = "@decorate\ndef outer(x):\n    def inner(y):\n        if y:\n            return y\n        return 0\n    return inner(x)\n";
+        let cfgs = build_cfgs_for_source(source, "py");
+        assert_eq!(cfgs.iter().map(|cfg| cfg.func_name.as_str()).collect::<Vec<_>>(), ["outer", "inner"]);
+        let flow = build_flow_facts(source, "py");
+        for event in flow.events.iter().filter(|event| event.func_name == "inner") {
+            assert!(cfgs[1].blocks.iter().any(|block| block.id.0 == event.block));
+        }
+    }
 
     #[test]
     fn test_field_level_defs() {

@@ -26,6 +26,8 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
+from emend.analysis_snapshot import LanguageConfigRevision
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -101,8 +103,12 @@ def _discover_entry_point_languages() -> dict[str, Path]:
     return result
 
 
-def _config_path(language: str) -> Path | None:
+def _config_path(language: str, project_root: str | Path | None = None) -> Path | None:
     """Return the effective configuration path for one language."""
+    if project_root is not None:
+        candidate = Path(project_root) / "languages" / language / "config.toml"
+        if candidate.is_file():
+            return candidate
     lang_dir = _find_languages_dir()
     if lang_dir is not None:
         candidate = lang_dir / language / "config.toml"
@@ -116,9 +122,9 @@ def _config_path(language: str) -> Path | None:
     return None
 
 
-def config_identity(language: str) -> str:
+def config_identity(language: str, project_root: str | Path | None = None) -> str:
     """Hash the exact language configuration consumed by analysis."""
-    path = _config_path(language)
+    path = _config_path(language, project_root)
     try:
         payload = path.read_bytes() if path is not None else repr(
             _BUILTIN.get(language, ())
@@ -154,9 +160,17 @@ def _parse_toml_extensions(
     return None
 
 
-def _registry_inputs() -> tuple[tuple[str, str, bytes], ...]:
+def _registry_inputs(
+    project_root: str | Path | None = None,
+) -> tuple[tuple[str, str, bytes], ...]:
     """Capture the exact language configurations used by one registry view."""
     inputs: list[tuple[str, str, bytes]] = []
+    if project_root is not None:
+        for path in sorted((Path(project_root) / "languages").glob("*/config.toml")):
+            try:
+                inputs.append(("project", str(path), path.read_bytes()))
+            except OSError:
+                pass
     lang_dir = _find_languages_dir()
     if lang_dir:
         for path in sorted(lang_dir.glob("*/config.toml")):
@@ -194,7 +208,7 @@ def _build_registry(
         result = _parse_toml_extensions(payload, label)
         if result:
             name, exts = result
-            if source == "plugin" and name in lang_to_exts:
+            if name in lang_to_exts:
                 continue
             register(name, exts)
 
@@ -208,9 +222,57 @@ def _build_registry(
     return ext_to_lang, lang_to_exts
 
 
-def registry_snapshot() -> tuple[dict[str, str], dict[str, list[str]]]:
+def registry_snapshot(
+    project_root: str | Path | None = None,
+) -> tuple[dict[str, str], dict[str, list[str]]]:
     """Return one immutable-by-convention, exact registry revision."""
-    return _build_registry(_registry_inputs())
+    ext_to_lang, lang_to_exts = _build_registry(_registry_inputs(project_root))
+    return dict(ext_to_lang), {
+        language: list(extensions) for language, extensions in lang_to_exts.items()
+    }
+
+
+def registry_and_config_snapshots(
+    project_root: str | Path | None = None,
+) -> tuple[
+    tuple[dict[str, str], dict[str, list[str]]],
+    dict[str, LanguageConfigRevision],
+]:
+    """Build extension and config views from one immutable byte capture."""
+    inputs = _registry_inputs(project_root)
+    snapshots: dict[str, LanguageConfigRevision] = {}
+    for _source, label, payload in inputs:
+        parsed = _parse_toml_extensions(payload, label)
+        if parsed is None:
+            continue
+        language, _extensions = parsed
+        snapshots.setdefault(
+            language,
+            LanguageConfigRevision.create(language, payload.decode()),
+        )
+    ext_to_lang, lang_to_exts = _build_registry(inputs)
+    registry = dict(ext_to_lang), {
+        language: list(extensions) for language, extensions in lang_to_exts.items()
+    }
+    return registry, snapshots
+
+
+def language_config_snapshots(
+    project_root: str | Path | None = None,
+) -> dict[str, LanguageConfigRevision]:
+    """Capture the effective config bytes for every language in one registry view."""
+    return registry_and_config_snapshots(project_root)[1]
+
+
+def language_config_snapshot(
+    language: str,
+    project_root: str | Path | None = None,
+) -> LanguageConfigRevision:
+    """Return the exact immutable config revision used for *language*."""
+    snapshot = language_config_snapshots(project_root).get(language)
+    if snapshot is None:
+        raise ValueError(f"no language configuration registered for {language!r}")
+    return snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -268,10 +330,12 @@ def is_source_file(path: str | Path) -> bool:
     return detect_language(path) is not None
 
 
-def get_module_separator(language: str) -> str:
+def get_module_separator(
+    language: str, config: LanguageConfigRevision | None = None
+) -> str:
     """Return the qualified-name separator for *language* (e.g. ``"."`` or ``"::"``)."""
-    config = load_config(language)
-    return config.get("qualified_names", {}).get("module_separator", ".")
+    document = load_config(language, config=config)
+    return document.get("qualified_names", {}).get("module_separator", ".")
 
 
 def get_comment_prefix(language: str) -> str:
@@ -285,15 +349,34 @@ def get_comment_prefix(language: str) -> str:
     return config.get("language", {}).get("comment_prefix", "#")
 
 
-def load_config(language: str) -> dict:
+def load_config(
+    language: str, *, config: LanguageConfigRevision | None = None
+) -> dict:
     """Load the full TOML configuration for *language*.
 
     Returns an empty dict if the language or config file is not found.
     Checks built-in languages first, then entry-point plugins.
     """
+    if config is not None:
+        return _parse_config_payload(config.payload, language)
     config_path = _config_path(language)
 
     return _load_config(language, config_identity(language), config_path)
+
+
+def _parse_config_payload(payload: str, label: str) -> dict:
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError:
+            return {}
+    try:
+        return tomllib.loads(payload)
+    except (UnicodeError, ValueError):
+        logger.debug("Could not parse language config %s", label, exc_info=True)
+        return {}
 
 
 @lru_cache(maxsize=32)
@@ -328,17 +411,22 @@ load_config.cache_clear = _load_config.cache_clear  # type: ignore[attr-defined]
 # Tree-sitter-based export detection
 # ---------------------------------------------------------------------------
 
-def detect_exported_names(content: str, language: str) -> set[str]:
+def detect_exported_names(
+    content: str,
+    language: str,
+    *,
+    extension: str | None = None,
+    config: LanguageConfigRevision | None = None,
+) -> set[str]:
     """Detect explicit module exports using the canonical native parser."""
     if language not in ("python", "typescript", "javascript", "rust"):
         return set()
 
     from emend import emend_core
 
+    revision = config or language_config_snapshot(language)
     extensions = get_extensions(language)
-    ext = extensions[0] if extensions else "py"
-    languages_dir = _find_languages_dir()
-    config_root = languages_dir.parent if languages_dir is not None else Path(".")
+    ext = extension or (extensions[0] if extensions else "py")
     return set(emend_core.extract_exported_names(
-        content, ext, str(config_root), language,
+        content, ext, language, revision.payload,
     ))

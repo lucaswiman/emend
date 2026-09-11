@@ -23,7 +23,7 @@ from emend.project_config import find_project_root
 from emend.symbol_projection import SymbolInfo, _symbol_info_view
 
 
-EXTRACTION_ARTIFACT_VERSION = "6"
+EXTRACTION_ARTIFACT_VERSION = "7"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,8 @@ class AnalysisStore:
                         "CREATE TABLE IF NOT EXISTS symbol_projection "
                         "(identity TEXT PRIMARY KEY, payload BLOB NOT NULL)"
                     )
-                    config = self._language_config_id(detect_language(f"file.{ext}") or "python")
+                    from emend.language_registry import config_identity
+                    config = config_identity(detect_language(f"file.{ext}") or "python")
                     identity = repr(("2", EXTRACTION_ARTIFACT_VERSION, key, config))
                     row = conn.execute(
                         "SELECT payload FROM symbol_projection WHERE identity = ?", (identity,)
@@ -232,14 +233,15 @@ class AnalysisStore:
         """Return the schema/config identity governing extracted facts."""
         from emend.fact_graph import FACT_GRAPH_SCHEMA_VERSION
 
-        languages = {revision.language for revision in revisions}
+        configurations = {
+            (revision.language, revision.analysis_config.identity)
+            for revision in revisions
+            if revision.analysis_config is not None
+        }
         payload = (
             FACT_GRAPH_SCHEMA_VERSION,
             EXTRACTION_ARTIFACT_VERSION,
-            tuple(sorted(
-                (language, self._language_config_id(language))
-                for language in languages
-            )),
+            tuple(sorted(configurations)),
         )
         return hashlib.sha256(repr(payload).encode()).hexdigest()
 
@@ -342,7 +344,7 @@ class AnalysisStore:
         from emend.language_registry import (
             detect_language,
             get_module_separator,
-            registry_snapshot,
+            registry_and_config_snapshots,
         )
         from emend.project_config import find_source_root
 
@@ -352,9 +354,10 @@ class AnalysisStore:
         # absorb all per-file module-name lookups below.
         find_source_root.cache_clear()
         previous = self._observed_files
-        registry = registry_snapshot()
+        registry, configs = registry_and_config_snapshots(self.project_root)
         module_separators = {
-            language: get_module_separator(language) for language in registry[1]
+            language: get_module_separator(language, configs.get(language))
+            for language in registry[1]
         }
         files = sorted(
             str(Path(path).resolve())
@@ -401,7 +404,8 @@ class AnalysisStore:
                 contents[file_path] = content
                 content_hash = hashlib.sha256(content.encode()).hexdigest()
             revisions.append(FileRevision.create(
-                self.project_root, file_path, content_hash, language, module_name
+                self.project_root, file_path, content_hash, language, module_name,
+                analysis_config=configs.get(language),
             ))
             observed[file_path] = (*identity, content_hash, language, module_name)
         self._save_observed_files(previous, observed)
@@ -478,6 +482,10 @@ class AnalysisStore:
         pending: list[tuple[int, FileRevision, str, str, str]] = []
         try:
             for index, revision in enumerate(revisions):
+                if revision.analysis_config is None:
+                    raise RuntimeError(
+                        f"snapshot lacks language config for {revision.file_path}"
+                    )
                 try:
                     stored_path = str(
                         Path(revision.file_path).relative_to(self.project_root)
@@ -488,7 +496,7 @@ class AnalysisStore:
                     "facts", FACT_GRAPH_SCHEMA_VERSION,
                     EXTRACTION_ARTIFACT_VERSION, revision.language,
                     revision.module_name, stored_path, revision.content_hash,
-                    self._language_config_id(revision.language),
+                    revision.analysis_config.identity,
                 )
                 key = hashlib.sha256(repr(key_payload).encode()).hexdigest()
                 row = conn.execute(
@@ -528,20 +536,7 @@ class AnalysisStore:
 
             def extract(item):
                 index, revision, stored_path, key, content = item
-                extracted = _extract_file_facts(
-                    revision.file_path,
-                    stored_path,
-                    Path(revision.file_path).suffix.lstrip(".") or "py",
-                    content,
-                    str(self.project_root),
-                    revision.module_name,
-                    revision.language,
-                )
-                return index, key, ExtractedFile(
-                    revision=revision,
-                    qnames=extracted.qnames,
-                    rows=extracted.rows,
-                )
+                return index, key, _extract_file_facts(revision, stored_path, content)
 
             if pending:
                 from concurrent.futures import ThreadPoolExecutor
@@ -574,12 +569,6 @@ class AnalysisStore:
             return zlib.decompress(row[0]).decode() if row is not None else None
         except sqlite3.Error:
             return None
-
-    @staticmethod
-    def _language_config_id(language: str) -> str:
-        from emend.language_registry import config_identity
-
-        return config_identity(language)
 
     @contextmanager
     def _facts_write_lock(self):
@@ -623,6 +612,7 @@ class AnalysisStore:
 
     def _updated_graph(self, previous, snapshot: AnalysisSnapshot, contents):
         """Apply one revision delta, equally for disk and overlay generations."""
+        from emend.analysis_linking import ModuleCatalog, link_extracted_files
         from emend.fact_graph import FactGraph
 
         if previous is None:
@@ -642,12 +632,25 @@ class AnalysisStore:
                    if previous is not None else set()) - after.keys()
         try:
             graph.clear_snapshot_marker()
+            local = self._extract_revisions(changed, contents)
+            catalog = ModuleCatalog.from_revisions(snapshot.files)
+            # Import targets depend on module inventory (for example TS index
+            # aliases). Relink cached callers when that inventory changes;
+            # ordinary body edits still replace only the edited file.
+            def module_inventory(revisions):
+                return {(r.file_path, r.language, r.module_name) for r in revisions}
+
+            if module_inventory(before.values()) != module_inventory(snapshot.files):
+                local.extend(self._extract_revisions(
+                    (r for r in snapshot.files if before.get(r.file_path) == r), {}
+                ))
+                local.sort(key=lambda file: file.revision.file_path)
+                changed = list(snapshot.files)
             graph.replace_extracted(
-                self._extract_revisions(changed, contents),
+                link_extracted_files(local, catalog),
                 stored_paths=[graph.stored_path(file_path)
                               for file_path in [*(r.file_path for r in changed), *removed]],
             )
-            graph._resolve_builtin_refs()
             graph.publish_snapshot(snapshot)
             graph.bind_snapshot(
                 snapshot,
@@ -683,6 +686,7 @@ class AnalysisStore:
                         candidate.close()
                     self._unlink(path)
         if graph is not None and graph.snapshot.snapshot_id == scan.snapshot.snapshot_id:
+            graph.bind_snapshot(scan.snapshot, source_loader=self._revision_source)
             return graph
         candidate, path = self._updated_graph(graph, scan.snapshot, scan.contents)
         publish_path = None
@@ -803,15 +807,27 @@ class AnalysisStore:
 
     def _overlay_snapshot(self, disk: AnalysisSnapshot) -> AnalysisSnapshot:
         revisions = {revision.file_path: revision for revision in disk.files}
-        from emend.language_registry import detect_language
+        from emend.language_registry import (
+            detect_language,
+            get_module_separator,
+            language_config_snapshot,
+            registry_snapshot,
+        )
+        registry = registry_snapshot(self.project_root)
         for path, (_owner, version, content) in self._overlays.items():
-            language = detect_language(path) or "python"
+            language = detect_language(path, registry=registry) or "python"
+            config = next(
+                (revision.analysis_config for revision in disk.files
+                 if revision.language == language and revision.analysis_config is not None),
+                None,
+            ) or language_config_snapshot(language, self.project_root)
             revisions[path] = FileRevision.create(
                 self.project_root,
                 path,
                 hashlib.sha256(content.encode()).hexdigest(),
                 language,
-                self._module_name(path, language),
+                self._module_name(path, language, get_module_separator(language, config)),
+                analysis_config=config,
                 origin="overlay",
                 version=version,
             )

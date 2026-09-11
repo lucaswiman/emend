@@ -38,12 +38,16 @@ from emend.fact_graph import (
 def _native_imports(file_path: str, source: str) -> list[ImportFact]:
     """Read import rows from the canonical per-file fact batch."""
     from emend.analysis_extraction import _extract_file_facts
-    from emend.language_registry import detect_language
+    from emend.analysis_snapshot import FileRevision
+    from emend.language_registry import detect_language, language_config_snapshot
 
-    ext = Path(file_path).suffix.lstrip(".") or "py"
+    language = detect_language(file_path) or "python"
+    revision = FileRevision.create(
+        Path.cwd(), Path(file_path).resolve(), "test", language,
+        Path(file_path).stem, analysis_config=language_config_snapshot(language),
+    )
     extracted = _extract_file_facts(
-        str(Path(file_path).resolve()), file_path, ext, source, str(Path.cwd()),
-        Path(file_path).stem, detect_language(file_path),
+        revision, file_path, source,
     )
     return [
         ImportFact(

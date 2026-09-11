@@ -502,7 +502,6 @@ def test_query_facts_reuses_generation_and_incrementally_matches_full_build(tmp_
         [(str(first), first.read_text())],
         project_root=str(tmp_path), resolver_root=str(tmp_path),
     )
-    rebuilt._resolve_builtin_refs()
     try:
         assert {
             (fact.file_path, fact.qualified_name, fact.kind)
@@ -565,18 +564,30 @@ def test_extraction_artifacts_reuse_across_content_revert(tmp_path, extracted_fi
     assert len(extracted_files) == 2
 
 
-def test_language_config_identity_invalidates_published_and_shared_facts(
-    tmp_path, extracted_files, monkeypatch,
+def test_exact_project_language_config_invalidates_extracted_facts(
+    tmp_path, extracted_files,
 ):
+    from emend.language_registry import language_config_snapshot
+
     source = tmp_path / "app.py"
-    source.write_text("value = 1\n")
+    source.write_text("def visible():\n    return 1\n")
+    config_dir = tmp_path / "languages" / "python"
+    config_dir.mkdir(parents=True)
+    payload = language_config_snapshot("python").payload
+    config_path = config_dir / "config.toml"
+    config_path.write_text(payload)
     store = AnalysisStore.open(tmp_path)
-    context = ["first"]
-    monkeypatch.setattr(store, "_language_config_id", lambda _language: context[0])
     first = store.query_facts()
-    context[0] = "second"
+    assert _names(first.symbols()) == ["visible"]
+
+    config_path.write_text(payload.replace(
+        'function_node = "function_definition"',
+        'function_node = "not_a_function_definition"',
+        1,
+    ))
     second = store.query_facts()
     assert second.snapshot.snapshot_id != first.snapshot.snapshot_id
+    assert second.symbols() == []
     assert len(extracted_files) == 2
 
 

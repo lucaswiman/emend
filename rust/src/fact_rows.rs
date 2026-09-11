@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use crate::cfg::{self, FunctionCfg};
-use crate::scope::{FileScope, ImportBinding, LanguageConfig, Reference, ScopeResolver};
+use crate::scope::{LanguageConfig, Reference, ScopeResolver};
 use crate::symbols::{self, RustSymbol};
 
 const MODULE_LEVEL_FUNC: &str = "<module>";
@@ -86,6 +86,8 @@ impl FactBatch {
             "exported_qns",
             "flow_events",
             "flow_edges",
+            "local_refs",
+            "local_imports",
         ] {
             rows.insert(name, Vec::new());
         }
@@ -131,17 +133,9 @@ impl FactBatch {
 struct SymbolRow {
     name: String,
     qualified_name: String,
-    kind: String,
     line: usize,
     end_line: usize,
     module_level: bool,
-}
-
-struct ImportRow {
-    imported_module: String,
-    imported_name: Option<String>,
-    alias: Option<String>,
-    line: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +144,8 @@ struct BlockRange {
     block_id: u32,
     start_line: usize,
     end_line: usize,
+    start_byte: usize,
+    end_byte: usize,
     has_content: bool,
 }
 
@@ -258,7 +254,6 @@ fn project_symbols(
                 output.push(SymbolRow {
                     name: symbol.name.clone(),
                     qualified_name: qualified_name.clone(),
-                    kind: symbol.kind.clone(),
                     line: symbol.line,
                     end_line: symbol.end_line,
                     module_level: parent_qn.is_none() && symbol.path.len() <= 1,
@@ -287,75 +282,6 @@ fn project_symbols(
     output
 }
 
-fn collect_statement_ranges(
-    tree: &tree_sitter::Tree,
-    config: &LanguageConfig,
-) -> Vec<(usize, usize)> {
-    fn walk(
-        node: tree_sitter::Node<'_>,
-        simple: &[String],
-        recurse: &[String],
-        output: &mut Vec<(usize, usize)>,
-    ) {
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if simple.iter().any(|kind| kind == child.kind()) {
-                output.push((child.start_position().row + 1, child.end_position().row + 1));
-            } else if recurse.iter().any(|kind| kind == child.kind()) {
-                walk(child, simple, recurse, output);
-            }
-        }
-    }
-
-    let statements = &config.symbols.statements;
-    let mut output = Vec::new();
-    walk(
-        tree.root_node(),
-        &statements.effective_simple(),
-        &statements.effective_recurse_into(),
-        &mut output,
-    );
-    output
-}
-
-fn identifier_like(value: &str) -> bool {
-    let mut chars = value.chars();
-    chars
-        .next()
-        .is_some_and(|ch| ch == '_' || ch.is_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_alphanumeric())
-}
-
-fn ts_name_after_keywords(mut rest: &str) -> &str {
-    for prefix in ["async ", "abstract ", "declare "] {
-        if rest.starts_with(prefix) {
-            rest = rest[prefix.len()..].trim();
-        }
-    }
-    for prefix in [
-        "function* ",
-        "function ",
-        "class ",
-        "const ",
-        "let ",
-        "var ",
-        "interface ",
-        "type ",
-        "enum ",
-        "abstract class ",
-    ] {
-        if rest.starts_with(prefix) {
-            rest = &rest[prefix.len()..];
-            break;
-        }
-    }
-    let end = rest
-        .char_indices()
-        .find(|(_, ch)| !(*ch == '_' || ch.is_alphanumeric()))
-        .map_or(rest.len(), |(index, _)| index);
-    &rest[..end]
-}
-
 fn exported_names(
     source: &str,
     tree: &tree_sitter::Tree,
@@ -368,155 +294,95 @@ fn exported_names(
             .into_iter()
             .collect(),
         "typescript" | "javascript" => {
-            let lines: Vec<&str> = source.split('\n').collect();
             let mut names = HashSet::new();
-            for (line, _) in collect_statement_ranges(tree, config) {
-                let Some(text) = lines.get(line.saturating_sub(1)).map(|line| line.trim()) else {
-                    continue;
-                };
-                if !(text.starts_with("export ") || text.starts_with("export{")) {
+            let export_kind = config
+                .exports
+                .export_statement
+                .as_deref()
+                .unwrap_or("export_statement");
+            let mut cursor = tree.root_node().walk();
+            for node in tree.root_node().named_children(&mut cursor) {
+                if node.kind() != export_kind || node.child_by_field_name("source").is_some() {
                     continue;
                 }
-                let after_export = text["export".len()..].trim_start();
-                if after_export.starts_with('{') {
-                    if !text.contains(" from ") {
-                        if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) {
-                            for item in text[start + 1..end].split(',') {
-                                let original =
-                                    item.trim().split(" as ").next().unwrap_or("").trim();
-                                if identifier_like(original) {
-                                    names.insert(original.to_string());
-                                }
-                            }
+                for symbol in symbols.iter().filter(|symbol| {
+                    node.start_position().row + 1 <= symbol.line
+                        && symbol.line <= node.end_position().row + 1
+                }) {
+                    names.insert(symbol.name.clone());
+                }
+                let mut stack = vec![node];
+                while let Some(current) = stack.pop() {
+                    if matches!(
+                        current.kind(),
+                        "variable_declarator"
+                            | "interface_declaration"
+                            | "type_alias_declaration"
+                            | "enum_declaration"
+                            | "abstract_class_declaration"
+                    ) {
+                        if let Some(name) = current.child_by_field_name("name") {
+                            names.insert(
+                                String::from_utf8_lossy(&source.as_bytes()[name.byte_range()])
+                                    .into_owned(),
+                            );
+                        }
+                        continue;
+                    }
+                    if current.kind() == "export_specifier" {
+                        if let Some(name) = current.child_by_field_name("name") {
+                            names.insert(
+                                String::from_utf8_lossy(&source.as_bytes()[name.byte_range()])
+                                    .into_owned(),
+                            );
+                        }
+                        continue;
+                    }
+                    if let Some(value) = current.child_by_field_name("value") {
+                        if value.kind() == config.pattern_matching.identifier {
+                            names.insert(
+                                String::from_utf8_lossy(&source.as_bytes()[value.byte_range()])
+                                    .into_owned(),
+                            );
                         }
                     }
-                    continue;
-                }
-                let mut rest = text["export ".len()..].trim();
-                if rest.starts_with("default ") {
-                    rest = rest["default ".len()..].trim();
-                }
-                if !rest.contains(" from ") {
-                    let name = ts_name_after_keywords(rest);
-                    if !name.is_empty() {
-                        names.insert(name.to_string());
-                    }
+                    let mut children = current.walk();
+                    stack.extend(current.named_children(&mut children));
                 }
             }
             names
         }
         "rust" => {
-            let lines: Vec<&str> = source.split('\n').collect();
+            let visibility = config
+                .exports
+                .visibility_node
+                .as_deref()
+                .unwrap_or("visibility_modifier");
             symbols
                 .iter()
                 .filter(|symbol| {
-                    lines
-                        .get(symbol.line.saturating_sub(1))
-                        .is_some_and(|line| {
-                            let line = line.trim_start();
-                            line.starts_with("pub ") || line.starts_with("pub(")
-                        })
+                    let mut cursor = tree.root_node().walk();
+                    let visible = tree.root_node().named_children(&mut cursor).any(|node| {
+                        node.start_position().row + 1 == symbol.line
+                            && node.child_by_field_name("name").is_some_and(|name| {
+                                node.start_position().column == symbol.col_offset
+                                    && &source.as_bytes()[name.byte_range()]
+                                        == symbol.name.as_bytes()
+                            })
+                            && {
+                                let mut children = node.walk();
+                                let found = node.children(&mut children)
+                                    .any(|child| child.kind() == visibility);
+                                found
+                            }
+                    });
+                    visible
                 })
                 .map(|symbol| symbol.name.clone())
                 .collect()
         }
         _ => HashSet::new(),
     }
-}
-
-fn import_rows(
-    language: &str,
-    source: &str,
-    tree: &tree_sitter::Tree,
-    resolver: &ScopeResolver,
-    file_scope: &FileScope,
-) -> Vec<ImportRow> {
-    match language {
-        "python" => resolver
-            .collect_structured_imports(tree, source)
-            .into_iter()
-            .flat_map(|import| {
-                import.names.into_iter().map(move |name| ImportRow {
-                    imported_module: if import.is_plain {
-                        name.name.clone()
-                    } else {
-                        format!("{}{}", ".".repeat(import.level), import.module)
-                    },
-                    imported_name: (!import.is_plain).then_some(name.name),
-                    alias: name.alias,
-                    line: import.start_line + 1,
-                })
-            })
-            .collect(),
-        "typescript" | "javascript" => file_scope
-            .imports
-            .values()
-            .filter_map(|import| binding_import_row(import, 0, true))
-            .collect(),
-        "rust" => resolver
-            .collect_rust_imports(tree, source)
-            .into_iter()
-            .filter_map(|(import, line)| binding_import_row(&import, line, false))
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn binding_import_row(import: &ImportBinding, line: usize, typescript: bool) -> Option<ImportRow> {
-    let imported_module = if typescript {
-        import.module_path.trim_matches(['\'', '"']).to_string()
-    } else {
-        import.module_path.clone()
-    };
-    if imported_module.is_empty() && !import.is_star {
-        return None;
-    }
-    Some(ImportRow {
-        imported_module,
-        imported_name: import
-            .is_star
-            .then(|| "*".to_string())
-            .or_else(|| import.imported_name.clone()),
-        alias: (typescript || import.imported_name.is_some())
-            .then(|| import.local_name.clone())
-            .filter(|local| Some(local.as_str()) != import.imported_name.as_deref()),
-        line,
-    })
-}
-
-fn resolve_relative_name(name: &str, package: &str) -> Option<String> {
-    let level = name.chars().take_while(|ch| *ch == '.').count();
-    if level == 0 {
-        return Some(name.to_string());
-    }
-    let package_parts: Vec<&str> = package.split('.').filter(|part| !part.is_empty()).collect();
-    if package_parts.len() < level {
-        return None;
-    }
-    let base = package_parts[..=package_parts.len() - level].join(".");
-    let remainder = &name[level..];
-    if remainder.is_empty() {
-        Some(base)
-    } else {
-        Some(format!("{base}.{remainder}"))
-    }
-}
-
-fn resolve_reference_qn(qn: &str, relative_bindings: &[(String, String)]) -> String {
-    let mut resolved = qn.to_string();
-    if qn.starts_with('.') {
-        for (relative, absolute) in relative_bindings {
-            if qn == relative
-                || qn
-                    .strip_prefix(relative)
-                    .is_some_and(|suffix| suffix.starts_with('.'))
-            {
-                resolved = format!("{absolute}{}", &qn[relative.len()..]);
-                break;
-            }
-        }
-    }
-    normalize_qn(&resolved)
 }
 
 fn resolve_cfg_func_qn(cfg: &FunctionCfg, symbols: &[SymbolRow], module_name: &str) -> String {
@@ -533,12 +399,14 @@ fn resolve_cfg_func_qn(cfg: &FunctionCfg, symbols: &[SymbolRow], module_name: &s
         .unwrap_or_else(|| format!("{module_name}.{}", cfg.func_name))
 }
 
-fn containing_block(ranges: &[BlockRange], line: usize) -> (String, i64) {
+fn containing_block(ranges: &[BlockRange], byte_offset: usize) -> (String, i64) {
     let mut best: Option<&BlockRange> = None;
     for range in ranges.iter().rev().filter(|range| range.has_content) {
-        if range.start_line <= line && line <= range.end_line {
-            let span = range.end_line - range.start_line;
-            if best.is_none_or(|current| span < current.end_line - current.start_line) {
+        if range.start_byte <= byte_offset && byte_offset < range.end_byte {
+            let span = range.end_byte.saturating_sub(range.start_byte);
+            if best.is_none_or(|current| {
+                span < current.end_byte.saturating_sub(current.start_byte)
+            }) {
                 best = Some(range);
             }
         }
@@ -547,23 +415,6 @@ fn containing_block(ranges: &[BlockRange], line: usize) -> (String, i64) {
         || (String::new(), -1),
         |range| (range.func_qn.clone(), range.block_id as i64),
     )
-}
-
-fn enclosing_symbol(symbols: &[SymbolRow], line: usize) -> Option<String> {
-    let mut functions: Vec<&SymbolRow> = symbols
-        .iter()
-        .filter(|symbol| {
-            matches!(
-                symbol.kind.as_str(),
-                "function" | "async_function" | "method" | "async_method"
-            )
-        })
-        .collect();
-    functions.sort_by_key(|symbol| Reverse(symbol.line));
-    functions
-        .into_iter()
-        .find(|symbol| symbol.line <= line && line <= symbol.end_line)
-        .map(|symbol| symbol.qualified_name.clone())
 }
 
 fn add_cfg_rows(
@@ -589,6 +440,8 @@ fn add_cfg_rows(
                 block_id: block.id.0,
                 start_line: block.start_line as usize + 1,
                 end_line: block.end_line as usize + 1,
+                start_byte: block.start_byte,
+                end_byte: block.end_byte,
                 has_content: !(block.statements.is_empty()
                     && block.defs.is_empty()
                     && block.uses.is_empty()),
@@ -682,101 +535,50 @@ fn add_def_use_rows(
     }
 }
 
-fn add_reference_rows(
+fn add_local_reference_rows(
     batch: &mut FactBatch,
     references: &[Reference],
-    symbols: &[SymbolRow],
     rel_path: &str,
     module_name: &str,
     block_ranges: &[BlockRange],
-    relative_bindings: &[(String, String)],
 ) {
-    let definitions: HashSet<(String, usize)> = symbols
-        .iter()
-        .map(|symbol| (symbol.qualified_name.clone(), symbol.line))
-        .collect();
-    let mut blocks_by_line: HashMap<usize, (String, i64)> = HashMap::new();
     let mut module_defs: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     let mut module_uses: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
 
     for reference in references {
-        let target = resolve_reference_qn(&reference.qn.name, relative_bindings);
+        let target = normalize_qn(&reference.qn.name);
         let line = reference.line;
         let col = reference.column;
         let kind = reference.kind.as_str();
-        let block = blocks_by_line
-            .entry(line)
-            .or_insert_with(|| containing_block(block_ranges, line))
-            .clone();
-        let (func_qn, block_id) = block;
-        batch.relation("fg_refs").push(vec![
-            target.clone().into(),
+        let (func_qn, block_id) = containing_block(block_ranges, reference.byte_offset);
+        let target_kind = if reference.import_binding_id.is_some() {
+            "import"
+        } else if !reference.resolved {
+            "unresolved"
+        } else if target.starts_with("builtins.") {
+            "builtin"
+        } else {
+            "local"
+        };
+        let caller = if func_qn.is_empty() {
+            module_name.to_string()
+        } else {
+            func_qn.clone()
+        };
+        batch.relation("local_refs").push(vec![
             rel_path.into(),
+            reference.lexical_qn.clone().into(),
+            target.clone().into(),
+            target_kind.into(),
+            reference.import_binding_id.clone().unwrap_or_default().into(),
+            kind.into(),
             line.into(),
             col.into(),
-            kind.into(),
             func_qn.clone().into(),
             block_id.into(),
+            caller.into(),
+            reference.byte_offset.into(),
         ]);
-        if !func_qn.is_empty() && block_id >= 0 && !definitions.contains(&(target.clone(), line)) {
-            batch.relation("ref_by_block").push(vec![
-                rel_path.into(),
-                func_qn.clone().into(),
-                block_id.into(),
-                target.clone().into(),
-            ]);
-            let member = target.rsplit('.').next().unwrap_or(&target);
-            if kind != "call"
-                && target.contains('.')
-                && member.starts_with('_')
-                && !member.starts_with("__")
-            {
-                batch.relation("noncall_private_member_refs").push(vec![
-                    rel_path.into(),
-                    func_qn.clone().into(),
-                    block_id.into(),
-                    member.into(),
-                ]);
-            }
-        } else {
-            batch.relation("module_level_refs").push(vec![
-                target.clone().into(),
-                rel_path.into(),
-                line.into(),
-            ]);
-        }
-
-        if kind == "call" {
-            let caller = enclosing_symbol(symbols, line).unwrap_or_else(|| module_name.to_string());
-            let row = vec![
-                caller.clone().into(),
-                target.clone().into(),
-                rel_path.into(),
-                line.into(),
-                col.into(),
-                func_qn.clone().into(),
-                block_id.into(),
-            ];
-            batch.relation("calls").push(row);
-            batch.relation("calls_by_callee").push(vec![
-                target.clone().into(),
-                caller.clone().into(),
-                rel_path.into(),
-                line.into(),
-                col.into(),
-                func_qn.clone().into(),
-                block_id.into(),
-            ]);
-            batch.relation("calls_by_file").push(vec![
-                rel_path.into(),
-                caller.into(),
-                target.clone().into(),
-                line.into(),
-                col.into(),
-                func_qn.clone().into(),
-                block_id.into(),
-            ]);
-        }
 
         if func_qn.is_empty() && block_id == -1 {
             let name = target.rsplit('.').next().unwrap_or(&target).to_string();
@@ -814,44 +616,19 @@ fn add_reference_rows(
     }
 }
 
-fn add_method_call_rows(
-    batch: &mut FactBatch,
-    references: &[Reference],
-    rel_path: &str,
-    block_ranges: &[BlockRange],
-) {
-    for reference in references {
-        if reference.kind.as_str() != "call" {
-            continue;
-        }
-        let target = normalize_qn(&reference.lexical_qn);
-        let Some((receiver, method)) = target.rsplit_once('.') else {
-            continue;
-        };
-        let (mut func_qn, mut block_id) = containing_block(block_ranges, reference.line);
-        if func_qn.is_empty() && block_id == -1 {
-            func_qn = MODULE_LEVEL_FUNC.to_string();
-            block_id = MODULE_LEVEL_BLOCK;
-        }
-        batch.relation("method_calls").push(vec![
-            rel_path.into(),
-            func_qn.into(),
-            receiver.rsplit('.').next().unwrap_or(receiver).into(),
-            method.into(),
-            block_id.into(),
-            reference.line.saturating_sub(1).into(),
-        ]);
-    }
-}
-
-fn load_config(ext: &str, project_root: &str, language: &str) -> Result<LanguageConfig, String> {
-    let config = LanguageConfig::load_for_extension(ext, Path::new(project_root))?;
+fn load_config(ext: &str, language: &str, config_toml: &str) -> Result<LanguageConfig, String> {
+    let config = LanguageConfig::from_toml(config_toml)?;
     if config.language.name != language
         && !(config.language.name == "typescript" && language == "javascript")
     {
         return Err(format!(
             "language {language:?} does not match extension {ext:?} ({:?})",
             config.language.name
+        ));
+    }
+    if !config.language.file_extensions.iter().any(|item| item == ext) {
+        return Err(format!(
+            "extension {ext:?} is not registered by language {language:?}"
         ));
     }
     Ok(config)
@@ -862,14 +639,14 @@ fn extract_batch(
     ext: &str,
     abs_path: &str,
     rel_path: &str,
-    project_root: &str,
     module_name: &str,
     language: &str,
+    config_toml: &str,
 ) -> Result<FactBatch, String> {
-    let config = load_config(ext, project_root, language)?;
-    let tree = crate::pattern::parse_by_extension(source, ext)
+    let config = load_config(ext, language, config_toml)?;
+    let tree = crate::pattern::parse_for_config(source, ext, &config)?
         .ok_or_else(|| format!("failed to parse {abs_path}"))?;
-    let resolver = ScopeResolver::new(config.clone(), PathBuf::from(project_root));
+    let resolver = ScopeResolver::new(config.clone(), PathBuf::new());
     let file_scope = resolver.build_file_scope_for_module(
         Path::new(abs_path),
         source,
@@ -877,8 +654,7 @@ fn extract_batch(
         module_name.to_string(),
     );
     let raw_symbols = symbols::collect_symbols_from_tree(source, &tree, usize::MAX, &None, &config);
-    let cfgs = cfg::build_cfgs_from_tree(source, &tree, &config);
-    let flow = cfg::build_flow_facts_from_tree(source, &tree, &config);
+    let (cfgs, flow) = cfg::build_analysis_from_tree(source, &tree, &config);
 
     let mut batch = FactBatch::new();
     for event in flow.events {
@@ -921,57 +697,63 @@ fn extract_batch(
         }
     }
 
-    let imports = import_rows(language, source, &tree, &resolver, &file_scope);
-    for import in &imports {
+    for scoped in &file_scope.scoped_imports {
+        let import = &scoped.binding;
+        let imported_module = import.module_path.trim_matches(['\'', '"']);
+        let local_name = import.local_name.as_str();
+        let imported_name = if matches!(language, "typescript" | "javascript")
+            && (import.is_star || import.imported_name.as_deref() == Some("default"))
+        {
+            local_name
+        } else if import.is_star {
+            "*"
+        } else {
+            import.imported_name.as_deref().unwrap_or("")
+        };
+        let unaliased_local = import.imported_name.as_deref().unwrap_or_else(|| {
+            imported_module.split(['.', ':']).next().unwrap_or(imported_module)
+        });
+        let alias = (!import.is_star && local_name != unaliased_local)
+            .then_some(local_name)
+            .unwrap_or("");
+        let public_line = if matches!(language, "typescript" | "javascript") {
+            0
+        } else {
+            scoped.line
+        };
         batch.relation("imports").push(vec![
             rel_path.into(),
-            import.imported_module.clone().into(),
-            import.imported_name.clone().unwrap_or_default().into(),
-            import.line.into(),
-            import.alias.clone().unwrap_or_default().into(),
+            imported_module.into(),
+            imported_name.into(),
+            public_line.into(),
+            alias.into(),
+        ]);
+        let scope = file_scope.scopes.iter().find(|scope| scope.id == scoped.scope_id);
+        batch.relation("local_imports").push(row![
+            rel_path,
+            scoped.binding_id.clone(),
+            import.local_name.clone(),
+            imported_module,
+            import.imported_name.as_deref().unwrap_or(""),
+            import.is_star,
+            scoped.scope_id.0,
+            scope.map_or(0, |scope| scope.start_byte),
+            scope.map_or(0, |scope| scope.end_byte),
+            scoped.byte_offset,
+            scoped.line,
+            language,
+            module_name,
         ]);
     }
-    let package = if Path::new(abs_path)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        == Some("__init__")
-    {
-        module_name
-    } else {
-        module_name
-            .rsplit_once('.')
-            .map_or("", |(package, _)| package)
-    };
-    let relative_bindings: Vec<(String, String)> = if ext == "py" {
-        imports
-            .iter()
-            .filter_map(|import| {
-                if !import.imported_module.starts_with('.') || import.imported_name.is_none() {
-                    return None;
-                }
-                let name = import.imported_name.as_deref().unwrap_or_default();
-                let absolute = resolve_relative_name(&import.imported_module, package)?;
-                Some((
-                    format!("{}.{}", import.imported_module, name),
-                    format!("{absolute}.{name}"),
-                ))
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
 
     let block_ranges = add_cfg_rows(&mut batch, &cfgs, &symbols, rel_path, module_name);
-    add_reference_rows(
+    add_local_reference_rows(
         &mut batch,
         &file_scope.references,
-        &symbols,
         rel_path,
         module_name,
         &block_ranges,
-        &relative_bindings,
     );
-    add_method_call_rows(&mut batch, &file_scope.references, rel_path, &block_ranges);
     add_def_use_rows(&mut batch, &cfgs, &symbols, rel_path, module_name);
     batch.qnames = symbols
         .iter()
@@ -984,16 +766,16 @@ fn extract_batch(
 
 /// Parse and extract one exact source revision into canonical relation rows.
 #[pyfunction]
-#[pyo3(signature = (source, ext, abs_path, rel_path, project_root, module_name, language))]
+#[pyo3(signature = (source, ext, abs_path, rel_path, module_name, language, config_toml))]
 pub fn extract_file_fact_rows(
     py: Python<'_>,
     source: &str,
     ext: &str,
     abs_path: &str,
     rel_path: &str,
-    project_root: &str,
     module_name: &str,
     language: &str,
+    config_toml: &str,
 ) -> PyResult<PyObject> {
     let batch = py
         .allow_threads(|| {
@@ -1002,9 +784,9 @@ pub fn extract_file_fact_rows(
                 ext,
                 abs_path,
                 rel_path,
-                project_root,
                 module_name,
                 language,
+                config_toml,
             )
         })
         .map_err(|message| {
@@ -1020,17 +802,17 @@ pub fn extract_file_fact_rows(
 /// Extract explicit module export names with the same parser and project
 /// configuration used by whole-file fact extraction.
 #[pyfunction]
-#[pyo3(signature = (source, ext, project_root, language))]
+#[pyo3(signature = (source, ext, language, config_toml))]
 pub fn extract_exported_names(
     py: Python<'_>,
     source: &str,
     ext: &str,
-    project_root: &str,
     language: &str,
+    config_toml: &str,
 ) -> PyResult<Vec<String>> {
     py.allow_threads(|| -> Result<Vec<String>, String> {
-        let config = load_config(ext, project_root, language)?;
-        let tree = crate::pattern::parse_by_extension(source, ext)
+        let config = load_config(ext, language, config_toml)?;
+        let tree = crate::pattern::parse_for_config(source, ext, &config)?
             .ok_or_else(|| format!("failed to parse source with extension {ext:?}"))?;
         let symbols = symbols::collect_symbols_from_tree(source, &tree, usize::MAX, &None, &config);
         Ok(exported_names(source, &tree, language, &config, &symbols)
@@ -1053,19 +835,19 @@ mod tests {
             "py",
             "/tmp/pkg/mod.py",
             "pkg/mod.py",
-            "/tmp",
             "pkg.mod",
             "python",
+            include_str!("../../languages/python/config.toml"),
         )
         .unwrap();
-        assert_eq!(batch.rows.len(), 20);
+        assert_eq!(batch.rows.len(), 22);
         assert!(batch.qnames.iter().any(|name| name == "pkg.mod.main"));
         assert!(batch.rows["exported_qns"]
             .iter()
             .any(|row| { matches!(&row[1], Cell::String(name) if name == "pkg.mod.main") }));
-        assert!(batch.rows["fg_refs"]
+        assert!(batch.rows["local_refs"]
             .iter()
-            .any(|row| { matches!(&row[0], Cell::String(name) if name == "pkg.helpers.run") }));
+            .any(|row| { matches!(&row[1], Cell::String(name) if name == "run") }));
         assert!(!batch.rows["reachable_blocks"].is_empty());
     }
 }

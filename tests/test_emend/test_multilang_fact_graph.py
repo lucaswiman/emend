@@ -4,8 +4,6 @@ Tests that detect_project_languages(), _collect_all_source_files(), and
 FactGraph.build_from_project() work correctly for TypeScript, Rust, and
 mixed-language projects.
 """
-import hashlib
-import json
 import textwrap
 
 import pytest
@@ -337,69 +335,105 @@ class TestExtractFileFactsTypescript:
         assert "fs" in modules or "path" in modules, f"Expected TS imports, got: {modules}"
 
 
-@pytest.mark.parametrize(
-    ("ext", "language", "module_name", "source", "expected_hash"),
-    [
-        (
-            "py",
-            "python",
-            "pkg.mod",
-            "from .dep import helper as h\n"
-            "__all__ = ['run']\n"
-            "class C:\n"
-            "    @staticmethod\n"
-            "    def m(x):\n"
-            "        return h(x)\n"
-            "def run(y):\n"
-            "    return C.m(y)\n",
-            "14f9177ed1c603e8429ee5047071172afda1b36541554cd610aefc63d0a39639",
-        ),
-        (
-            "ts",
-            "typescript",
-            "pkg/mod",
-            'import { helper as h } from "./dep";\n'
-            "export function run(y: number) { return h(y); }\n"
-            "class C { m(x: number) { return this.n(x); } "
-            "n(x: number) { return x; } }\n",
-            "d44df03847396b99d08998b1eb166ca8512a1cb25b26fa1ee6a7b01d1fdd86ad",
-        ),
-        (
-            "rs",
-            "rust",
-            "pkg::mod",
-            "use crate::dep::helper as h;\n"
-            "pub fn run(y: i32) -> i32 { h(y) }\n"
-            "struct C;\n"
-            "impl C { fn m(&self, x: i32) -> i32 { self.n(x) } "
-            "fn n(&self, x: i32) -> i32 { x } }\n",
-            "3fb21d1f2a9736956650fda094a7de93b4be54900f80f631996b41ba3d1ae4b6",
-        ),
-    ],
-)
-def test_native_fact_batch_matches_legacy_rows(
-    tmp_path, ext, language, module_name, source, expected_hash,
-):
-    """The native batch preserves every normalized legacy relation row."""
+def test_local_batch_is_linked_against_one_project_snapshot(tmp_path):
+    """Local rows retain provenance; only the linker emits final references."""
     from emend.analysis_extraction import _extract_file_facts
+    from emend.analysis_snapshot import FileRevision
+    from emend.analysis_linking import ModuleCatalog, link_extracted_files
+    from emend.language_registry import language_config_snapshot
 
-    path = tmp_path / "pkg" / f"mod.{ext}"
+    source = (
+        'import { helper as h } from "./dep";\n'
+        "export function run() { h(); missing(); }\n"
+    )
+    path = tmp_path / "pkg" / "mod.ts"
     path.parent.mkdir()
     path.write_text(source)
-    extracted = _extract_file_facts(
-        str(path),
-        str(path.relative_to(tmp_path)),
-        ext,
-        source,
-        str(tmp_path),
-        module_name,
-        language,
+    revision = FileRevision.create(
+        tmp_path, path, "test", "typescript", "pkg/mod",
+        analysis_config=language_config_snapshot("typescript", tmp_path),
     )
-    normalized = {
-        key: sorted(rows, key=repr)
-        for key, rows in sorted(extracted.rows.items())
+    extracted = _extract_file_facts(revision, str(path.relative_to(tmp_path)), source)
+    assert extracted.rows["fg_refs"] == []
+    assert extracted.rows["calls"] == []
+    assert {row[1] for row in extracted.rows["local_refs"] if row[5] == "call"} == {
+        "h", "missing",
     }
-    digest = hashlib.sha256(
-        json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    assert digest == expected_hash
+
+    linked = link_extracted_files(
+        [extracted], ModuleCatalog({"pkg.dep", "pkg.mod"})
+    )[0]
+    call_targets = {row[1] for row in linked.rows["calls"]}
+    assert call_targets == {"pkg.dep.helper", "missing"}
+
+
+def test_native_config_payload_supports_registered_extension(tmp_path):
+    """Native extraction selects a compiled grammar from passed config data."""
+    from emend.analysis_extraction import _extract_file_facts
+    from emend.analysis_snapshot import FileRevision, LanguageConfigRevision
+    from emend.language_registry import language_config_snapshot
+
+    python = language_config_snapshot("python", tmp_path)
+    payload = python.payload.replace(
+        'name = "python"', 'name = "pythonish"', 1,
+    ).replace(
+        'file_extensions = ["py", "pyi"]', 'file_extensions = ["pyx"]', 1,
+    )
+    config = LanguageConfigRevision.create("pythonish", payload)
+    path = tmp_path / "module.pyx"
+    revision = FileRevision.create(
+        tmp_path, path, "test", "pythonish", "module", analysis_config=config,
+    )
+    extracted = _extract_file_facts(revision, "module.pyx", "def run():\n    pass\n")
+    assert extracted.qnames == frozenset({"module.run"})
+
+
+@pytest.mark.parametrize(("ext", "language", "source"), [
+    ("py", "python", "def run():\n    return missing()\n"),
+    ("rs", "rust", "fn run() { missing(); }\n"),
+])
+def test_unresolved_calls_survive_local_derivation(tmp_path, ext, language, source):
+    path = tmp_path / f"module.{ext}"
+    path.write_text(source)
+    graph = FactGraph.build_from_project(str(tmp_path), language=language)
+    assert "missing" in {call.callee_qn for call in graph._all_calls()}
+
+
+@pytest.mark.parametrize(("ext", "language", "source", "expected"), [
+    (
+        "py", "python",
+        "def a():\n    from one import work as x\n    x()\n"
+        "def b():\n    from two import work as x\n    x()\n",
+        {"one.work", "two.work"},
+    ),
+    (
+        "rs", "rust",
+        "use one::work as x;\nfn f() { x(); { use two::work as x; x(); } x(); }\n",
+        {"one.work", "two.work"},
+    ),
+])
+def test_native_binding_ids_preserve_lexical_import_scope(
+    tmp_path, ext, language, source, expected,
+):
+    path = tmp_path / f"mod.{ext}"
+    path.write_text(source)
+    graph = FactGraph.build_from_project(str(tmp_path), language=language)
+    assert {call.callee_qn for call in graph._all_calls()} == expected
+
+
+def test_typescript_namespace_alias_and_same_line_callers(tmp_path):
+    source = (
+        'import * as ns from "./dep"; '
+        "function a(){ ns.foo(); } function b(){ ns.bar(); } ns.baz();"
+    )
+    path = tmp_path / "mod.ts"
+    path.write_text(source)
+    graph = FactGraph.build_from_project(str(tmp_path), language="typescript")
+    assert {
+        (call.caller_qn, call.callee_qn, call.func_qn)
+        for call in graph._all_calls()
+    } == {
+        ("mod.a", "dep.foo", "mod.a"),
+        ("mod.b", "dep.bar", "mod.b"),
+        ("mod", "dep.baz", ""),
+    }
