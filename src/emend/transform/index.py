@@ -119,7 +119,7 @@ def _check_cache_hits(
 
 
 def _write_index_rows(
-    db_path: str,
+    conn: sqlite3.Connection,
     qn_rows: list[tuple[str, bytes, bytes]],
     sym_rows: list[tuple],
     import_rows: list[tuple[bytes, str, str]],
@@ -133,16 +133,11 @@ def _write_index_rows(
     (and logged) — environmental failures must not crash the worker process.
     """
     import sqlite3
-    from .cache import _init_cache_schema
 
     has_data = qn_rows or sym_rows or import_rows or ref_rows or dsl_rows
     if not has_data:
         return
     try:
-        conn = sqlite3.connect(db_path, timeout=30)
-        # Ensure schema exists (idempotent; normally pre-created by
-        # warm_caches, but needed when _index_batch is called directly).
-        _init_cache_schema(conn)
         if qn_rows:
             revised_paths = list({row[0] for row in qn_rows})
             for table, column in (
@@ -192,17 +187,30 @@ def _write_index_rows(
                 dsl_rows,
             )
         conn.commit()
-        conn.close()
     except sqlite3.Error:
+        conn.rollback()
         logger.debug("bulk index write failed", exc_info=True)
 
 
 def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int, int]:
+    """Own one connection per worker batch, with one transaction per file."""
+    import sqlite3
+    from .cache import _init_cache_schema
+
+    if not args[3]:
+        return (0, 0, 0, 0, 0, 0, 0)
+    with closing(sqlite3.connect(args[0], timeout=30)) as conn:
+        _init_cache_schema(conn)
+        return _index_batch_rows(args, conn)
+
+
+def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, int, int, int, int]:
     """Worker function for process-pool indexing.
 
     Runs in a subprocess.  Parses a batch of files, resolves qualified names,
     collects symbol definitions, import relationships, reference entries,
-    and DSL symbols, then writes directly to the SQLite disk cache.
+    and DSL symbols. Each completed file is written atomically to SQLite
+    before deriving the next, overlapping writes with other workers' analysis.
 
     Files whose content hash is already present in all cache tables are
     skipped (cache-hit fast path).
@@ -224,15 +232,6 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
     from .deadcode import _is_likely_entry_point
     db_path, source_root, project_root, file_batch = args
-    qn_rows: list[tuple[str, bytes, bytes]] = []
-    sym_rows: list[tuple] = []
-    import_rows: list[tuple[bytes, str, str]] = []
-    ref_rows: list[tuple] = []
-    dsl_rows: list[tuple] = []
-
-    if not file_batch:
-        return (0, 0, 0, 0, 0, 0, 0)
-
     # Scope resolver for QN and reference collection (replaces MetadataWrapper).
     scope_resolver = _rust.PyScopeResolver(project_root)
 
@@ -247,6 +246,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
     skipped = 0
     processed = 0
+    row_counts = [0] * 5
     for content_hash, py_file, content in file_hashes:
         need_qn = (str(Path(py_file).resolve()), content_hash) not in cached_qn
         # The QN cache is the core index. The derived tables (symbol_index,
@@ -260,6 +260,11 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         need_sym = need_import = need_ref = True
 
         processed += 1
+        qn_rows: list[tuple[str, bytes, bytes]] = []
+        sym_rows: list[tuple] = []
+        import_rows: list[tuple[bytes, str, str]] = []
+        ref_rows: list[tuple] = []
+        dsl_rows: list[tuple] = []
 
         # Use Rust scope resolver for QN and reference collection
         # (replaces expensive MetadataWrapper + _QNCollector + _RefIndexCollector).
@@ -392,14 +397,15 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         except Exception:
             logger.debug("DSL extraction failed for %s", py_file, exc_info=True)
 
-    # Bulk-write to SQLite from this worker process.
-    # WAL mode allows concurrent readers/writers across processes.
-    _write_index_rows(db_path, qn_rows, sym_rows, import_rows, ref_rows, dsl_rows)
+        # Keep a file's freshness marker and derived rows in one transaction.
+        # Do not retain a worker's entire batch before starting disk writes.
+        rows = (qn_rows, sym_rows, import_rows, ref_rows, dsl_rows)
+        _write_index_rows(conn, *rows)
+        row_counts = [count + len(batch) for count, batch in zip(row_counts, rows)]
 
     # Cozo facts are materialized separately by AnalysisStore.query_facts().
 
-    return (processed, len(qn_rows), skipped,
-            len(sym_rows), len(import_rows), len(ref_rows), len(dsl_rows))
+    return (processed, row_counts[0], skipped, *row_counts[1:])
 
 
 # ---------------------------------------------------------------------------

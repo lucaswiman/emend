@@ -34,6 +34,39 @@ def test_index_leaves_duplicates_for_on_demand_analysis(tmp_path, monkeypatch):
         assert conn.execute("SELECT count(*) FROM dup_cache").fetchone() == (0,)
 
 
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_index_writes_completed_file_before_deriving_next(tmp_path, monkeypatch, fail_first):
+    from emend import analysis_store
+    from emend.transform import _index_batch
+    from emend.transform import index
+
+    db_path = tmp_path / "parse.db"
+    files = [(str(tmp_path / name), SOURCE) for name in ("a.py", "b.py")]
+    connections = []
+    write = index._write_index_rows
+    def checked_write(conn, *rows):
+        connections.append(conn)
+        if fail_first and len(connections) == 1:
+            rows = (rows[0], [()], *rows[2:])  # Fail after writing the QN marker.
+        return write(conn, *rows)
+    monkeypatch.setattr(index, "_write_index_rows", checked_write)
+    collect = analysis_store.collect_symbol_info
+    def checked_collect(path, source):
+        if path.name == "b.py":
+            with sqlite3.connect(db_path) as conn:
+                assert conn.execute("SELECT file_path FROM qn_index").fetchall() == ([] if fail_first else [(files[0][0],)])
+                assert conn.execute("SELECT name FROM symbol_index").fetchall() == ([] if fail_first else [("hello",)])
+        return collect(path, source)
+    monkeypatch.setattr(analysis_store, "collect_symbol_info", checked_collect)
+    counts = _index_batch((str(db_path), str(tmp_path), str(tmp_path), files))
+    assert counts[:4] == (2, 2, 0, 2)
+    assert len(connections) == 2 and connections[0] is connections[1]
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT file_path FROM qn_index ORDER BY file_path").fetchall() == [
+            (path,) for path, _ in (files[1:] if fail_first else files)
+        ]
+
+
 def make_project_dir(tmp_path: Path) -> Path:
     project = tmp_path / "proj"
     project.mkdir()
