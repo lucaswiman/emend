@@ -205,9 +205,9 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
 
 def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, int, int, int, int]:
-    """Worker function for process-pool indexing.
+    """Worker function for per-file indexing.
 
-    Runs in a subprocess.  Parses a batch of files, resolves qualified names,
+    Parses a batch of files, resolves qualified names,
     collects symbol definitions, import relationships, reference entries,
     and DSL symbols. Each completed file is written atomically to SQLite
     before deriving the next, overlapping writes with other workers' analysis.
@@ -1091,16 +1091,11 @@ def _warm_caches_impl(
     """Pre-populate the parse, QN-index, and type caches for all project files.
 
     Designed to be called from the ``emend index`` CLI command or lazily by
-    an analysis operation. Each file is parsed, then QualifiedNameProvider is
-    resolved to build the QN index, and finally type inference results are
-    stored in the shared analysis-artifact ``type_cache`` table.
-
-    Uses a ``ProcessPoolExecutor`` so that file parsing (CPU-bound)
-    runs across multiple cores without GIL contention.  Files are split
-    into batches; each worker process parses its batch and writes results
-    directly to the SQLite disk cache (WAL mode allows concurrent writers),
-    avoiding the overhead of serialising parse results back to the main
-    process.
+    an analysis operation. Workers populate each file's search index and
+    native facts together. The owner caches native results once and streams
+    those same objects into a private graph while preparing type inputs.
+    Native parsing releases Python; threads avoid serializing fact batches
+    across process boundaries. The graph is published only after success.
 
     Args:
         project_path: Root directory of the project.
@@ -1124,7 +1119,7 @@ def _warm_caches_impl(
     """
     import multiprocessing
     import time
-    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor
     from emend import emend_core as _rust
     from .cache import (
         _SCHEMA_VERSION,
@@ -1159,8 +1154,7 @@ def _warm_caches_impl(
         if callback:
             callback("phase", label)
 
-    # Phase 2: parse + QN index in subprocesses.
-    # Resolve the DB path and ensure the directory exists before spawning workers.
+    # Initialize the search cache before starting file workers.
     cache_dir = _cache_db_dir(project_root)
     cache_dir.mkdir(parents=True, exist_ok=True)
     _ensure_cache_ignore_files(project_root)
@@ -1177,150 +1171,112 @@ def _warm_caches_impl(
     # Resolve source root once so _index_batch workers can compute module_qn.
     source_root = _find_source_root(project_root, language=language)
 
-    # Split files into batches — one batch per worker.
-    batch_size = max(1, len(file_contents) // max_workers)
-    batches: list[tuple[str, str, str, list[tuple[str, str]]]] = []
-    for i in range(0, len(file_contents), batch_size):
-        chunk = file_contents[i : i + batch_size]
-        batches.append((db_path, source_root, project_root, chunk))
+    indexed_paths = {str(Path(path).resolve()) for path, _ in file_contents}
 
-    def _fold_batch_results(results) -> None:
-        """Fold worker results into ``stats`` and report progress."""
-        for batch_idx, (parse_n, qn_n, skip_n, sym_n, import_n, ref_n, dsl_n) in enumerate(results):
-            stats["indexed"] += parse_n
-            stats["qn_cached"] += qn_n
-            stats["skipped"] += skip_n
-            stats["sym_cached"] += sym_n
-            stats["import_cached"] += import_n
-            stats["ref_cached"] += ref_n
-            stats["dsl_cached"] += dsl_n
-            if callback:
-                _db_path, _src, _proj, chunk = batches[batch_idx]
-                for py_file, _content in chunk:
-                    callback("index", py_file)
+    def prepare_file(revision, content):
+        if revision.file_path in indexed_paths:
+            return _index_batch((db_path, source_root, project_root,
+                                 [(revision.file_path, content)]))
+        return None
 
-    t0 = time.monotonic()
-    process_pool = None
-    try:
-        process_pool = ProcessPoolExecutor(max_workers=max_workers)
-        batch_results = process_pool.map(_index_batch, batches)
-    except PermissionError as exc:
-        # Some sandboxes and embedded runtimes disallow the Unix socket used
-        # by multiprocessing's forkserver during task submission. Indexing is
-        # still safe with threads because each worker opens its own SQLite
-        # connection.
-        if process_pool is not None:
-            process_pool.shutdown(cancel_futures=True)
-        logger.debug("warm_caches: process pool unavailable; retrying with threads: %s", exc)
-        with ThreadPoolExecutor(max_workers=max_workers) as thread_pool:
-            _fold_batch_results(thread_pool.map(_index_batch, batches))
-    except BaseException:
-        if process_pool is not None:
-            process_pool.shutdown(cancel_futures=True)
-        raise
-    else:
+    def prepared_file(revision, result):
+        if result is None:
+            return
+        for key, count in zip(
+            ("indexed", "qn_cached", "skipped", "sym_cached",
+             "import_cached", "ref_cached", "dsl_cached"), result,
+        ):
+            stats[key] += count
+        if callback:
+            callback("index", revision.file_path)
+
+    def finish_search_index():
+        # Phase 2.5: Update file_manifest and index_meta with freshness data.
+        worktree_id = _get_worktree_id(project_root)
+        import os as _os
         try:
-            # Worker, result-consumption, and callback errors propagate rather
-            # than being mistaken for process-pool startup failures.
-            _fold_batch_results(batch_results)
-        finally:
-            process_pool.shutdown()
-
-    logger.info(
-        "warm_caches: indexed %d files in %.3fs (parse=%d, qn=%d, sym=%d, import=%d, ref=%d, dsl=%d)",
-        stats["files"], time.monotonic() - t0,
-        stats["indexed"], stats["qn_cached"],
-        stats["sym_cached"], stats["import_cached"], stats["ref_cached"],
-        stats["dsl_cached"],
-    )
-
-    # Phase 2.5: Update file_manifest and index_meta with freshness data.
-    worktree_id = _get_worktree_id(project_root)
-    import os as _os
-    try:
-        _mf_conn = _sqlite3.connect(db_path, timeout=30)
-        _mf_conn.execute("PRAGMA journal_mode=WAL")
-        _mf_conn.execute("PRAGMA synchronous=NORMAL")
-        now = time.time()
-        manifest_rows = []
-        for py_file, content in file_contents:
-            content_hash = hashlib.sha256(content.encode()).digest()
-            try:
-                st = _os.stat(py_file)
-                manifest_rows.append((
-                    worktree_id,
-                    str(Path(py_file).resolve()),
-                    st.st_mtime_ns,
-                    st.st_size,
-                    content_hash,
-                    now,
-                ))
-            except OSError:
-                pass
-        if manifest_rows:
-            _mf_conn.executemany(
-                "INSERT OR REPLACE INTO file_manifest "
-                "(worktree_id, path, mtime_ns, size, content_hash, indexed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                manifest_rows,
-            )
-        # Update git HEAD (scoped to this worktree)
-        git_head_key = f"git_head:{worktree_id}"
-        import subprocess as _sp
-        try:
-            result = _sp.run(
-                ["git", "rev-parse", "HEAD"],
-                capture_output=True, timeout=5,
-                cwd=project_root,
-            )
-            if result.returncode == 0:
-                head_sha = result.stdout.decode().strip()
-                _mf_conn.execute(
-                    "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
-                    (git_head_key, head_sha),
+            _mf_conn = _sqlite3.connect(db_path, timeout=30)
+            _mf_conn.execute("PRAGMA journal_mode=WAL")
+            _mf_conn.execute("PRAGMA synchronous=NORMAL")
+            now = time.time()
+            manifest_rows = []
+            for py_file, content in file_contents:
+                content_hash = hashlib.sha256(content.encode()).digest()
+                try:
+                    st = _os.stat(py_file)
+                    manifest_rows.append((
+                        worktree_id,
+                        str(Path(py_file).resolve()),
+                        st.st_mtime_ns,
+                        st.st_size,
+                        content_hash,
+                        now,
+                    ))
+                except OSError:
+                    pass
+            if manifest_rows:
+                _mf_conn.executemany(
+                    "INSERT OR REPLACE INTO file_manifest "
+                    "(worktree_id, path, mtime_ns, size, content_hash, indexed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    manifest_rows,
                 )
-        except (OSError, _sp.SubprocessError, _sqlite3.Error):
-            logger.debug("git HEAD update failed", exc_info=True)
-        _mf_conn.execute(
-            "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
-            (f"indexed_at:{worktree_id}", str(now)),
-        )
-        _mf_conn.execute(
-            "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
-            ("schema_version", _SCHEMA_VERSION),
-        )
-        _mf_conn.commit()
-        _mf_conn.close()
-    except BUG_EXCEPTIONS:
-        raise
-    except Exception:
-        logger.debug("warm_caches: file_manifest update failed", exc_info=True)
-
-    # Rebuild FTS5 before starting the independent type/fact analyses.
-    if build_fts:
-        announce_phase("Full-text search index")
-        try:
-            from emend.editor_search import rebuild_fts as _rebuild_fts
-
-            t_fts = time.monotonic()
-            with closing(_sqlite3.connect(db_path, timeout=30)) as _fts_conn:
-                _fts_conn.execute("PRAGMA journal_mode=WAL")
-                _fts_conn.execute("PRAGMA synchronous=NORMAL")
-                fts_count = _rebuild_fts(_fts_conn)
-            stats["fts_indexed"] = fts_count
-            logger.info(
-                "warm_caches: FTS index rebuilt (%d rows) in %.3fs",
-                fts_count, time.monotonic() - t_fts,
+            # Update git HEAD (scoped to this worktree)
+            git_head_key = f"git_head:{worktree_id}"
+            import subprocess as _sp
+            try:
+                result = _sp.run(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True, timeout=5,
+                    cwd=project_root,
+                )
+                if result.returncode == 0:
+                    head_sha = result.stdout.decode().strip()
+                    _mf_conn.execute(
+                        "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+                        (git_head_key, head_sha),
+                    )
+            except (OSError, _sp.SubprocessError, _sqlite3.Error):
+                logger.debug("git HEAD update failed", exc_info=True)
+            _mf_conn.execute(
+                "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+                (f"indexed_at:{worktree_id}", str(now)),
             )
+            _mf_conn.execute(
+                "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+                ("schema_version", _SCHEMA_VERSION),
+            )
+            _mf_conn.commit()
+            _mf_conn.close()
         except BUG_EXCEPTIONS:
             raise
-        except Exception as exc:
-            logger.debug("warm_caches: FTS rebuild skipped: %s", exc, exc_info=True)
-            stats["fts_indexed"] = 0
+        except Exception:
+            logger.debug("warm_caches: file_manifest update failed", exc_info=True)
 
-    # Types need local import dependencies, but not a materialized fact graph.
-    # Derive those inputs once; facts reuse the same content-addressed artifacts.
-    # Progress callbacks and fact publication stay on the calling thread.
+        # Rebuild FTS5 after all search-index rows have been written.
+        if build_fts:
+            announce_phase("Full-text search index")
+            try:
+                from emend.editor_search import rebuild_fts as _rebuild_fts
+
+                t_fts = time.monotonic()
+                with closing(_sqlite3.connect(db_path, timeout=30)) as _fts_conn:
+                    _fts_conn.execute("PRAGMA journal_mode=WAL")
+                    _fts_conn.execute("PRAGMA synchronous=NORMAL")
+                    fts_count = _rebuild_fts(_fts_conn)
+                stats["fts_indexed"] = fts_count
+                logger.info(
+                    "warm_caches: FTS index rebuilt (%d rows) in %.3fs",
+                    fts_count, time.monotonic() - t_fts,
+                )
+            except BUG_EXCEPTIONS:
+                raise
+            except Exception as exc:
+                logger.debug("warm_caches: FTS rebuild skipped: %s", exc, exc_info=True)
+                stats["fts_indexed"] = 0
+
+    # Stream native extraction into type inputs and the unpublished fact graph.
+    # Progress callbacks stay on the calling thread.
     # The executor joins even on failure, so no cache writer outlives this call.
     from emend.analysis_store import AnalysisStore
     store = AnalysisStore.open(project_root)
@@ -1338,19 +1294,23 @@ def _warm_caches_impl(
             )
         paths = [Path(f) for f, _ in file_contents]
         announce_phase("Analysis inputs")
-        inputs = store.type_file_inputs(paths, include_overlays=oracle.supports_source_overrides)
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    t_facts = time.monotonic()
+    with store.prepare_index_facts(
+        paths if types_enabled else None,
+        include_overlays=bool(types_enabled and oracle.supports_source_overrides),
+        prepare=prepare_file, prepared=prepared_file, jobs=max_workers,
+    ) as inputs, ThreadPoolExecutor(max_workers=1) as pool:
         if types_enabled:
             announce_phase(f"Type analysis ({engine_name}) + facts database")
             types = pool.submit(_warm_type_cache, oracle, project_root, paths, inputs)
         else:
             announce_phase("Facts database")
-        t_facts = time.monotonic()
         stats["snapshot_id"] = store.query_facts().snapshot.snapshot_id
         logger.info(
-            "warm_caches: facts database refreshed in %.3fs",
+            "warm_caches: source indexes and facts database populated in %.3fs",
             time.monotonic() - t_facts,
         )
+        finish_search_index()
         if types_enabled:
             stats.update(types.result())
             if callback:

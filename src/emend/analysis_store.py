@@ -469,6 +469,14 @@ class AnalysisStore:
         revisions: Iterable[FileRevision],
         contents: dict[str, str],
     ) -> list[ExtractedFile]:
+        return list(self._iter_extracted_revisions(revisions, contents))
+
+    def _iter_extracted_revisions(
+        self,
+        revisions: Iterable[FileRevision],
+        contents: dict[str, str],
+        *, prepare=None, prepared=None, jobs=None,
+    ) -> Iterable[ExtractedFile]:
         """Load content-addressed revision artifacts or extract them once."""
         from emend.analysis_extraction import _extract_file_facts
         from emend.fact_graph import FACT_GRAPH_SCHEMA_VERSION
@@ -485,10 +493,9 @@ class AnalysisStore:
             "content_hash TEXT PRIMARY KEY, payload BLOB NOT NULL)"
         )
         revisions = list(revisions)
-        result: list[ExtractedFile | None] = [None] * len(revisions)
-        pending: list[tuple[int, FileRevision, str, str, str]] = []
+        pending = []
         try:
-            for index, revision in enumerate(revisions):
+            for revision in revisions:
                 if revision.analysis_config is None:
                     raise RuntimeError(
                         f"snapshot lacks language config for {revision.file_path}"
@@ -527,45 +534,52 @@ class AnalysisStore:
                         "(content_hash, payload) VALUES (?, ?)",
                         (revision.content_hash, zlib.compress(content.encode())),
                     )
-                if row is not None:
-                    cached = pickle.loads(zlib.decompress(row[0]))
-                    result[index] = ExtractedFile(
-                        revision=revision,
-                        qnames=cached.qnames,
-                        rows=cached.rows,
-                    )
-                    continue
-                if content is None:
+                if content is None and (row is None or prepare is not None):
                     assert source_row is not None
                     content = zlib.decompress(source_row[0]).decode()
 
-                pending.append((index, revision, stored_path, key, content))
+                pending.append((revision, stored_path, key, content, row[0] if row else None))
 
             # Publish source blobs before parsing; type inference and other
             # worktrees must be able to write their independent artifacts.
             conn.commit()
 
             def extract(item):
-                index, revision, stored_path, key, content = item
-                return index, key, _extract_file_facts(revision, stored_path, content)
+                revision, stored_path, key, content, payload = item
+                preparation = prepare(revision, content) if prepare is not None else None
+                if payload is None:
+                    extracted = _extract_file_facts(revision, stored_path, content)
+                else:
+                    cached = pickle.loads(zlib.decompress(payload))
+                    extracted = ExtractedFile(revision, cached.qnames, cached.rows)
+                return key, extracted, payload is None, preparation
 
-            if pending:
-                from concurrent.futures import ThreadPoolExecutor
+            from concurrent.futures import ThreadPoolExecutor
+            from collections import deque
 
-                with ThreadPoolExecutor() as pool:
-                    extracted_files = list(pool.map(extract, pending))
-                for index, key, extracted in extracted_files:
-                    result[index] = extracted
-                    conn.execute(
-                        "INSERT OR REPLACE INTO extracted_file_artifact "
-                        "(artifact_key, payload) VALUES (?, ?)",
-                        (key, zlib.compress(pickle.dumps(extracted))),
-                    )
-            conn.commit()
+            with ThreadPoolExecutor(max_workers=jobs) as pool:
+                def completed_files():
+                    futures = deque()
+                    for item in pending:
+                        futures.append(pool.submit(extract, item))
+                        if len(futures) == (jobs or 8):
+                            yield futures.popleft().result()
+                    while futures:
+                        yield futures.popleft().result()
+                extracted_files = completed_files()
+                for key, extracted, fresh, preparation in extracted_files:
+                    if prepared is not None:
+                        prepared(extracted.revision, preparation)
+                    if fresh:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO extracted_file_artifact "
+                            "(artifact_key, payload) VALUES (?, ?)",
+                            (key, zlib.compress(pickle.dumps(extracted))),
+                        )
+                        conn.commit()
+                    yield extracted
         finally:
             conn.close()
-        assert all(extracted is not None for extracted in result)
-        return [extracted for extracted in result if extracted is not None]
 
     def _revision_source(self, revision: FileRevision) -> str | None:
         """Load exact source bytes lazily for a reader of an older snapshot."""
@@ -621,7 +635,7 @@ class AnalysisStore:
         if previous_path != self._graph_path(graph):
             self._unlink(previous_path)
 
-    def _updated_graph(self, previous, snapshot: AnalysisSnapshot, contents):
+    def _updated_graph(self, previous, snapshot: AnalysisSnapshot, contents, extract=None):
         """Apply one revision delta, equally for disk and overlay generations."""
         from emend.analysis_linking import ModuleCatalog, link_extracted_files
         from emend.fact_graph import FactGraph
@@ -643,7 +657,6 @@ class AnalysisStore:
                    if previous is not None else set()) - after.keys()
         try:
             graph.clear_snapshot_marker()
-            local = self._extract_revisions(changed, contents)
             catalog = ModuleCatalog.from_revisions(snapshot.files)
             # Import targets depend on module inventory (for example TS index
             # aliases). Relink cached callers when that inventory changes;
@@ -652,16 +665,18 @@ class AnalysisStore:
                 return {(r.file_path, r.language, r.module_name) for r in revisions}
 
             if module_inventory(before.values()) != module_inventory(snapshot.files):
-                local.extend(self._extract_revisions(
-                    (r for r in snapshot.files if before.get(r.file_path) == r), {}
-                ))
-                local.sort(key=lambda file: file.revision.file_path)
                 changed = list(snapshot.files)
-            graph.replace_extracted(
-                link_extracted_files(local, catalog),
-                stored_paths=[graph.stored_path(file_path)
-                              for file_path in [*(r.file_path for r in changed), *removed]],
-            )
+            local = (extract or self._extract_revisions)(changed, contents)
+            stored_paths = [graph.stored_path(file_path)
+                            for file_path in [*(r.file_path for r in changed), *removed]]
+            if extract is None:
+                graph.replace_extracted(link_extracted_files(local, catalog), stored_paths=stored_paths)
+            else:
+                # This private generation is invisible until publication. Stream
+                # file transactions into it; any failure discards the generation.
+                graph.replace_extracted([], stored_paths=stored_paths)
+                for batch in local:
+                    graph.replace_extracted(link_extracted_files(batch, catalog), stored_paths=[])
             graph.publish_snapshot(snapshot)
             graph.bind_snapshot(
                 snapshot,
@@ -675,7 +690,7 @@ class AnalysisStore:
             self._unlink(path)
             raise
 
-    def _ensure_disk_facts(self, scan: _DiskScan):
+    def _ensure_disk_facts(self, scan: _DiskScan, extract=None):
         from emend.fact_graph import FactGraph
 
         graph = self._disk_graph
@@ -697,9 +712,12 @@ class AnalysisStore:
                         candidate.close()
                     self._unlink(path)
         if graph is not None and graph.snapshot.snapshot_id == scan.snapshot.snapshot_id:
+            if extract is not None:
+                for _ in extract((), {}):
+                    pass
             graph.bind_snapshot(scan.snapshot, source_loader=self._revision_source)
             return graph
-        candidate, path = self._updated_graph(graph, scan.snapshot, scan.contents)
+        candidate, path = self._updated_graph(graph, scan.snapshot, scan.contents, extract)
         publish_path = None
         try:
             publish_path = self._snapshot_copy(path, "facts-publish-")
@@ -981,6 +999,91 @@ class AnalysisStore:
             self._unlink(previous_path)
         return typed
 
+    @contextmanager
+    def prepare_index_facts(self, file_paths=None, *, include_overlays=False,
+                            prepare=None, prepared=None, jobs=None):
+        """Fan one extraction stream into type inputs and a private fact view."""
+        from concurrent.futures import ThreadPoolExecutor
+        from queue import Queue, Full, Empty
+
+        scan = self._scan_disk()
+        queue = Queue(maxsize=8)
+        end = object()
+
+        def consume(revisions, contents):
+            required = {revision.file_path: revision for revision in revisions}
+            while True:
+                items = [queue.get()]
+                for _ in range(7):
+                    try:
+                        items.append(queue.get_nowait())
+                    except Empty:
+                        break
+                batch, finished = [], False
+                for item in items:
+                    if item is end:
+                        finished = True
+                        break
+                    if isinstance(item, BaseException):
+                        raise item
+                    expected = required.pop(item.revision.file_path, None)
+                    if expected is not None:
+                        if expected != item.revision:
+                            raise RuntimeError("extraction stream changed revisions")
+                        batch.append(item)
+                if batch:
+                    yield batch
+                if finished:
+                    if required:
+                        raise RuntimeError("incomplete extraction stream")
+                    return
+
+        def materialize():
+            with self._graph_lock, self._facts_write_lock():
+                return self._ensure_disk_facts(scan, consume)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            writer = pool.submit(materialize)
+
+            def send(item):
+                while not writer.done():
+                    try:
+                        queue.put(item, timeout=0.05)
+                        return
+                    except Full:
+                        pass
+                writer.result()
+                raise RuntimeError("fact writer ended before extraction")
+
+            def files():
+                for file in self._iter_extracted_revisions(
+                    scan.snapshot.files, scan.contents,
+                    prepare=prepare, prepared=prepared, jobs=jobs,
+                ):
+                    send(file)
+                    yield file
+                send(end)
+
+            try:
+                stream = files()
+                if file_paths is None:
+                    for _ in stream:
+                        pass
+                    inputs = None
+                else:
+                    inputs = self.type_file_inputs(
+                        file_paths, _local_state=(scan.snapshot, stream)
+                    )
+                    if include_overlays and self._overlays:
+                        inputs = self.type_file_inputs(file_paths, include_overlays=True)
+                yield inputs
+            except BaseException as error:
+                if not writer.done():
+                    send(error)
+                raise
+            finally:
+                writer.result()
+
     def query_facts(
         self, *, include_types: bool = False, type_engine: str = "auto"
     ):
@@ -1070,21 +1173,24 @@ class AnalysisStore:
             include_overlays=include_overlays,
         )[resolved]
 
-    def _type_dependency_state(self, graph=None, *, include_overlays=False):
+    def _type_dependency_state(self, graph=None, *, include_overlays=False, local_state=None):
         """Resolve import dependencies without requiring graph materialization."""
         from emend.language_registry import registry_snapshot
 
         _, language_extensions = registry_snapshot()
-        if graph is None:
-            with self._source_lock:
-                scan = self._scan_disk()
-                snapshot = (self._overlay_snapshot(scan.snapshot)
-                            if include_overlays and self._overlays else scan.snapshot)
-                contents = scan.contents | (
-                    {path: value[2] for path, value in self._overlays.items()}
-                    if include_overlays else {}
-                )
-            files = self._extract_revisions(snapshot.files, contents)
+        if graph is None or local_state is not None:
+            if local_state is not None:
+                snapshot, files = local_state
+            else:
+                with self._source_lock:
+                    scan = self._scan_disk()
+                    snapshot = (self._overlay_snapshot(scan.snapshot)
+                                if include_overlays and self._overlays else scan.snapshot)
+                    contents = scan.contents | (
+                        {path: value[2] for path, value in self._overlays.items()}
+                        if include_overlays else {}
+                    )
+                files = self._iter_extracted_revisions(snapshot.files, contents)
             imports_by_path = {
                 file.revision.file_path: [(row[1], row[2] or None)
                                          for row in file.rows.get("imports", ())]
@@ -1285,11 +1391,12 @@ class AnalysisStore:
         *,
         include_overlays: bool = False,
         graph: object | None = None,
+        _local_state=None,
     ) -> tuple[dict[str, str], dict[str, str], set[str]]:
         """Capture identities, transitive sources, and project file membership."""
         paths = [str(Path(path).resolve()) for path in file_paths]
         revisions, dependencies = self._type_dependency_state(
-            graph, include_overlays=include_overlays
+            graph, include_overlays=include_overlays, local_state=_local_state
         )
         paths = [path for path in paths if path in revisions]
         identities = self._type_identities(paths, None, revisions, dependencies)

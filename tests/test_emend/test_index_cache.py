@@ -16,6 +16,62 @@ import pytest
 SOURCE = "def hello():\n    return 42\n"
 
 
+@pytest.mark.parametrize("failure", [None, "extraction", "writer"])
+def test_native_facts_stream_from_initial_index_without_reloading(tmp_path, monkeypatch, failure):
+    from contextlib import closing
+    from threading import Event
+    from emend import analysis_extraction, analysis_linking
+    from emend.analysis_store import AnalysisStore
+    from emend.fact_graph import FactGraph
+    from emend.transform import warm_caches
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'pipeline-test'\n")
+    store = AnalysisStore.open(tmp_path)
+    previous = store.query_facts()
+    (tmp_path / "a.py").write_text("def target():\n    return 1\n")
+    (tmp_path / "b.py").write_text("from a import target\ndef caller():\n    return target()\n")
+    if failure == "writer":
+        for index in range(20):
+            (tmp_path / f"c{index}.py").write_text(SOURCE)
+    persisted, fresh = Event(), {}
+    extract = analysis_extraction._extract_file_facts
+    link = analysis_linking.link_extracted_files
+    replace = FactGraph.replace_extracted
+
+    def checked_extract(revision, *args):
+        if Path(revision.file_path).name == "b.py":
+            assert persisted.wait(10), "facts waited for all extraction to finish"
+            if failure == "extraction":
+                raise ValueError("extraction failed")
+        fresh[revision.file_path] = file = extract(revision, *args)
+        return file
+
+    def checked_link(files, catalog):
+        files = list(files)
+        assert all(file is fresh[file.revision.file_path] for file in files)
+        return link(files, catalog)
+
+    def checked_replace(graph, files, **kwargs):
+        replace(graph, files, **kwargs)
+        if files:
+            persisted.set()
+            if failure == "writer":
+                raise ValueError("writer failed")
+
+    monkeypatch.setattr(analysis_extraction, "_extract_file_facts", checked_extract)
+    monkeypatch.setattr(analysis_linking, "link_extracted_files", checked_link)
+    monkeypatch.setattr(FactGraph, "replace_extracted", checked_replace)
+    if failure:
+        with pytest.raises(ValueError, match=f"{failure} failed"):
+            warm_caches(str(tmp_path), jobs=2, type_engine="none")
+        assert store._disk_graph is previous
+        with closing(FactGraph(db_path=str(store.facts_path))) as published:
+            assert published.published_snapshot(tmp_path).snapshot_id == previous.snapshot.snapshot_id
+    else:
+        assert warm_caches(str(tmp_path), jobs=2, type_engine="none")["indexed"] == 2
+        assert store.query_facts().refs_datalog("a.target")
+
+
 def test_index_leaves_duplicates_for_on_demand_analysis(tmp_path, monkeypatch):
     from emend.duplicate import query_duplicates
     from emend.transform import _cache_db_dir, warm_caches
@@ -227,7 +283,7 @@ class TestWarmCachesSkipped:
         assert stats["indexed"] == 2
         assert stats["qn_cached"] == 2
 
-    def test_process_pool_permission_error_falls_back_to_threads(
+    def test_index_stream_does_not_require_process_support(
         self, tmp_path, monkeypatch
     ):
         """Indexing still works where multiprocessing is unavailable."""
@@ -263,7 +319,7 @@ class TestWarmCachesSkipped:
 
         stats = warm_caches(str(project), type_engine=None)
 
-        assert attempts[:2] == ["process", "thread"]
+        assert attempts and set(attempts) == {"thread"}
         assert stats["indexed"] == 2
         assert stats["qn_cached"] == 2
 
