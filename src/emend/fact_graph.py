@@ -24,21 +24,8 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from emend.errors import BUG_EXCEPTIONS
 from emend.analysis_extraction import (
-    _bfs_reachable_blocks,
-    _build_method_call_facts,
-    _build_symbol_line_index,
-    _enclosing_symbol,
     _extract_file_facts,
-    _extract_imports,
-    _extract_imports_python,
-    _extract_imports_rust,
-    _extract_imports_typescript,
-    _find_containing_block,
-    _map_ref_kind,
     _normalize_qn,
-    _resolve_cfg_func_qn,
-    _walk_symbols,
-    build_def_use_facts,
 )
 from emend.analysis_snapshot import (
     AnalysisSnapshot,
@@ -2501,6 +2488,10 @@ class FactGraph:
                 "exported_symbol", "file_path, qualified_name",
                 "file_path, qualified_name",
             ),
+            "reachable_blocks": (
+                "reachable_block", "file_path, func_qn, block_id",
+                "file_path, func_qn, block_id",
+            ),
         }
         rows: dict[str, list[list[Any]]] = {key: [] for key in specs}
         for extracted in extracted_files:
@@ -2521,20 +2512,6 @@ class FactGraph:
                 self._put_batch(
                     relation, cols, schema, relation_rows, operations
                 )
-
-        entries: dict[tuple[str, str], set[int]] = {}
-        adjacency: dict[tuple[str, str, int], list[int]] = {}
-        for fp, fq, bid, is_entry, _is_exit in rows["cfg_blocks"]:
-            if is_entry:
-                entries.setdefault((fp, fq), set()).add(bid)
-        for fp, fq, from_block, to_block, *_ in rows["cfg_edges"]:
-            adjacency.setdefault((fp, fq, from_block), []).append(to_block)
-        reachable = _bfs_reachable_blocks(entries, adjacency)
-        if reachable:
-            self._put_batch(
-                "reachable_block", "file_path, func_qn, block_id",
-                "file_path, func_qn, block_id", reachable, operations,
-            )
 
     def replace_extracted(
         self,
@@ -2566,7 +2543,6 @@ class FactGraph:
         persisted index builder; this method owns incremental deletion and
         insertion only.
         """
-        from emend import emend_core as _rust
         # 1. Delete existing facts for all files in the batch.
         resolved_project_root = Path(project_root).resolve() if project_root else None
 
@@ -2591,18 +2567,10 @@ class FactGraph:
             else:
                 module_name = Path(abs_file_path).stem
             ext = Path(abs_file_path).suffix.lstrip(".") or "py"
-            try:
-                effective_resolver_root = resolver_root or str(Path(abs_file_path).parent.resolve())
-                resolver = _rust.PyScopeResolver(effective_resolver_root, ext)
-                resolver.index_file(abs_file_path, content)
-            except Exception:
-                logger.debug("Could not build scope resolver for %s", abs_file_path, exc_info=True)
-                resolver = None
-
             extracted_files.append(_extract_file_facts(
                 abs_file_path, rel_path, ext, content,
-                project_root or str(Path(abs_file_path).parent),
-                module_name, scope_resolver=resolver,
+                resolver_root or project_root or str(Path(abs_file_path).parent),
+                module_name,
             ))
         self.replace_extracted(
             extracted_files,

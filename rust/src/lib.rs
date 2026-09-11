@@ -19,6 +19,7 @@ mod cozo_db;
 mod cfg;
 mod cfg_py;
 mod tree_py;
+mod fact_rows;
 
 /// A match result returned to Python.
 #[pyclass]
@@ -451,6 +452,8 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<cfg_py::PyCfg>()?;
     m.add_function(wrap_pyfunction!(cfg_py::build_cfgs, m)?)?;
     m.add_function(wrap_pyfunction!(cfg_py::build_flow_facts, m)?)?;
+    m.add_function(wrap_pyfunction!(fact_rows::extract_file_fact_rows, m)?)?;
+    m.add_function(wrap_pyfunction!(fact_rows::extract_exported_names, m)?)?;
     m.add_class::<tree_py::PyTree>()?;
     m.add_class::<tree_py::PyNode>()?;
     m.add_function(wrap_pyfunction!(tree_py::parse_source, m)?)?;

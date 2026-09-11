@@ -519,6 +519,12 @@ pub fn python_all_names(source: &str) -> Vec<String> {
     let Some(tree) = parse_by_extension(source, "py") else {
         return vec![];
     };
+    python_all_names_from_tree(source, &tree)
+}
+
+/// Direct string elements of module-level Python ``__all__`` assignments,
+/// using a caller-owned parse tree.
+pub(crate) fn python_all_names_from_tree(source: &str, tree: &Tree) -> Vec<String> {
     let mut names = Vec::new();
     for statement in tree.root_node().named_children(&mut tree.root_node().walk()) {
         if statement.kind() != "expression_statement" {

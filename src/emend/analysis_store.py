@@ -23,7 +23,7 @@ from emend.project_config import find_project_root
 from emend.symbol_projection import SymbolInfo, _symbol_info_view
 
 
-EXTRACTION_ARTIFACT_VERSION = "5"
+EXTRACTION_ARTIFACT_VERSION = "6"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 logger = logging.getLogger(__name__)
 
@@ -459,7 +459,6 @@ class AnalysisStore:
         contents: dict[str, str],
     ) -> list[ExtractedFile]:
         """Load content-addressed revision artifacts or extract them once."""
-        from emend import emend_core
         from emend.analysis_extraction import _extract_file_facts
         from emend.fact_graph import FACT_GRAPH_SCHEMA_VERSION
 
@@ -529,14 +528,6 @@ class AnalysisStore:
 
             def extract(item):
                 index, revision, stored_path, key, content = item
-                try:
-                    resolver = emend_core.PyScopeResolver(
-                        str(self.project_root),
-                        Path(revision.file_path).suffix.lstrip(".") or "py",
-                    )
-                    resolver.index_file(revision.file_path, content)
-                except Exception:
-                    resolver = None
                 extracted = _extract_file_facts(
                     revision.file_path,
                     stored_path,
@@ -544,7 +535,6 @@ class AnalysisStore:
                     content,
                     str(self.project_root),
                     revision.module_name,
-                    resolver,
                     revision.language,
                 )
                 return index, key, ExtractedFile(

@@ -1427,6 +1427,18 @@ impl ScopeResolver {
         self.file_scopes.insert(path.to_path_buf(), file_scope);
     }
 
+    /// Build one file scope from a caller-owned parse tree without mutating the
+    /// project index.
+    pub(crate) fn build_file_scope_for_module(
+        &self,
+        path: &Path,
+        source: &str,
+        tree: &tree_sitter::Tree,
+        module_path: String,
+    ) -> FileScope {
+        self.build_file_scope(path, source, tree, content_hash(source), module_path)
+    }
+
     #[allow(dead_code)]
     pub fn qualified_names(&self, path: &Path) -> Vec<(QualifiedName, Location)> {
         let _ = path;

@@ -1541,35 +1541,19 @@ def find_dead_code(
                 imported_targets.add(f"{module}.{name}")
 
     source_file_set = {str(Path(path).resolve()) for path in source_files}
-    try:
-        import_rows = graph._client.run(
-            "?[fp, mod, name] := *import[fp, mod, name, _, _]"
-        )["rows"]
-        for file_path, module, imported_name in import_rows:
-            importing_path = Path(file_path)
-            if not importing_path.is_absolute():
-                importing_path = Path(project_root_resolved) / importing_path
-            importing_path = importing_path.resolve()
-            if str(importing_path) not in source_file_set:
-                continue
-            if _reference_file_is_excluded(str(importing_path)):
-                continue
-            _record_import(importing_path, module, imported_name)
-    except Exception:
-        # Compatibility fallback for an older/incomplete facts database.
-        logger.debug("Import fact query failed; reparsing modules", exc_info=True)
-        from emend.analysis_extraction import _extract_imports
-
-        for abs_file in source_files:
-            abs_path = Path(abs_file).resolve()
-            if not abs_path.exists() or _reference_file_is_excluded(str(abs_path)):
-                continue
-            try:
-                content = abs_path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-            for imp in _extract_imports(str(abs_path), content):
-                _record_import(abs_path, imp.imported_module, imp.imported_name)
+    import_rows = graph._client.run(
+        "?[fp, mod, name] := *import[fp, mod, name, _, _]"
+    )["rows"]
+    for file_path, module, imported_name in import_rows:
+        importing_path = Path(file_path)
+        if not importing_path.is_absolute():
+            importing_path = Path(project_root_resolved) / importing_path
+        importing_path = importing_path.resolve()
+        if str(importing_path) not in source_file_set:
+            continue
+        if _reference_file_is_excluded(str(importing_path)):
+            continue
+        _record_import(importing_path, module, imported_name)
 
     candidate_modules: list[DeadModule] = []
     scan_root_path = Path(scan_root).resolve()

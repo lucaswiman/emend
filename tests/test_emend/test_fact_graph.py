@@ -1,6 +1,7 @@
 """Tests for the CozoDB-backed relational fact graph."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -32,6 +33,25 @@ from emend.fact_graph import (
     flows_to,
     symbol_has_type,
 )
+
+
+def _native_imports(file_path: str, source: str) -> list[ImportFact]:
+    """Read import rows from the canonical per-file fact batch."""
+    from emend.analysis_extraction import _extract_file_facts
+    from emend.language_registry import detect_language
+
+    ext = Path(file_path).suffix.lstrip(".") or "py"
+    extracted = _extract_file_facts(
+        str(Path(file_path).resolve()), file_path, ext, source, str(Path.cwd()),
+        Path(file_path).stem, detect_language(file_path),
+    )
+    return [
+        ImportFact(
+            importing_file=row[0], imported_module=row[1],
+            imported_name=row[2] or None, alias=row[4] or None, line=row[3],
+        )
+        for row in extracted.rows["imports"]
+    ]
 
 
 @pytest.mark.parametrize("persistent", [False, True])
@@ -199,11 +219,7 @@ class TestRustImportExtraction:
     """Tests for Rust import extraction via tree-sitter (Phase 4 migration)."""
 
     def _extract(self, content: str) -> list[ImportFact]:
-        from emend.fact_graph import _extract_imports_rust
-        # Reset the cached resolver between tests to ensure isolation
-        if hasattr(_extract_imports_rust, "_resolver"):
-            del _extract_imports_rust._resolver
-        return _extract_imports_rust("test.rs", content)
+        return _native_imports("test.rs", content)
 
     @pytest.mark.parametrize(("source", "module", "name", "alias"), [
         pytest.param("use std::io;\n", "std", "io", None, id="simple-use"),
@@ -1197,14 +1213,12 @@ class TestMultiLineImportExtraction:
 
     The old hand-rolled regex matched only single-line imports and missed
     multi-line statements such as ``from foo import (\\n    bar,\\n    baz\\n)``.
-    statement. The tree-sitter based ``_extract_imports_python`` must handle
-    all such cases.
+    The canonical native batch must handle all such cases.
     """
 
     def _imports(self, source: str) -> list[str]:
         """Return a sorted list of (module, imported_name) string pairs."""
-        from emend.fact_graph import _extract_imports_python
-        facts = _extract_imports_python("test_module.py", source)
+        facts = _native_imports("test_module.py", source)
         return sorted(
             f"{f.imported_module}:{f.imported_name or ''}"
             for f in facts
@@ -1253,9 +1267,8 @@ class TestTypescriptImportExtraction:
     """
 
     def _imports(self, filename: str, source: str):
-        """Return ImportFact list from _extract_imports_typescript."""
-        from emend.fact_graph import _extract_imports_typescript
-        return _extract_imports_typescript(filename, source)
+        """Return ImportFact objects from the canonical native batch."""
+        return _native_imports(filename, source)
 
     def _modules(self, source: str) -> set[str]:
         """Return the set of imported module paths from a TypeScript snippet."""

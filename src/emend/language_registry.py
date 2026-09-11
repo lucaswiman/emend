@@ -328,160 +328,17 @@ load_config.cache_clear = _load_config.cache_clear  # type: ignore[attr-defined]
 # Tree-sitter-based export detection
 # ---------------------------------------------------------------------------
 
-# TypeScript/JavaScript declaration keywords that follow 'export [default]'
-_TS_DECL_KEYWORDS: tuple[str, ...] = (
-    "async ",
-    "abstract ",
-    "declare ",
-)
-_TS_TYPE_KEYWORDS: tuple[str, ...] = (
-    "function* ",
-    "function ",
-    "class ",
-    "const ",
-    "let ",
-    "var ",
-    "interface ",
-    "type ",
-    "enum ",
-    "abstract class ",
-)
+def detect_exported_names(content: str, language: str) -> set[str]:
+    """Detect explicit module exports using the canonical native parser."""
+    if language not in ("python", "typescript", "javascript", "rust"):
+        return set()
 
-
-def _detect_exported_names_python(content: str) -> set[str]:
-    """Detect Python's explicit module API from a parsed ``__all__`` value."""
     from emend import emend_core
 
-    return set(emend_core.python_all_names(content))
-
-
-def _extract_name_after_keywords(rest: str) -> str:
-    """Strip leading declaration/type keywords and return the bare symbol name."""
-    for kw in _TS_DECL_KEYWORDS:
-        if rest.startswith(kw):
-            rest = rest[len(kw):].strip()
-    for kw in _TS_TYPE_KEYWORDS:
-        if rest.startswith(kw):
-            rest = rest[len(kw):]
-            break
-    # Extract identifier characters from the start
-    name = ""
-    for ch in rest:
-        if ch.isalnum() or ch == "_":
-            name += ch
-        else:
-            break
-    return name
-
-
-def _detect_exported_names_typescript(content: str) -> set[str]:
-    """Detect exported names from TypeScript/JavaScript source using tree-sitter.
-
-    Uses ``emend_core.get_statement_ranges()`` to obtain tree-sitter-parsed
-    declaration lines, then checks each line for the ``export`` keyword.
-    No regex patterns are required.
-    """
-    from emend import emend_core  # local import to avoid circular deps
-
-    lines = content.split("\n")
-    exported: set[str] = set()
-
-    # get_statement_ranges returns (start_line, end_line) 1-indexed pairs
-    # for all top-level simple statements in the file.
-    try:
-        ranges = emend_core.get_statement_ranges(content, "ts")
-    except Exception:
-        logger.debug("get_statement_ranges failed for TypeScript source", exc_info=True)
-        return exported
-
-    for start_line, _end_line in ranges:
-        if start_line < 1 or start_line > len(lines):
-            continue
-        line = lines[start_line - 1].strip()
-
-        if not (line.startswith("export ") or line.startswith("export{")):
-            continue
-
-        # Named export block: export { foo, bar as baz }
-        # The '{' must appear directly after 'export' (with optional whitespace).
-        # This distinguishes `export { foo }` from `export function foo() { ... }`.
-        # Also skip re-exports: export { X } from "module"
-        rest_for_brace = line[len("export"):].lstrip()
-        if rest_for_brace.startswith("{"):
-            if " from " not in line:
-                brace_start = line.find("{")
-                brace_end = line.rfind("}")
-                if brace_start != -1 and brace_end != -1:
-                    names_part = line[brace_start + 1 : brace_end]
-                    for item in names_part.split(","):
-                        item = item.strip()
-                        if not item:
-                            continue
-                        # Keep the original name (before any 'as' alias)
-                        original = item.split(" as ")[0].strip()
-                        if original and original.isidentifier():
-                            exported.add(original)
-            continue
-
-        # export [default] <keyword> <Name> ...
-        rest = line[len("export "):].strip()
-        if rest.startswith("default "):
-            rest = rest[len("default "):].strip()
-
-        # Skip re-exports that contain 'from'
-        if " from " in rest:
-            continue
-
-        name = _extract_name_after_keywords(rest)
-        if name:
-            exported.add(name)
-
-    return exported
-
-
-def _detect_exported_names_rust(content: str) -> set[str]:
-    """Detect public symbol names from Rust source using tree-sitter.
-
-    Uses ``emend_core.collect_symbols_from_str()`` to get the symbol list
-    (with line numbers), then checks whether the corresponding source line
-    starts with the ``pub`` visibility modifier.  No regex patterns required.
-    """
-    from emend import emend_core  # local import to avoid circular deps
-
-    exported: set[str] = set()
-    try:
-        symbols = emend_core.collect_symbols_from_str(content, ext="rs")
-    except Exception:
-        logger.debug("collect_symbols_from_str failed for Rust source", exc_info=True)
-        return exported
-
-    lines = content.split("\n")
-    for sym in symbols:
-        line_num = sym.get("line", 0)
-        if line_num < 1 or line_num > len(lines):
-            continue
-        # The symbol line may be the attribute line for decorated items;
-        # check the line where the symbol definition actually starts.
-        line_text = lines[line_num - 1].lstrip()
-        if line_text.startswith("pub ") or line_text.startswith("pub("):
-            exported.add(sym["name"])
-
-    return exported
-
-
-def detect_exported_names(content: str, language: str) -> set[str]:
-    """Detect exported/public symbol names using tree-sitter analysis.
-
-    For Python, reads ``__all__`` from a structurally matched assignment.  For
-    TypeScript/JavaScript, walks ``export_statement`` nodes via
-    ``emend_core.get_statement_ranges()``.  For Rust, uses
-    ``emend_core.collect_symbols_from_str()`` with ``pub`` visibility checks.
-    """
-    if language == "python":
-        return _detect_exported_names_python(content)
-    if language in ("typescript", "javascript"):
-        return _detect_exported_names_typescript(content)
-    if language == "rust":
-        return _detect_exported_names_rust(content)
-    # For other languages with no export concept, return empty set.
-    return set()
+    extensions = get_extensions(language)
+    ext = extensions[0] if extensions else "py"
+    languages_dir = _find_languages_dir()
+    config_root = languages_dir.parent if languages_dir is not None else Path(".")
+    return set(emend_core.extract_exported_names(
+        content, ext, str(config_root), language,
+    ))

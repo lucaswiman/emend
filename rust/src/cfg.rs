@@ -1606,7 +1606,16 @@ pub fn build_cfgs_for_source(source: &str, ext: &str) -> Vec<FunctionCfg> {
         None => return Vec::new(),
     };
 
-    let cfg_sec = &config_for_ext(ext).cfg;
+    build_cfgs_from_tree(source, &tree, config_for_ext(ext))
+}
+
+/// Build all function CFGs from a caller-owned parse tree and configuration.
+pub fn build_cfgs_from_tree(
+    source: &str,
+    tree: &tree_sitter::Tree,
+    config: &LanguageConfig,
+) -> Vec<FunctionCfg> {
+    let cfg_sec = &config.cfg;
 
     // If cfg section has no function_nodes configured, CFG is not supported
     if cfg_sec.function_nodes.is_empty() {
@@ -2055,6 +2064,15 @@ fn extract_scope(
 pub fn build_flow_facts(source: &str, ext: &str) -> FlowFacts {
     let Some(tree) = crate::pattern::parse_by_extension(source, ext) else { return FlowFacts::default() };
     let lang = config_for_ext(ext);
+    build_flow_facts_from_tree(source, &tree, lang)
+}
+
+/// Build flow facts from a caller-owned parse tree and configuration.
+pub fn build_flow_facts_from_tree(
+    source: &str,
+    tree: &tree_sitter::Tree,
+    lang: &LanguageConfig,
+) -> FlowFacts {
     if lang.cfg.function_nodes.is_empty() { return FlowFacts::default(); }
     let bytes = source.as_bytes();
     let root = tree.root_node();

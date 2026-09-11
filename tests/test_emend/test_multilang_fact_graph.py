@@ -4,6 +4,8 @@ Tests that detect_project_languages(), _collect_all_source_files(), and
 FactGraph.build_from_project() work correctly for TypeScript, Rust, and
 mixed-language projects.
 """
+import hashlib
+import json
 import textwrap
 
 import pytest
@@ -333,3 +335,71 @@ class TestExtractFileFactsTypescript:
         imports = graph._all_imports()
         modules = {imp.imported_module for imp in imports}
         assert "fs" in modules or "path" in modules, f"Expected TS imports, got: {modules}"
+
+
+@pytest.mark.parametrize(
+    ("ext", "language", "module_name", "source", "expected_hash"),
+    [
+        (
+            "py",
+            "python",
+            "pkg.mod",
+            "from .dep import helper as h\n"
+            "__all__ = ['run']\n"
+            "class C:\n"
+            "    @staticmethod\n"
+            "    def m(x):\n"
+            "        return h(x)\n"
+            "def run(y):\n"
+            "    return C.m(y)\n",
+            "14f9177ed1c603e8429ee5047071172afda1b36541554cd610aefc63d0a39639",
+        ),
+        (
+            "ts",
+            "typescript",
+            "pkg/mod",
+            'import { helper as h } from "./dep";\n'
+            "export function run(y: number) { return h(y); }\n"
+            "class C { m(x: number) { return this.n(x); } "
+            "n(x: number) { return x; } }\n",
+            "d44df03847396b99d08998b1eb166ca8512a1cb25b26fa1ee6a7b01d1fdd86ad",
+        ),
+        (
+            "rs",
+            "rust",
+            "pkg::mod",
+            "use crate::dep::helper as h;\n"
+            "pub fn run(y: i32) -> i32 { h(y) }\n"
+            "struct C;\n"
+            "impl C { fn m(&self, x: i32) -> i32 { self.n(x) } "
+            "fn n(&self, x: i32) -> i32 { x } }\n",
+            "3fb21d1f2a9736956650fda094a7de93b4be54900f80f631996b41ba3d1ae4b6",
+        ),
+    ],
+)
+def test_native_fact_batch_matches_legacy_rows(
+    tmp_path, ext, language, module_name, source, expected_hash,
+):
+    """The native batch preserves every normalized legacy relation row."""
+    from emend.analysis_extraction import _extract_file_facts
+
+    path = tmp_path / "pkg" / f"mod.{ext}"
+    path.parent.mkdir()
+    path.write_text(source)
+    extracted = _extract_file_facts(
+        str(path),
+        str(path.relative_to(tmp_path)),
+        ext,
+        source,
+        str(tmp_path),
+        module_name,
+        language,
+    )
+    normalized = {
+        key: sorted(rows, key=repr)
+        for key, rows in sorted(extracted.rows.items())
+    }
+    digest = hashlib.sha256(
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert digest == expected_hash
