@@ -96,6 +96,56 @@ def test_batched_fact_mutations_use_streaming_transaction():
     assert client.operations is operations
 
 
+def test_native_transaction_reports_commit_failure_and_releases_locks(tmp_path):
+    import subprocess
+    import sys
+    from emend.emend_core import PyCozoDb
+
+    path = str(tmp_path / "facts.db")
+    db = PyCozoDb("sqlite", path)
+    db.run(":create values {id: Int}")
+    # A separate process also avoids mixing Python's and Rust's SQLite builds.
+    with subprocess.Popen(
+        [sys.executable, "-c", "import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); "
+         "db.execute('BEGIN'); db.execute('SELECT * FROM cozo').fetchall(); "
+         "print('ready', flush=True); sys.stdin.read()", path],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    ) as reader:
+        try:
+            assert reader.stdout.readline() == "ready\n"
+            with pytest.raises(RuntimeError, match="locked"):
+                db.run_transaction([("?[id] <- [[1]] :put values {id}", {})])
+        finally:
+            reader.communicate(timeout=5)
+    assert db.run("?[id] := *values[id]")["rows"] == []
+    db.run_transaction([("?[id] <- [[2]] :put values {id}", {})])
+    assert db.run("?[id] := *values[id]")["rows"] == [[2]]
+
+
+@pytest.mark.parametrize("transaction", [False, True])
+def test_native_database_parameter_types(transaction):
+    from emend.emend_core import PyCozoDb
+
+    class IndexedString(str):
+        def __index__(self):
+            return 7
+
+    db = PyCozoDb()
+    db.run(":create values {id: Int => value}")
+    values = [None, True, False, 42, -3, 1.25, "λ", ["nested", [2]], 2**80, IndexedString("7")]
+    script = "?[id, value] <- $rows :put values {id => value}"
+    params = {"rows": [[i, value] for i, value in enumerate(values)]}
+    if transaction:
+        db.run_transaction([(script, params)])
+    else:
+        db.run(script, params)
+    actual = [row[1] for row in db.run("?[id, value] := *values[id, value]")["rows"]]
+    assert actual == [*values[:-2], float(2**80), 7]
+    assert [type(value) for value in actual] == [
+        type(None), bool, bool, int, int, float, str, list, float, int,
+    ]
+
+
 @pytest.mark.parametrize("transaction", [False, True])
 def test_native_database_wait_does_not_stall_python_gc(transaction):
     import gc

@@ -5,7 +5,7 @@
 
 use cozo::*;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
@@ -66,6 +66,26 @@ fn datavalue_to_json(val: &DataValue) -> JsonValue {
 }
 
 fn py_to_datavalue(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<DataValue> {
+    // Fact batches contain builtin scalars and lists. Dispatch those without
+    // failed coercions (including bool extraction's NumPy compatibility check).
+    // Keep the fallback for subclasses, numeric protocols and large integers.
+    if obj.is_exact_instance_of::<PyString>() {
+        return Ok(DataValue::Str(obj.extract::<String>()?.into()));
+    }
+    if obj.is_exact_instance_of::<PyInt>() {
+        if let Ok(i) = obj.extract::<i64>() {
+            return Ok(DataValue::from(i));
+        }
+    }
+    if obj.is_exact_instance_of::<PyFloat>() {
+        return Ok(DataValue::from(obj.extract::<f64>()?));
+    }
+    if obj.is_exact_instance_of::<PyList>() {
+        return Ok(DataValue::List(
+            obj.downcast::<PyList>()?.iter()
+                .map(|item| py_to_datavalue(&item)).collect::<PyResult<_>>()?,
+        ));
+    }
     if obj.is_none() {
         Ok(DataValue::Null)
     } else if let Ok(b) = obj.extract::<bool>() {
@@ -96,6 +116,15 @@ fn py_params(params: Option<&Bound<'_, PyDict>>) -> PyResult<BTreeMap<String, Da
         }
     }
     Ok(result)
+}
+
+fn finish_transaction(transaction: &MultiTransaction, action: TransactionPayload) -> Result<(), String> {
+    transaction.sender.send(action).map_err(|e| e.to_string())?;
+    let outcome = transaction.receiver.recv().map_err(|e| e.to_string())?;
+    // Cozo 0.7's commit()/abort() discard the outcome and return before the
+    // worker drops its SQLite statements. Channel closure marks full teardown.
+    let _ = transaction.receiver.recv();
+    outcome.map(|_| ()).map_err(|e| e.to_string())
 }
 
 fn named_rows_to_py(py: Python<'_>, result: NamedRows) -> PyResult<PyObject> {
@@ -173,19 +202,19 @@ impl PyCozoDb {
             let (query, params) = match converted {
                 Ok(converted) => converted,
                 Err(error) => {
-                    let _ = py.allow_threads(|| transaction.abort());
+                    let _ = py.allow_threads(|| finish_transaction(&transaction, TransactionPayload::Abort));
                     return Err(error);
                 }
             };
             if let Err(error) = py.allow_threads(|| transaction.run_script(&query, params)) {
-                let _ = py.allow_threads(|| transaction.abort());
+                let _ = py.allow_threads(|| finish_transaction(&transaction, TransactionPayload::Abort));
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "CozoDB query error: {}",
                     error
                 )));
             }
         }
-        py.allow_threads(|| transaction.commit()).map_err(|error| {
+        py.allow_threads(|| finish_transaction(&transaction, TransactionPayload::Commit)).map_err(|error| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "CozoDB transaction error: {}",
                 error
