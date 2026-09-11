@@ -222,6 +222,13 @@ impl PyCozoDb {
         })
     }
 
+    /// Save a consistent database snapshot to a new SQLite file.
+    fn backup(&self, py: Python<'_>, path: &str) -> PyResult<()> {
+        py.allow_threads(|| self.db.backup_db(path)).map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("CozoDB backup error: {}", error))
+        })
+    }
+
     /// Close the database (no-op for in-memory).
     fn close(&self) -> PyResult<()> {
         Ok(())

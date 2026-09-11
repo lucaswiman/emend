@@ -36,6 +36,46 @@ def _names(facts):
     return [fact.name for fact in facts]
 
 
+@pytest.mark.parametrize("fail_save", [False, True])
+def test_cold_facts_build_in_memory_then_persist(tmp_path, monkeypatch, fail_save):
+    from emend import emend_core
+    from emend.fact_graph import FactGraph
+
+    source = tmp_path / "example.py"
+    source.write_text("def original():\n    return 1\n")
+    store = AnalysisStore(tmp_path)
+    builds, saves = [], []
+    mutate, backup = FactGraph._run_mutations, emend_core.PyCozoDb.backup
+
+    def tracked_mutate(graph, operations):
+        builds.append(graph._db_path)
+        return mutate(graph, operations)
+
+    def tracked_backup(client, path):
+        saves.append(path)
+        if fail_save:
+            raise RuntimeError("save failed")
+        return backup(client, path)
+
+    monkeypatch.setattr(FactGraph, "_run_mutations", tracked_mutate)
+    monkeypatch.setattr(emend_core.PyCozoDb, "backup", tracked_backup)
+    if fail_save:
+        with pytest.raises(RuntimeError, match="save failed"):
+            store.query_facts()
+        assert not store.facts_path.exists()
+        assert store._disk_graph is None
+    else:
+        first = store.query_facts()
+        assert builds and all(path is None for path in builds)
+        assert _names(AnalysisStore(tmp_path).query_facts().symbols()) == ["original"]
+        builds.clear()
+        source.write_text("def changed():\n    return 2\n")
+        assert _names(store.query_facts().symbols()) == ["changed"]
+        assert builds and all(path is not None for path in builds)
+        assert _names(first.symbols()) == ["original"]
+    assert len(saves) == 1
+
+
 @pytest.fixture
 def extracted_files(monkeypatch):
     import emend.analysis_extraction as extraction

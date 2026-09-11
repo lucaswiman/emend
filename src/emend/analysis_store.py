@@ -462,6 +462,8 @@ class AnalysisStore:
                 self._artifact_connection = sqlite3.connect(
                     str(self.artifact_path), check_same_thread=False
                 )
+                self._artifact_connection.execute("PRAGMA journal_mode=WAL")
+                self._artifact_connection.execute("PRAGMA synchronous=NORMAL")
             return self._artifact_connection
 
     def _extract_revisions(
@@ -484,6 +486,8 @@ class AnalysisStore:
         db_path = self._shared_artifact_path()
         conn = sqlite3.connect(str(db_path), timeout=30)
         conn.execute("PRAGMA journal_mode=WAL")
+        # Rebuildable artifacts need atomic commits, not a disk sync per file.
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS extracted_file_artifact ("
             "artifact_key TEXT PRIMARY KEY, payload BLOB NOT NULL)"
@@ -642,7 +646,7 @@ class AnalysisStore:
 
         if previous is None:
             path = self._temporary_db_path("facts-next-")
-            graph = FactGraph(db_path=str(path))
+            graph = FactGraph()
             before = {}
         else:
             graph, path = self._clone_graph(Path(previous._db_path), snapshot)
@@ -678,6 +682,12 @@ class AnalysisStore:
                 for batch in local:
                     graph.replace_extracted(link_extracted_files(batch, catalog), stored_paths=[])
             graph.publish_snapshot(snapshot)
+            if previous is None:
+                # Bulk-save the cold build once; subsequent edits keep using
+                # disk-backed deltas rather than loading the graph into RAM.
+                graph._client.backup(str(path))
+                graph.close()
+                graph = FactGraph(db_path=str(path))
             graph.bind_snapshot(
                 snapshot,
                 source_overrides={r.file_path: contents[r.file_path]
