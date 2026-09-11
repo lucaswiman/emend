@@ -1080,7 +1080,7 @@ def _warm_caches_impl(
     type_engine: str | None = "pyrefly",
     language: str = "python",
     build_fts: bool = True,
-    build_duplicates: bool = True,
+    build_duplicates: bool = False,
 ) -> dict[str, int | str]:
     """Pre-populate the parse, QN-index, and type caches for all project files.
 
@@ -1107,8 +1107,8 @@ def _warm_caches_impl(
             Explicit values: ``"pyrefly"``, ``"pyright"``, ``"ty"``.
         build_fts: Rebuild the editor full-text index. Fact-only consumers can
             disable this to return as soon as their analysis data is ready.
-        build_duplicates: Populate duplicate-code caches. Fact-only consumers
-            can disable this independent analysis phase.
+        build_duplicates: Explicitly prewarm duplicate-code caches. Disabled
+            by default; duplicate queries compute their payloads on demand.
             Use this after detecting that the persisted fact graph is empty or
             invalid while parse/reference caches are still current.
 
@@ -1351,8 +1351,8 @@ def _warm_caches_impl(
                 for file_path, _ in file_contents:
                     callback("types", file_path)
 
-    # Phase 6: duplicate analysis — compute and cache per-file duplicate payloads,
-    # then materialize queryable facts into facts.db.
+    # Optional duplicate prewarming. Ordinary indexing leaves this analysis
+    # to its consumers, which can compute payloads in memory on demand.
     if build_duplicates:
         announce_phase("Duplicate analysis")
         try:
@@ -1397,7 +1397,7 @@ def warm_caches(
     type_engine: str | None = "pyrefly",
     language: str = "python",
     build_fts: bool = True,
-    build_duplicates: bool = True,
+    build_duplicates: bool = False,
 ) -> dict[str, int | str]:
     """Compatibility entry point for eager derived-cache warming."""
     stats = _warm_caches_impl(

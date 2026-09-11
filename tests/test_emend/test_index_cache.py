@@ -16,6 +16,24 @@ import pytest
 SOURCE = "def hello():\n    return 42\n"
 
 
+def test_index_leaves_duplicates_for_on_demand_analysis(tmp_path, monkeypatch):
+    from emend.duplicate import query_duplicates
+    from emend.transform import _cache_db_dir, warm_caches
+
+    body = "    total = 0\n    for item in items:\n        total += item * item\n    return total\n"
+    (tmp_path / "a.py").write_text("def first(items):\n" + body)
+    (tmp_path / "b.py").write_text("def second(items):\n" + body)
+    warmed = []
+    monkeypatch.setattr("emend.transform.index._compute_duplicate_payloads",
+                        lambda *args, **kwargs: warmed.append(True))
+
+    warm_caches(str(tmp_path), jobs=1, type_engine="none")
+    assert not warmed, "Index must not compute duplicate payloads"
+    assert query_duplicates(str(tmp_path), mode="exact", min_lines=3)
+    with sqlite3.connect(_cache_db_dir(str(tmp_path)) / "parse.db") as conn:
+        assert conn.execute("SELECT count(*) FROM dup_cache").fetchone() == (0,)
+
+
 def make_project_dir(tmp_path: Path) -> Path:
     project = tmp_path / "proj"
     project.mkdir()
@@ -35,7 +53,6 @@ def test_index_cli_reports_long_running_phases(monkeypatch, tmp_path):
         callback("phase", "Type analysis (pyrefly)")
         callback("phase", "Full-text search index")
         callback("phase", "Facts database")
-        callback("phase", "Duplicate analysis")
         return {"files": 1, "indexed": 1, "qn_cached": 1}
 
     monkeypatch.setattr("emend.cli_tooling.warm_caches", fake_warm_caches)
@@ -48,7 +65,6 @@ def test_index_cli_reports_long_running_phases(monkeypatch, tmp_path):
         "Type analysis (pyrefly)",
         "Full-text search index",
         "Facts database",
-        "Duplicate analysis",
     ):
         assert label in result.output
 

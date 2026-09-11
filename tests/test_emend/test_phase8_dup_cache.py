@@ -1,11 +1,11 @@
 """Phase 8 production tests: duplicate cache + facts integration.
 
 Tests that verify:
-1. ``emend index`` populates dup_cache and dup_subtree/dup_run facts on a small
+1. Explicit duplicate prewarming populates dup_cache on a small
    synthetic repo.
 2. Re-indexing after editing one file updates only that file's duplicate facts.
 3. Deleting a file removes its duplicate facts.
-4. Re-running ``emend index`` with no changes reuses cached dup_cache rows
+4. Re-running explicit prewarming with no changes reuses cached dup_cache rows
    instead of recomputing all files.
 """
 
@@ -86,7 +86,7 @@ def _make_project(tmp_path: Path) -> Path:
 def test_warm_caches_populates_dup_cache(tmp_path):
     """warm_caches should write dup_cache rows for Python files."""
     _make_project(tmp_path)
-    stats = warm_caches(str(tmp_path), type_engine="none")
+    stats = warm_caches(str(tmp_path), type_engine="none", build_duplicates=True)
 
     # The stats should indicate at least some files were dup-analyzed.
     assert stats.get("dup_cached", 0) >= 0  # may be 0 if no py files matched
@@ -107,7 +107,7 @@ def test_warm_caches_populates_dup_cache(tmp_path):
 def test_warm_caches_dup_cache_data_valid(tmp_path):
     """dup_cache data should be deserializable and contain subtrees/sequences."""
     _make_project(tmp_path)
-    warm_caches(str(tmp_path), type_engine="none")
+    warm_caches(str(tmp_path), type_engine="none", build_duplicates=True)
 
     db_path = _cache_db_dir(str(tmp_path)) / "parse.db"
     conn = sqlite3.connect(str(db_path))
@@ -142,7 +142,7 @@ def test_warm_caches_dup_cache_data_valid(tmp_path):
 def test_incremental_refresh_on_edit(tmp_path):
     """Editing a file should update its dup_cache row, not the unchanged file."""
     _make_project(tmp_path)
-    warm_caches(str(tmp_path), type_engine="none")
+    warm_caches(str(tmp_path), type_engine="none", build_duplicates=True)
 
     db_path = _cache_db_dir(str(tmp_path)) / "parse.db"
 
@@ -161,7 +161,7 @@ def test_incremental_refresh_on_edit(tmp_path):
     utils_file.write_text(new_content)
 
     # Re-run warm_caches.
-    warm_caches(str(tmp_path), type_engine="none")
+    warm_caches(str(tmp_path), type_engine="none", build_duplicates=True)
 
     conn = sqlite3.connect(str(db_path))
     new_hashes = set(
@@ -186,7 +186,7 @@ def test_incremental_refresh_on_edit(tmp_path):
 def test_no_recomputation_on_unchanged_files(tmp_path):
     """Re-running warm_caches with unchanged files should reuse dup_cache."""
     _make_project(tmp_path)
-    warm_caches(str(tmp_path), type_engine="none")
+    warm_caches(str(tmp_path), type_engine="none", build_duplicates=True)
 
     db_path = _cache_db_dir(str(tmp_path)) / "parse.db"
 
@@ -198,7 +198,7 @@ def test_no_recomputation_on_unchanged_files(tmp_path):
     conn.close()
 
     # Run again without any changes.
-    warm_caches(str(tmp_path), type_engine="none")
+    warm_caches(str(tmp_path), type_engine="none", build_duplicates=True)
 
     conn = sqlite3.connect(str(db_path))
     second_hashes = set(

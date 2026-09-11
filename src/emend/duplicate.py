@@ -1024,8 +1024,8 @@ def query_duplicates(
 ) -> list[DuplicateCluster]:
     """Find duplicate code clusters in a project.
 
-    Uses cached payloads from ``emend index`` when available, falling
-    back to on-the-fly parsing otherwise.
+    Uses explicitly prewarmed payloads when available, otherwise computes
+    duplicate analysis on demand without persisting its payloads.
 
     ``involves_file`` keeps only clusters with at least one member in the
     given file. Useful for post-write hooks that want "did this edit
