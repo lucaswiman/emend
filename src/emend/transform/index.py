@@ -1352,8 +1352,13 @@ def _warm_caches_impl(
     # Phase 5: the analysis owner is the sole facts refresh path.
     announce_phase("Facts database")
     from emend.analysis_store import AnalysisStore
+    t_facts = time.monotonic()
     stats["snapshot_id"] = (
         AnalysisStore.open(project_root).query_facts().snapshot.snapshot_id
+    )
+    logger.info(
+        "warm_caches: facts database refreshed in %.3fs",
+        time.monotonic() - t_facts,
     )
 
     # Phase 6: duplicate analysis — compute and cache per-file duplicate payloads,
@@ -1474,15 +1479,15 @@ def _compute_duplicate_payloads(
         except Exception:
             logger.debug("scope indexing failed for %s", file_path, exc_info=True)
 
-    from emend.duplicate import canonicalize_file_for_cache, build_statement_seqs_for_cache
+    from emend.duplicate import _build_duplicate_payload_for_cache
 
     for file_path, content, content_hash in py_files:
         if content_hash in cached_hashes:
             continue
         try:
-            subtrees = canonicalize_file_for_cache(file_path, content, scope_resolver)
-            sequences = build_statement_seqs_for_cache(file_path, content, scope_resolver)
-            payload = {"subtrees": subtrees, "sequences": sequences}
+            payload = _build_duplicate_payload_for_cache(
+                file_path, content, scope_resolver
+            )
             data = zlib.compress(pickle.dumps(payload))
             conn.execute(
                 "INSERT OR REPLACE INTO dup_cache (hash, version, data) VALUES (?, ?, ?)",

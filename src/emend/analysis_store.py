@@ -474,10 +474,11 @@ class AnalysisStore:
             "CREATE TABLE IF NOT EXISTS source_artifact ("
             "content_hash TEXT PRIMARY KEY, payload BLOB NOT NULL)"
         )
-        result: list[ExtractedFile] = []
-        misses = 0
+        revisions = list(revisions)
+        result: list[ExtractedFile | None] = [None] * len(revisions)
+        pending: list[tuple[int, FileRevision, str, str, str]] = []
         try:
-            for revision in revisions:
+            for index, revision in enumerate(revisions):
                 try:
                     stored_path = str(
                         Path(revision.file_path).relative_to(self.project_root)
@@ -514,15 +515,20 @@ class AnalysisStore:
                     )
                 if row is not None:
                     cached = pickle.loads(zlib.decompress(row[0]))
-                    result.append(ExtractedFile(
+                    result[index] = ExtractedFile(
                         revision=revision,
                         qnames=cached.qnames,
                         rows=cached.rows,
-                    ))
+                    )
                     continue
                 if content is None:
                     assert source_row is not None
                     content = zlib.decompress(source_row[0]).decode()
+
+                pending.append((index, revision, stored_path, key, content))
+
+            def extract(item):
+                index, revision, stored_path, key, content = item
                 try:
                     resolver = emend_core.PyScopeResolver(
                         str(self.project_root),
@@ -541,21 +547,29 @@ class AnalysisStore:
                     resolver,
                     revision.language,
                 )
-                result.append(ExtractedFile(
+                return index, key, ExtractedFile(
                     revision=revision,
                     qnames=extracted.qnames,
                     rows=extracted.rows,
-                ))
-                conn.execute(
-                    "INSERT OR REPLACE INTO extracted_file_artifact "
-                    "(artifact_key, payload) VALUES (?, ?)",
-                    (key, zlib.compress(pickle.dumps(extracted))),
                 )
-                misses += 1
+
+            if pending:
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor() as pool:
+                    extracted_files = pool.map(extract, pending)
+                    for index, key, extracted in extracted_files:
+                        result[index] = extracted
+                        conn.execute(
+                            "INSERT OR REPLACE INTO extracted_file_artifact "
+                            "(artifact_key, payload) VALUES (?, ?)",
+                            (key, zlib.compress(pickle.dumps(extracted))),
+                        )
             conn.commit()
         finally:
             conn.close()
-        return result
+        assert all(extracted is not None for extracted in result)
+        return [extracted for extracted in result if extracted is not None]
 
     def _revision_source(self, revision: FileRevision) -> str | None:
         """Load exact source bytes lazily for a reader of an older snapshot."""

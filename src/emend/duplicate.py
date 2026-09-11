@@ -356,11 +356,25 @@ def _stmt_canonical_hash(
 # Public API: production cache helpers
 # ---------------------------------------------------------------------------
 
+_PreparedDuplicateFile = tuple[Any, dict, dict, list[tuple[str, int, int]]]
+
+
+def _prepare_duplicate_file(
+    file_path: str, content: str, scope_resolver
+) -> _PreparedDuplicateFile | None:
+    tree = emend_core.parse_source(content, "py")
+    if tree is None:
+        return None
+    qn_at, def_loc = _build_qn_at(file_path, scope_resolver)
+    return tree, qn_at, def_loc, _build_symbol_index(content, ext="py")
+
 
 def canonicalize_file_for_cache(
     file_path: str,
     content: str,
     scope_resolver,
+    *,
+    _prepared: _PreparedDuplicateFile | None = None,
 ) -> list[dict]:
     """Compute production canonical subtree payloads for *file_path*.
 
@@ -376,12 +390,12 @@ def canonicalize_file_for_cache(
 
     Returns an empty list if the file cannot be parsed.
     """
-    tree = emend_core.parse_source(content, "py")
-    if tree is None:
+    prepared = _prepared or _prepare_duplicate_file(
+        file_path, content, scope_resolver
+    )
+    if prepared is None:
         return []
-
-    qn_at, def_loc = _build_qn_at(file_path, scope_resolver)
-    symbol_index = _build_symbol_index(content, ext="py")
+    tree, qn_at, def_loc, symbol_index = prepared
 
     out: list[dict] = []
     for cand in _iter_candidates(tree):
@@ -429,6 +443,8 @@ def build_statement_seqs_for_cache(
     file_path: str,
     content: str,
     scope_resolver,
+    *,
+    _prepared: _PreparedDuplicateFile | None = None,
 ) -> list[dict]:
     """Compute production sibling-sequence payloads for *file_path*.
 
@@ -441,13 +457,12 @@ def build_statement_seqs_for_cache(
 
     Returns an empty list if the file cannot be parsed.
     """
-    tree = emend_core.parse_source(content, "py")
-    if tree is None:
+    prepared = _prepared or _prepare_duplicate_file(
+        file_path, content, scope_resolver
+    )
+    if prepared is None:
         return []
-
-    qn_at, def_loc = _build_qn_at(file_path, scope_resolver)
-
-    symbol_index = _build_symbol_index(content)
+    tree, qn_at, def_loc, symbol_index = prepared
 
     out: list[dict] = []
 
@@ -514,6 +529,23 @@ def build_statement_seqs_for_cache(
         visit(child)
 
     return out
+
+
+def _build_duplicate_payload_for_cache(
+    file_path: str, content: str, scope_resolver
+) -> dict[str, list[dict]]:
+    """Build both duplicate views from one parsed and projected file."""
+    prepared = _prepare_duplicate_file(file_path, content, scope_resolver)
+    if prepared is None:
+        return {"subtrees": [], "sequences": []}
+    return {
+        "subtrees": canonicalize_file_for_cache(
+            file_path, content, scope_resolver, _prepared=prepared
+        ),
+        "sequences": build_statement_seqs_for_cache(
+            file_path, content, scope_resolver, _prepared=prepared
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -370,6 +370,32 @@ def test_duplicate_module_build_statement_seqs_for_cache(tmp_path):
             assert len(h) == 32  # 16-byte blake2b as hex
 
 
+def test_duplicate_payload_prepares_file_once(tmp_path, monkeypatch):
+    """The combined cache path must not parse and project the file twice."""
+    from unittest.mock import Mock
+    import emend.duplicate as duplicate
+
+    file_path = str(tmp_path / "sample.py")
+    resolver = duplicate.emend_core.PyScopeResolver(str(tmp_path))
+    resolver.index_file(file_path, _SIMPLE_FUNC)
+    watched = []
+    for owner, name in (
+        (duplicate.emend_core, "parse_source"),
+        (duplicate.emend_core, "collect_symbols_from_str"),
+        (duplicate, "_build_qn_at"),
+    ):
+        wrapped = Mock(wraps=getattr(owner, name))
+        monkeypatch.setattr(owner, name, wrapped)
+        watched.append(wrapped)
+
+    payload = duplicate._build_duplicate_payload_for_cache(
+        file_path, _SIMPLE_FUNC, resolver
+    )
+
+    assert set(payload) == {"subtrees", "sequences"}
+    assert [call.call_count for call in watched] == [1, 1, 1]
+
+
 def test_duplicate_module_near_duplicate_detection(tmp_path):
     """Two near-duplicate functions should produce the same canonical_hash."""
     from emend.duplicate import canonicalize_file_for_cache
