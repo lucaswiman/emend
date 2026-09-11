@@ -303,7 +303,8 @@ class TestTypeCacheWarming:
         return proj
 
     @pytest.mark.parametrize("failure", [None, "types", "facts"])
-    def test_types_overlap_fact_materialization(self, tmp_path, monkeypatch, failure):
+    @pytest.mark.parametrize("overlay", [False, True])
+    def test_types_overlap_fact_materialization(self, tmp_path, monkeypatch, failure, overlay):
         from threading import Event, get_ident
         from emend import analysis_extraction, type_oracle
         from emend.fact_graph import FactGraph
@@ -342,6 +343,22 @@ class TestTypeCacheWarming:
             def infer_batch(self, paths, project_root, *, inputs=None):
                 assert len(self._prepare_file_keys(paths, project_root, inputs)) == 2
                 assert materializing.wait(10), "types and facts did not overlap"
+                # Real adapters revalidate before caching. This must finish
+                # while fact materialization is paused, including fresh edits.
+                store = AnalysisStore.open(proj)
+                if overlay:
+                    store.update_overlay(proj / "b.py", "y: str = 'edited'\n", 1)
+                else:
+                    (proj / "b.py").write_text("y: str = 'edited'\n")
+                current = store.type_file_identities(paths, include_overlays=overlay)
+                assert current[str(proj / "a.py")] == inputs[0][str(proj / "a.py")]
+                assert current[str(proj / "b.py")] != inputs[0][str(proj / "b.py")]
+                captured = store.type_file_inputs(paths, include_overlays=overlay)
+                assert captured[0] == current
+                assert captured[1][str(proj / "b.py")] == "y: str = 'edited'\n"
+                if overlay:
+                    assert store.remove_overlay(proj / "b.py", version=1).accepted
+                    assert store.type_file_identities(paths, include_overlays=True) == inputs[0]
                 # Independent cache writes must succeed during fact indexing.
                 with sqlite3.connect(AnalysisStore.open(proj).artifact_path, timeout=1) as conn:
                     conn.execute("CREATE TABLE overlap_probe (value INTEGER)")
@@ -367,7 +384,7 @@ class TestTypeCacheWarming:
             assert run()["type_cached"] == 2
         assert callback_threads == {get_ident()}
         assert written.is_set()
-        assert sorted(extracted) == sorted(str(proj / name) for name in ("a.py", "b.py"))
+        assert sorted(extracted) == sorted(str(proj / name) for name in ("a.py", "b.py", "b.py"))
 
     @pytest.mark.skipif(not _HAS_TYPE_ENGINE, reason="no type engine on PATH")
     def test_type_cache_populated(self, tmp_path):

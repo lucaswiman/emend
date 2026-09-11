@@ -64,7 +64,10 @@ class AnalysisStore:
         self._connection: sqlite3.Connection | None = None
         self._artifact_connection: sqlite3.Connection | None = None
         self._connection_lock = threading.RLock()
-        self._refresh_lock = threading.RLock()
+        # Source inventory/overlays and graph publication have independent
+        # lifetimes. Never hold the source lock while deriving/materializing.
+        self._source_lock = threading.RLock()
+        self._graph_lock = threading.RLock()
         self._disk_graph: object | None = None
         self._overlay_graph: object | None = None
         self._overlays: dict[str, tuple[object | None, int, str]] = {}
@@ -340,6 +343,10 @@ class AnalysisStore:
 
     def _scan_disk(self) -> _DiskScan:
         """Read the current source inventory, hashing only stat changes."""
+        with self._source_lock:
+            return self._scan_disk_locked()
+
+    def _scan_disk_locked(self) -> _DiskScan:
         from emend.file_collection import collect_all_source_files
         from emend.language_registry import (
             detect_language,
@@ -743,7 +750,7 @@ class AnalysisStore:
         """
         from emend.fact_graph import FactGraph
 
-        with self._refresh_lock:
+        with self._graph_lock:
             graph = graph or self.query_facts()
             source_path = getattr(graph, "_db_path", None)
             if source_path is None:
@@ -840,14 +847,19 @@ class AnalysisStore:
         )
 
     def _ensure_overlay_facts(self, disk_graph):
-        snapshot = self._overlay_snapshot(disk_graph.snapshot)
+        with self._source_lock:
+            snapshot = self._overlay_snapshot(disk_graph.snapshot) if self._overlays else None
+            contents = {path: value[2] for path, value in self._overlays.items()}
+        if snapshot is None:
+            self._discard_overlay_graph()
+            return disk_graph
         if (self._overlay_graph is not None
                 and self._overlay_graph.snapshot.snapshot_id == snapshot.snapshot_id):
             return self._overlay_graph
         previous_path = self._graph_path(self._overlay_graph)
         graph, path = self._updated_graph(
             self._overlay_graph or disk_graph, snapshot,
-            {path: value[2] for path, value in self._overlays.items()},
+            contents,
         )
         self._overlay_graph = graph
         if previous_path != path:
@@ -904,7 +916,7 @@ class AnalysisStore:
         if cached is not None and cached[0] == key:
             return cached[1]
         available = oracle.is_available()
-        if self._overlays and not getattr(oracle, "supports_source_overrides", False):
+        if any(r.origin == "overlay" for r in graph.snapshot.files) and not getattr(oracle, "supports_source_overrides", False):
             # Pyrefly and the compiler API read disk themselves.  They cannot
             # produce a result for this coherent overlay generation.
             paths: list[Path] = []
@@ -917,9 +929,6 @@ class AnalysisStore:
         typed, typed_path = self._clone_graph(base_path, graph.snapshot)
         typed.bind_snapshot(
             graph.snapshot,
-            source_overrides={
-                path: value[2] for path, value in self._overlays.items()
-            },
             source_loader=self._revision_source,
         )
         type_facts: list[TypeFact] = []
@@ -954,11 +963,7 @@ class AnalysisStore:
         # its answer under the generation captured before that subprocess
         # started; refresh once and fail rather than returning a mismatch if
         # the project is being edited continuously.
-        current_disk = self._scan_disk().snapshot
-        current_id = (
-            self._overlay_snapshot(current_disk).snapshot_id
-            if self._overlays else current_disk.snapshot_id
-        )
+        current_id = self.source_snapshot().snapshot_id
         if current_id != graph.snapshot.snapshot_id:
             typed.close()
             self._unlink(typed_path)
@@ -980,7 +985,7 @@ class AnalysisStore:
         self, *, include_types: bool = False, type_engine: str = "auto"
     ):
         """Return the current facts, optionally with an owner-managed type view."""
-        with self._refresh_lock:
+        with self._graph_lock:
             scan = self._scan_disk()
             disk_graph = self._disk_graph
             if (
@@ -1002,21 +1007,20 @@ class AnalysisStore:
                         and revision.file_path in prior_scan.contents
                     })
                     disk_graph = self._ensure_disk_facts(scan)
-            graph = self._ensure_overlay_facts(disk_graph) if self._overlays else disk_graph
+            graph = self._ensure_overlay_facts(disk_graph)
             if not include_types:
                 return graph
             return self._typed_facts(graph, type_engine)
 
     def source_snapshot(self) -> AnalysisSnapshot:
         """Return current disk/overlay identity without constructing a graph."""
-        with self._refresh_lock:
+        with self._source_lock:
             disk = self._scan_disk().snapshot
             return self._overlay_snapshot(disk) if self._overlays else disk
 
     def disk_snapshot(self) -> AnalysisSnapshot:
         """Return current on-disk identity without constructing derived facts."""
-        with self._refresh_lock:
-            return self._scan_disk().snapshot
+        return self._scan_disk().snapshot
 
     def type_context_id(self) -> str:
         """Return configuration, lockfile, and environment identity."""
@@ -1072,13 +1076,14 @@ class AnalysisStore:
 
         _, language_extensions = registry_snapshot()
         if graph is None:
-            scan = self._scan_disk()
-            snapshot = (self._overlay_snapshot(scan.snapshot)
-                        if include_overlays and self._overlays else scan.snapshot)
-            contents = scan.contents | (
-                {path: value[2] for path, value in self._overlays.items()}
-                if include_overlays else {}
-            )
+            with self._source_lock:
+                scan = self._scan_disk()
+                snapshot = (self._overlay_snapshot(scan.snapshot)
+                            if include_overlays and self._overlays else scan.snapshot)
+                contents = scan.contents | (
+                    {path: value[2] for path, value in self._overlays.items()}
+                    if include_overlays else {}
+                )
             files = self._extract_revisions(snapshot.files, contents)
             imports_by_path = {
                 file.revision.file_path: [(row[1], row[2] or None)
@@ -1267,13 +1272,12 @@ class AnalysisStore:
         graph: object | None = None,
     ) -> dict[str, str]:
         """Compute cache identities against one source generation."""
-        with self._refresh_lock:
-            revisions, dependencies = self._type_dependency_state(
-                graph, include_overlays=include_overlays
-            )
-            return self._type_identities(
-                file_paths, content_hashes, revisions, dependencies
-            )
+        revisions, dependencies = self._type_dependency_state(
+            graph, include_overlays=include_overlays
+        )
+        return self._type_identities(
+            file_paths, content_hashes, revisions, dependencies
+        )
 
     def type_file_inputs(
         self,
@@ -1283,27 +1287,24 @@ class AnalysisStore:
         graph: object | None = None,
     ) -> tuple[dict[str, str], dict[str, str], set[str]]:
         """Capture identities, transitive sources, and project file membership."""
-        with self._refresh_lock:
-            paths = [str(Path(path).resolve()) for path in file_paths]
-            revisions, dependencies = self._type_dependency_state(
-                graph, include_overlays=include_overlays
-            )
-            paths = [path for path in paths if path in revisions]
-            identities = self._type_identities(
-                paths, None, revisions, dependencies
-            )
-            inputs, pending = set(paths), list(paths)
-            while pending:
-                dependency = pending.pop()
-                for child in dependencies.get(dependency, ()):
-                    if child not in inputs:
-                        inputs.add(child)
-                        pending.append(child)
-            return (
-                identities,
-                {path: self._revision_source(revisions[path]) for path in inputs},
-                set(revisions),
-            )
+        paths = [str(Path(path).resolve()) for path in file_paths]
+        revisions, dependencies = self._type_dependency_state(
+            graph, include_overlays=include_overlays
+        )
+        paths = [path for path in paths if path in revisions]
+        identities = self._type_identities(paths, None, revisions, dependencies)
+        inputs, pending = set(paths), list(paths)
+        while pending:
+            dependency = pending.pop()
+            for child in dependencies.get(dependency, ()):
+                if child not in inputs:
+                    inputs.add(child)
+                    pending.append(child)
+        return (
+            identities,
+            {path: self._revision_source(revisions[path]) for path in inputs},
+            set(revisions),
+        )
 
     def update_overlay(
         self,
@@ -1314,7 +1315,7 @@ class AnalysisStore:
         owner: object | None = None,
     ) -> OverlayUpdate:
         """Publish a monotonic editor-buffer revision."""
-        with self._refresh_lock:
+        with self._source_lock:
             resolved = str(Path(file_path).resolve())
             current = self._overlays.get(resolved)
             same_owner = current is not None and current[0] is owner
@@ -1338,7 +1339,7 @@ class AnalysisStore:
         owner: object | None = None,
     ) -> OverlayUpdate:
         """Remove an editor overlay unless the close notification is stale."""
-        with self._refresh_lock:
+        with self._source_lock:
             resolved = str(Path(file_path).resolve())
             current = self._overlays.get(resolved)
             accepted = current is not None and (
@@ -1346,8 +1347,6 @@ class AnalysisStore:
             ) and (version is None or version >= current[1])
             if accepted:
                 del self._overlays[resolved]
-                if not self._overlays:
-                    self._discard_overlay_graph()
             return OverlayUpdate(
                 resolved, version, accepted,
                 None if accepted else current[1] if current else None,
@@ -1355,16 +1354,14 @@ class AnalysisStore:
 
     def remove_overlays(self, owner: object) -> int:
         """Release every overlay still owned by one editor session."""
-        with self._refresh_lock:
+        with self._source_lock:
             paths = [path for path, value in self._overlays.items()
                      if value[0] is owner]
             for path in paths:
                 del self._overlays[path]
-            if paths and not self._overlays:
-                self._discard_overlay_graph()
             return len(paths)
 
     def overlay_content(self, file_path: str | Path) -> str | None:
-        with self._refresh_lock:
+        with self._source_lock:
             value = self._overlays.get(str(Path(file_path).resolve()))
             return value[2] if value else None
