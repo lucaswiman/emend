@@ -117,7 +117,7 @@ def _typescript_module(raw: str, module_name: str) -> str | None:
     raw = _strip_import_extension(raw)
     if not raw.startswith(("./", "../")):
         return raw
-    current = module_name.replace("::", "/").replace(".", "/")
+    current = module_name.replace("::", "/")
     resolved = posixpath.normpath(posixpath.join(posixpath.dirname(current), raw))
     return None if resolved == ".." or resolved.startswith("../") else resolved
 
