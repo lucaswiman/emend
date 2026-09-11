@@ -1783,6 +1783,28 @@ impl ScopeResolver {
             }
         }
 
+        // Identifier and aggregate-path references differ only in resolution.
+        let mut record_reference = |lexical_qn: String, target: Option<(String, Option<String>)>| {
+            let resolved = target.is_some();
+            let (qn, import_binding_id) = target.unwrap_or_else(|| (lexical_qn.clone(), None));
+            if resolved {
+                qn_set.insert(qn.clone());
+            }
+            refs.push(Reference {
+                file: file_path.to_path_buf(),
+                line: node.start_position().row + 1,
+                column: node.start_position().column,
+                byte_offset: node.start_byte(),
+                end_byte: node.end_byte(),
+                lexical_qn,
+                qn: QualifiedName { name: qn },
+                resolved,
+                import_binding_id,
+                kind: self.classify_reference(&node, in_import),
+                in_annotation,
+            });
+        };
+
         // Process identifier nodes (but not those that are the name part of an
         // attribute access — we handle those at the attribute level).
         let is_identifier_node = node_kind == self.config.pattern_matching.identifier
@@ -1799,44 +1821,12 @@ impl ScopeResolver {
             let is_keyword = self.config.language.keywords.iter().any(|k| k == name);
 
             if !is_attr_name && !self.is_qualified_component(&node) && !is_keyword {
-                let kind = self.classify_reference(&node, in_import);
-                
                 let resolved = self.resolve_identifier_detail(
                     name, node.start_byte(), module_path,
                     scopes, scope_index, imports,
                     current_scope,
                 );
-                if let Some((qn, import_binding_id)) = resolved {
-                    qn_set.insert(qn.clone());
-                    refs.push(Reference {
-                        file: file_path.to_path_buf(),
-                        // Convert tree-sitter 0-indexed row to 1-indexed line.
-                        line: node.start_position().row + 1,
-                        column: node.start_position().column,
-                        byte_offset: node.start_byte(),
-                        end_byte: node.end_byte(),
-                        lexical_qn: name.to_string(),
-                        qn: QualifiedName { name: qn },
-                        resolved: true,
-                        import_binding_id,
-                        kind,
-                        in_annotation,
-                    });
-                } else {
-                    refs.push(Reference {
-                        file: file_path.to_path_buf(),
-                        line: node.start_position().row + 1,
-                        column: node.start_position().column,
-                        byte_offset: node.start_byte(),
-                        end_byte: node.end_byte(),
-                        lexical_qn: name.to_string(),
-                        qn: QualifiedName { name: name.to_string() },
-                        resolved: false,
-                        import_binding_id: None,
-                        kind,
-                        in_annotation,
-                    });
-                }
+                record_reference(name.to_string(), resolved);
             }
         }
 
@@ -1848,7 +1838,6 @@ impl ScopeResolver {
         let is_scoped_path = !path_cfg.scoped_identifier.is_empty()
             && node_kind == path_cfg.scoped_identifier;
         if (is_attribute || is_scoped_path) && !self.is_qualified_component(&node) {
-            let kind = self.classify_reference(&node, in_import);
             if let Some(full_name) = self.collect_dotted_name(&node, source) {
                 let receiver_qn = if is_attribute {
                     self.resolve_receiver_method(
@@ -1863,37 +1852,7 @@ impl ScopeResolver {
                         &full_name, node.start_byte(), module_path,
                         scopes, scope_index, imports, current_scope,
                     ));
-                if let Some((qn, import_binding_id)) = resolved {
-                    qn_set.insert(qn.clone());
-                    refs.push(Reference {
-                        file: file_path.to_path_buf(),
-                        // Convert tree-sitter 0-indexed row to 1-indexed line.
-                        line: node.start_position().row + 1,
-                        column: node.start_position().column,
-                        byte_offset: node.start_byte(),
-                        end_byte: node.end_byte(),
-                        lexical_qn: full_name,
-                        qn: QualifiedName { name: qn },
-                        resolved: true,
-                        import_binding_id,
-                        kind,
-                        in_annotation,
-                    });
-                } else {
-                    refs.push(Reference {
-                        file: file_path.to_path_buf(),
-                        line: node.start_position().row + 1,
-                        column: node.start_position().column,
-                        byte_offset: node.start_byte(),
-                        end_byte: node.end_byte(),
-                        lexical_qn: full_name.clone(),
-                        qn: QualifiedName { name: full_name },
-                        resolved: false,
-                        import_binding_id: None,
-                        kind,
-                        in_annotation,
-                    });
-                }
+                record_reference(full_name, resolved);
             }
         }
 

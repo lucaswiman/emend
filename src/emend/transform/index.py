@@ -79,42 +79,20 @@ def _extract_noqa_lines(source: str) -> set[int]:
 
 
 def _check_cache_hits(
-    db_path: str, file_revisions: list[tuple[str, bytes]]
+    conn: sqlite3.Connection, file_revisions: list[tuple[str, bytes]]
 ) -> set[tuple[str, bytes]]:
-    """Pre-check which exact file revisions have a QN cache entry.
-
-    Returns the set of ``(resolved path, hash)`` revisions in ``qn_index``.
-    The derived tables
-    (``symbol_index``, ``import_graph``, ``reference_index``) are written in
-    lockstep with ``qn_index``, so a QN-cache hit implies their rows are
-    current and a QN-cache miss means all of them must be re-derived — only
-    ``qn_index`` needs to be probed. On any error, returns an empty set so
-    the caller processes everything.
-    """
-    import sqlite3
-
+    """QN markers and derived rows are committed together; probe only markers."""
     cached_qn: set[tuple[str, bytes]] = set()
-    if not file_revisions:
-        return cached_qn
     try:
-        conn_check = sqlite3.connect(db_path, timeout=30)
-        conn_check.execute("PRAGMA journal_mode=WAL")
-        conn_check.execute("PRAGMA synchronous=NORMAL")
-        try:
-            for file_path, content_hash in file_revisions:
-                resolved = str(Path(file_path).resolve())
-                row = conn_check.execute(
-                    "SELECT 1 FROM qn_index WHERE file_path = ? AND hash = ?",
-                    (resolved, content_hash),
-                ).fetchone()
-                if row is not None:
-                    cached_qn.add((resolved, content_hash))
-        except sqlite3.Error:
-            logger.debug("qn_index cache pre-check query failed", exc_info=True)
-        conn_check.close()
+        for file_path, content_hash in file_revisions:
+            resolved = str(Path(file_path).resolve())
+            if conn.execute(
+                "SELECT 1 FROM qn_index WHERE file_path = ? AND hash = ?",
+                (resolved, content_hash),
+            ).fetchone() is not None:
+                cached_qn.add((resolved, content_hash))
     except sqlite3.Error:
-        # If pre-check fails, caller processes everything
-        logger.debug("qn_index cache pre-check failed", exc_info=True)
+        logger.debug("qn_index cache pre-check query failed", exc_info=True)
     return cached_qn
 
 
@@ -241,23 +219,21 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
         for py_file, content in file_batch
     ]
     cached_qn = _check_cache_hits(
-        db_path, [(path, digest) for digest, path, _ in file_hashes]
+        conn, [(path, digest) for digest, path, _ in file_hashes]
     )
 
     skipped = 0
     processed = 0
     row_counts = [0] * 5
     for content_hash, py_file, content in file_hashes:
-        need_qn = (str(Path(py_file).resolve()), content_hash) not in cached_qn
         # The QN cache is the core index. The derived tables (symbol_index,
         # import_graph, reference_index) may legitimately have zero rows for a
         # given file (e.g. a file with only assignments has no symbols) and are
         # written in lockstep with the QN cache, so we re-derive all of them
         # exactly when the QN cache entry is missing.
-        if not need_qn:
+        if (str(Path(py_file).resolve()), content_hash) in cached_qn:
             skipped += 1
             continue
-        need_sym = need_import = need_ref = True
 
         processed += 1
         qn_rows: list[tuple[str, bytes, bytes]] = []
@@ -269,14 +245,13 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
         # Use Rust scope resolver for QN and reference collection
         # (replaces expensive MetadataWrapper + _QNCollector + _RefIndexCollector).
         scope_indexed = False
-        if need_qn or need_ref:
-            try:
-                scope_resolver.index_file(py_file, content)
-                scope_indexed = True
-            except Exception:
-                logger.debug("scope indexing failed for %s", py_file, exc_info=True)
+        try:
+            scope_resolver.index_file(py_file, content)
+            scope_indexed = True
+        except Exception:
+            logger.debug("scope indexing failed for %s", py_file, exc_info=True)
 
-        if need_qn and scope_indexed:
+        if scope_indexed:
             try:
                 all_qnames = set(scope_resolver.all_qnames_in_file(py_file))
             except Exception:
@@ -288,69 +263,68 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
                 )
                 qn_rows.append((str(Path(py_file).resolve()), content_hash, qn_blob))
 
-        if need_sym:
-            try:
-                syms_for_file = _collect_symbols_ts(Path(py_file), content)
-            except BUG_EXCEPTIONS:
-                raise
-            except Exception:
-                logger.debug("symbol collection failed for %s", py_file, exc_info=True)
-                syms_for_file = []
+        try:
+            syms_for_file = _collect_symbols_ts(Path(py_file), content)
+        except BUG_EXCEPTIONS:
+            raise
+        except Exception:
+            logger.debug("symbol collection failed for %s", py_file, exc_info=True)
+            syms_for_file = []
 
-            # Compute module_qn prefix for this file.
-            _src = Path(source_root)
-            _proj = Path(project_root)
-            _abs = Path(py_file).resolve()
+        # Compute module_qn prefix for this file.
+        _src = Path(source_root)
+        _proj = Path(project_root)
+        _abs = Path(py_file).resolve()
+        try:
+            _rel = _abs.relative_to(_src)
+        except ValueError:
             try:
-                _rel = _abs.relative_to(_src)
+                _rel = _abs.relative_to(_proj)
             except ValueError:
-                try:
-                    _rel = _abs.relative_to(_proj)
-                except ValueError:
-                    _rel = None
+                _rel = None
 
-            if _rel is not None:
-                _module_prefix = ".".join(
-                    list(_rel.parts[:-1]) + [_rel.stem]
-                )
+        if _rel is not None:
+            _module_prefix = ".".join(
+                list(_rel.parts[:-1]) + [_rel.stem]
+            )
 
-                # __all__ membership and noqa for dead-code pre-filtering.
-                exported_names = _extract_all_exports_text(content)
-                noqa_lines = _extract_noqa_lines(content)
+            # __all__ membership and noqa for dead-code pre-filtering.
+            exported_names = _extract_all_exports_text(content)
+            noqa_lines = _extract_noqa_lines(content)
 
-                for sym in syms_for_file:
-                    # Build qualified_name from file module path + symbol path
-                    # For index batch, use the dotted symbol path from the selector
-                    parts = sym.path.split("::", 1)
-                    dotted = parts[1] if len(parts) > 1 else sym.name
-                    m_qn = f"{_module_prefix}.{dotted}"
-                    sig = None
-                    if sym.parameters:
-                        ret_str = f" -> {sym.returns}" if sym.returns else ""
-                        sig = f"def {sym.name}({', '.join(sym.parameters)}){ret_str}"
-                    sym_rows.append((
-                        content_hash,
-                        py_file,
-                        sym.name,
-                        dotted,
-                        m_qn,
-                        sym.kind,
-                        sym.line,
-                        sym.end_line,
-                        sym.depth,
-                        sym.parent,
-                        ",".join(sym.bases) if getattr(sym, "bases", None) else None,
-                        sig,
-                        sym.returns,
-                        ",".join(sym.decorators) if sym.decorators else None,
-                        int(_is_likely_entry_point(
-                            sym.name, sym.kind, sym.decorators, sym.depth,
-                        )),
-                        int(sym.name in exported_names),
-                        int(sym.line in noqa_lines),
-                    ))
+            for sym in syms_for_file:
+                # Build qualified_name from file module path + symbol path
+                # For index batch, use the dotted symbol path from the selector
+                parts = sym.path.split("::", 1)
+                dotted = parts[1] if len(parts) > 1 else sym.name
+                m_qn = f"{_module_prefix}.{dotted}"
+                sig = None
+                if sym.parameters:
+                    ret_str = f" -> {sym.returns}" if sym.returns else ""
+                    sig = f"def {sym.name}({', '.join(sym.parameters)}){ret_str}"
+                sym_rows.append((
+                    content_hash,
+                    py_file,
+                    sym.name,
+                    dotted,
+                    m_qn,
+                    sym.kind,
+                    sym.line,
+                    sym.end_line,
+                    sym.depth,
+                    sym.parent,
+                    ",".join(sym.bases) if getattr(sym, "bases", None) else None,
+                    sig,
+                    sym.returns,
+                    ",".join(sym.decorators) if sym.decorators else None,
+                    int(_is_likely_entry_point(
+                        sym.name, sym.kind, sym.decorators, sym.depth,
+                    )),
+                    int(sym.name in exported_names),
+                    int(sym.line in noqa_lines),
+                ))
 
-        if need_import and scope_indexed:
+        if scope_indexed:
             try:
                 file_imports = scope_resolver.imports_in_file(py_file)
             except Exception:
@@ -360,7 +334,7 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
                 if _mod:
                     import_rows.append((content_hash, py_file, _mod))
 
-        if need_ref and scope_indexed:
+        if scope_indexed:
             try:
                 file_refs = scope_resolver.references_in_file(py_file)
             except Exception:
@@ -402,8 +376,6 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
         rows = (qn_rows, sym_rows, import_rows, ref_rows, dsl_rows)
         _write_index_rows(conn, *rows)
         row_counts = [count + len(batch) for count, batch in zip(row_counts, rows)]
-
-    # Cozo facts are materialized separately by AnalysisStore.query_facts().
 
     return (processed, row_counts[0], skipped, *row_counts[1:])
 
@@ -1078,7 +1050,7 @@ def get_index_status(project_path: str) -> dict | None:
         return None
 
 
-def _warm_caches_impl(
+def warm_caches(
     project_path: str = ".",
     *,
     jobs: int | None = None,
@@ -1353,29 +1325,6 @@ def _warm_type_cache(
         len(results), engine_name, time.monotonic() - t_type,
     )
     return {"type_cached": len(results), "type_engine": engine_name}
-
-
-def warm_caches(
-    project_path: str = ".",
-    *,
-    jobs: int | None = None,
-    callback: Callable[[str, str], None] | None = None,
-    type_engine: str | None = "pyrefly",
-    language: str = "python",
-    build_fts: bool = True,
-    build_duplicates: bool = False,
-) -> dict[str, int | str]:
-    """Compatibility entry point for eager derived-cache warming."""
-    stats = _warm_caches_impl(
-        project_path,
-        jobs=jobs,
-        callback=callback,
-        type_engine=type_engine,
-        language=language,
-        build_fts=build_fts,
-        build_duplicates=build_duplicates,
-    )
-    return stats
 
 
 def _ensure_cache_ignore_files(project_root: str) -> None:

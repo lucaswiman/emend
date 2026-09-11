@@ -470,13 +470,6 @@ class AnalysisStore:
         self,
         revisions: Iterable[FileRevision],
         contents: dict[str, str],
-    ) -> list[ExtractedFile]:
-        return list(self._iter_extracted_revisions(revisions, contents))
-
-    def _iter_extracted_revisions(
-        self,
-        revisions: Iterable[FileRevision],
-        contents: dict[str, str],
         *, prepare=None, prepared=None, jobs=None,
     ) -> Iterable[ExtractedFile]:
         """Load content-addressed revision artifacts or extract them once."""
@@ -1066,7 +1059,7 @@ class AnalysisStore:
                 raise RuntimeError("fact writer ended before extraction")
 
             def files():
-                for file in self._iter_extracted_revisions(
+                for file in self._extract_revisions(
                     scan.snapshot.files, scan.contents,
                     prepare=prepare, prepared=prepared, jobs=jobs,
                 ):
@@ -1200,7 +1193,7 @@ class AnalysisStore:
                         {path: value[2] for path, value in self._overlays.items()}
                         if include_overlays else {}
                     )
-                files = self._iter_extracted_revisions(snapshot.files, contents)
+                files = self._extract_revisions(snapshot.files, contents)
             imports_by_path = {
                 file.revision.file_path: [(row[1], row[2] or None)
                                          for row in file.rows.get("imports", ())]

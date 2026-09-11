@@ -191,76 +191,20 @@ def _db_row_count(db_path: Path, table: str) -> int:
 class TestIndexBatchCacheHit:
     """Unit tests for _index_batch cache-hit fast path."""
 
-    def test_cold_cache_indexes_file(self, tmp_path):
-        """First run writes parse, qn, symbol, import, and ref entries."""
+    @pytest.mark.parametrize("legacy_schema", [False, True])
+    def test_cold_then_warm_cache_preserves_rows(self, tmp_path, legacy_schema):
         from emend.transform import _index_batch
 
         db_path = tmp_path / "parse.db"
-        batch = [(str(tmp_path / "a.py"), SOURCE)]
-        processed_n, qn_n, skipped, sym_n, import_n, ref_n, dsl_n = _index_batch(
-            (str(db_path), str(tmp_path), str(tmp_path), batch)
-        )
-
-        assert processed_n == 1
-        assert qn_n == 1
-        assert skipped == 0
-        # SOURCE has one function "hello" — should have at least 1 symbol
-        assert sym_n >= 1
-
-    def test_warm_cache_skips_file(self, tmp_path):
-        """Second run with same content skips the file entirely."""
-        from emend.transform import _index_batch
-
-        db_path = tmp_path / "parse.db"
-        batch = [(str(tmp_path / "a.py"), SOURCE)]
-
-        # Cold run
-        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
-
-        # Warm run — must skip
-        processed_n, qn_n, skipped, sym_n, import_n, ref_n, dsl_n = _index_batch(
-            (str(db_path), str(tmp_path), str(tmp_path), batch)
-        )
-        assert processed_n == 0
-        assert qn_n == 0
-        assert sym_n == 0
-        assert skipped == 1
-
-    def test_warm_cache_no_extra_db_rows(self, tmp_path):
-        """Warm run must not increase the row count in the DB."""
-        from emend.transform import _index_batch
-
-        db_path = tmp_path / "parse.db"
-        batch = [(str(tmp_path / "a.py"), SOURCE)]
-
-        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
-        rows_after_cold = _db_row_count(db_path, "qn_index")
-
-        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
-        rows_after_warm = _db_row_count(db_path, "qn_index")
-
-        assert rows_after_cold == rows_after_warm == 1
-
-    def test_partial_cache_only_missing_part_indexed(self, tmp_path):
-        """If qn_index is missing for a file, it is indexed on next run."""
-        from emend.transform import _index_batch
-
-        db_path = tmp_path / "parse.db"
-
-        # Create DB with schema but no qn_index entries for this file
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE IF NOT EXISTS qn_index (hash BLOB PRIMARY KEY, qnames BLOB)")
-        conn.commit()
-        conn.close()
-
-        batch = [(str(tmp_path / "a.py"), SOURCE)]
-        processed_n, qn_n, skipped, sym_n, import_n, ref_n, dsl_n = _index_batch(
-            (str(db_path), str(tmp_path), str(tmp_path), batch)
-        )
-
-        assert processed_n == 1  # file processed
-        assert qn_n == 1    # was missing, now added
-        assert skipped == 0  # not fully cached, so not counted as skipped
+        if legacy_schema:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("CREATE TABLE qn_index (hash BLOB PRIMARY KEY, qnames BLOB)")
+        args = (str(db_path), str(tmp_path), str(tmp_path),
+                [(str(tmp_path / "a.py"), SOURCE)])
+        assert _index_batch(args)[:4] == (1, 1, 0, 1)
+        assert _db_row_count(db_path, "qn_index") == 1
+        assert _index_batch(args) == (0, 0, 1, 0, 0, 0, 0)
+        assert _db_row_count(db_path, "qn_index") == 1
 
 
 class TestWarmCachesSkipped:
@@ -272,97 +216,23 @@ class TestWarmCachesSkipped:
         (proj / "b.py").write_text("x = 1\n")
         return proj
 
-    def test_cold_run_no_skips(self, tmp_path):
-        """Cold run reports zero skipped files."""
-        from emend.transform import warm_caches
-
-        proj = self._make_project(tmp_path)
-        stats = warm_caches(str(proj), type_engine=None)
-
-        assert stats["skipped"] == 0
-        assert stats["indexed"] == 2
-        assert stats["qn_cached"] == 2
-
-    def test_index_stream_does_not_require_process_support(
-        self, tmp_path, monkeypatch
-    ):
-        """Indexing still works where multiprocessing is unavailable."""
-        import concurrent.futures
-
-        from emend.transform import warm_caches
-
-        project = self._make_project(tmp_path)
-        attempts = []
-        real_thread_pool = concurrent.futures.ThreadPoolExecutor
-
-        class ForbiddenProcessPool:
-            def __init__(self, *args, **kwargs):
-                attempts.append("process")
-
-            def map(self, *args, **kwargs):
-                raise PermissionError("multiprocessing is unavailable")
-
-            def shutdown(self, **kwargs):
-                pass
-
-        class TrackingThreadPool(real_thread_pool):
-            def __init__(self, *args, **kwargs):
-                attempts.append("thread")
-                super().__init__(*args, **kwargs)
-
-        monkeypatch.setattr(
-            concurrent.futures, "ProcessPoolExecutor", ForbiddenProcessPool
-        )
-        monkeypatch.setattr(
-            concurrent.futures, "ThreadPoolExecutor", TrackingThreadPool
-        )
-
-        stats = warm_caches(str(project), type_engine=None)
-
-        assert attempts and set(attempts) == {"thread"}
-        assert stats["indexed"] == 2
-        assert stats["qn_cached"] == 2
-
-    def test_warm_run_all_skipped(self, tmp_path):
-        """Second run on unchanged project skips every file."""
-        from emend.transform import warm_caches
-
-        proj = self._make_project(tmp_path)
-        warm_caches(str(proj), type_engine=None)  # cold
-
-        stats = warm_caches(str(proj), type_engine=None)  # warm
-        assert stats["skipped"] == 2
-        assert stats["indexed"] == 0
-        assert stats["qn_cached"] == 0
-
-    def test_warm_run_is_fast(self, tmp_path):
-        """Warm run completes much faster than cold run (basic sanity check)."""
-        import time
-        from emend.transform import warm_caches
-
-        proj = self._make_project(tmp_path)
-        warm_caches(str(proj), type_engine=None)  # cold
-
-        t0 = time.monotonic()
-        warm_caches(str(proj), type_engine=None)  # warm
-        warm_elapsed = time.monotonic() - t0
-
-        # Even for 2 files, warm run should be well under 5 seconds.
-        assert warm_elapsed < 5.0
-
-    def test_warm_run_does_not_rebuild_facts(self, tmp_path):
-        """An unchanged parse index implies the persisted facts are current."""
+    def test_cold_then_warm_index_reuses_facts_without_processes(self, tmp_path, monkeypatch):
         from emend.analysis_store import AnalysisStore
         from emend.transform import warm_caches
 
-        proj = self._make_project(tmp_path)
-        store = AnalysisStore.open(proj)
-        warm_caches(str(proj), type_engine=None)
-        first = store.query_facts()
-
-        warm_caches(str(proj), type_engine=None)
-        second = store.query_facts()
-        assert second is first
+        def forbidden(*args, **kwargs):
+            pytest.fail("unexpected process-pool startup or warm-cache extraction")
+        monkeypatch.setattr("concurrent.futures.ProcessPoolExecutor", forbidden)
+        project = self._make_project(tmp_path)
+        store = AnalysisStore.open(project)
+        for expected in ((0, 2, 2), (2, 0, 0)):
+            stats = warm_caches(str(project), type_engine=None)
+            assert tuple(stats[key] for key in ("skipped", "indexed", "qn_cached")) == expected
+            if expected[0] == 0:
+                first = store.query_facts()
+                monkeypatch.setattr("emend.analysis_extraction._extract_file_facts", forbidden)
+            else:
+                assert store.query_facts() is first
 
 
 def test_duplicate_cache_hit_does_not_build_scope_resolver(tmp_path, monkeypatch):

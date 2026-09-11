@@ -138,20 +138,7 @@ def _parse_toml_extensions(
     payload: bytes, label: str
 ) -> tuple[str, list[str]] | None:
     """Return (language_name, [extensions]) from a config.toml, or None on error."""
-    if sys.version_info >= (3, 11):
-        import tomllib
-    else:
-        try:
-            import tomli as tomllib  # type: ignore[no-redef]
-        except ImportError:
-            return None
-    try:
-        data = tomllib.loads(payload.decode())
-    except (UnicodeError, ValueError):
-        # TOMLDecodeError subclasses ValueError in both tomllib and tomli.
-        logger.debug("Could not parse %s", label, exc_info=True)
-        return None
-
+    data = _parse_config_payload(payload, label)
     lang = data.get("language", {})
     name = lang.get("name")
     exts = lang.get("file_extensions", [])
@@ -364,7 +351,7 @@ def load_config(
     return _load_config(language, config_identity(language), config_path)
 
 
-def _parse_config_payload(payload: str, label: str) -> dict:
+def _parse_config_payload(payload: str | bytes, label: str) -> dict:
     if sys.version_info >= (3, 11):
         import tomllib
     else:
@@ -373,7 +360,7 @@ def _parse_config_payload(payload: str, label: str) -> dict:
         except ImportError:
             return {}
     try:
-        return tomllib.loads(payload)
+        return tomllib.loads(payload.decode() if isinstance(payload, bytes) else payload)
     except (UnicodeError, ValueError):
         logger.debug("Could not parse language config %s", label, exc_info=True)
         return {}
@@ -386,20 +373,9 @@ def _load_config(language: str, _identity: str, config_path: Path | None) -> dic
         return {}
 
     try:
-        if sys.version_info >= (3, 11):
-            import tomllib
-            with open(config_path, "rb") as fh:
-                return tomllib.load(fh)
-        else:
-            # Fallback for Python < 3.11: use tomli if available, else empty
-            try:
-                import tomli
-                return tomli.loads(config_path.read_text())
-            except ImportError:
-                return {}
-    except (OSError, ValueError):
-        # TOMLDecodeError subclasses ValueError in both tomllib and tomli.
-        logger.debug("Could not parse %s", config_path, exc_info=True)
+        return _parse_config_payload(config_path.read_bytes(), str(config_path))
+    except OSError:
+        logger.debug("Could not read %s", config_path, exc_info=True)
         return {}
 
 

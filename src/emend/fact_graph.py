@@ -72,27 +72,10 @@ class DeadSymbolFact(SymbolFact):
 # ---------------------------------------------------------------------------
 
 def _create_cozo_client(db_path: str | None = None) -> Any:
-    """Create a CozoDB client with the SQLite backend.
+    """Use the required native backend, in memory unless a path is supplied."""
+    from emend.emend_core import PyCozoDb
 
-    Uses the Rust ``PyCozoDb`` exposed by ``emend_core`` (compiled
-    with the ``cozo`` crate).  Falls back to ``pycozo.Client`` if
-    available (for standalone testing outside the full build).
-
-    If *db_path* is ``None``, uses a temporary in-memory database.
-    """
-    try:
-        from emend import emend_core  # type: ignore[attr-defined]
-        if db_path is None:
-            return emend_core.PyCozoDb("mem", "")
-        return emend_core.PyCozoDb("sqlite", str(db_path))
-    except (ImportError, AttributeError):
-        pass
-
-    # Fallback: use pycozo Python package if available
-    from pycozo import Client  # type: ignore[import-untyped]
-    if db_path is None:
-        return Client("mem", "")
-    return Client("sqlite", str(db_path))
+    return PyCozoDb("mem", "") if db_path is None else PyCozoDb("sqlite", str(db_path))
 
 
 _SCHEMA_INIT = """\
@@ -716,19 +699,9 @@ class FactGraph:
 
     def _run_mutations(self, operations: list[tuple[str, dict[str, Any]]]) -> None:
         """Run generated mutations in one synchronous Cozo transaction."""
-        if not operations:
-            return
-        run_transaction = getattr(self._client, "run_transaction", None)
-        if run_transaction is not None:
-            run_transaction(operations)
-            return
-        queries, bindings = [], {}
-        for index, (query, params) in enumerate(operations):
-            # These internal statements contain only parameter uses of '$'.
-            prefix = f"mutation_{index}_"
-            queries.append("{" + query.replace("$", "$" + prefix) + "}")
-            bindings.update((prefix + key, value) for key, value in params.items())
-        self._client.run("\n".join(queries), bindings)
+        if operations:
+            self._client.run_transaction(operations)
+
 
     def add_symbols_batch(self, facts: list[SymbolFact]) -> None:
         """Bulk-insert symbol facts."""
@@ -2348,7 +2321,7 @@ class FactGraph:
 
     def _insert_extracted_facts(
         self,
-        extracted_files: list[ExtractedFile | dict[str, list[list[Any]]]],
+        extracted_files: list[ExtractedFile],
         *,
         operations: list[tuple[str, dict[str, Any]]] | None = None,
     ) -> None:
@@ -2396,12 +2369,8 @@ class FactGraph:
         }
         rows: dict[str, list[list[Any]]] = {key: [] for key in specs}
         for extracted in extracted_files:
-            # Dict support is retained only for injected legacy/test extractors.
-            extracted_rows = (
-                extracted.rows if isinstance(extracted, ExtractedFile) else extracted
-            )
             for key in specs:
-                rows[key].extend(extracted_rows.get(key, []))
+                rows[key].extend(extracted.rows.get(key, []))
 
         # Unlike the other relations, symbol's key does not contain file_path.
         # Preserve the former per-file :put behavior: a later file wins if two
