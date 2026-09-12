@@ -589,6 +589,38 @@ def test_reopened_store_reuses_revision_identity_without_hiding_same_stat_edits(
     assert reads == 1 and after.content_hash != before.content_hash
 
 
+@pytest.mark.parametrize("delete_stat", [2, 3])
+def test_scan_ignores_file_deleted_during_snapshot_boundary(
+    tmp_path, monkeypatch, delete_stat
+):
+    source = tmp_path / "app.py"
+    source.write_text("value = 1\n")
+    store = AnalysisStore.open(tmp_path)
+    first = store._scan_disk()
+    assert [revision.file_path for revision in first.snapshot.files] == [
+        str(source.resolve())
+    ]
+
+    source.write_text("value = 2\n")
+    original_stat = os.stat
+    source_stats = 0
+
+    def deleting_stat(path):
+        nonlocal source_stats
+        if os.fspath(path) == str(source.resolve()):
+            source_stats += 1
+            if source_stats == delete_stat:
+                source.unlink()
+        return original_stat(path)
+
+    monkeypatch.setattr(os, "stat", deleting_stat)
+    scan = store._scan_disk()
+
+    assert scan.snapshot.files == ()
+    assert scan.contents == {}
+    assert store._observed_files == {}
+
+
 def test_extraction_artifacts_reuse_across_content_revert(tmp_path, extracted_files):
     source = tmp_path / "app.py"
     first_content = "def first():\n    return 1\n"
