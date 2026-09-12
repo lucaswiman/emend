@@ -397,6 +397,18 @@ For each function in the file, emend:
 5. If any configured sanitizer (``not-through``) matches on the source-to-sink
    path, including at either endpoint, the violation is suppressed
 
+Sanitizers without an effect retain the argument-validation contract: a
+successful call validates the captured value. For functions that return a
+cleaned copy, declare ``{pattern: "escape($X)", effect: returns}`` instead
+(add ``label`` in trace configurations). This cleans only the returned value:
+``y = escape(x); sink(x)`` still reports a violation. The shipped presets use
+this contract for escaping and conversion functions. ``all_paths`` requires
+every value path to be sanitized; ``some_path`` accepts any sanitized path.
+Coverage from return sanitizers and argument validators is checked separately.
+Consequently, ``all_paths`` may still warn when one branch returns a cleaned
+copy and another validates the original value, even if together they cover
+every execution path.
+
 Analysis is intraprocedural (within each function body) and field-insensitive.
 
 Violations include a ``FlowWitness`` trace showing the source, propagation chain,

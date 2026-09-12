@@ -29,5 +29,5 @@ sinks:
     message: "Code injection: user input in eval()"
 
 sanitizers:
-  - {pattern: "encodeURIComponent($X)", label: user_input}
-  - {pattern: "DOMPurify.sanitize($X)", label: user_input}
+  - {pattern: "encodeURIComponent($X)", label: user_input, effect: returns}
+  - {pattern: "DOMPurify.sanitize($X)", label: user_input, effect: returns}

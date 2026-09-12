@@ -42,6 +42,41 @@ from emend.policy import (
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(("patterns", "source", "expected"), [
+    (("open($X)", "close($X)"),
+     "def first():\n    open(x)\n    close(x)\ndef second():\n    open(y)\n    close(y)\n", [2, 5]),
+    (("open($X)", "close($X)"),
+     "def f():\n    open(x)\n    open(y)\n    close(y)\n", [3]),
+    (("open()", "close()"),
+     "def f(flag):\n    if flag:\n        open()\n    else:\n        open()\n        close()\n", [5]),
+])
+def test_sequence_keeps_each_occurrence_and_capture(tmp_path, patterns, source, expected):
+    (tmp_path / "app.py").write_text(source)
+    check = SequenceCheck("seq", "bad", [
+        SequenceStep("a", patterns[0]), SequenceStep("b", patterns[1]),
+    ])
+    policy = Policy("p", "", "error", [check])
+    assert sorted(v.line for v in _run_sequence_check(check, policy, str(tmp_path))) == expected
+
+
+@pytest.mark.parametrize("blocker", ["commit(x)", "commit(y)", "commit()"])
+@pytest.mark.parametrize("position", [0, 1, 2])
+def test_sequence_blockers_use_candidate_captures(tmp_path, blocker, position):
+    body = ["open(x)", "close(x)"]
+    body.insert(position, blocker)
+    (tmp_path / "app.py").write_text(
+        "def f():\n    " + "\n    ".join(body)
+        + "\ndef g():\n    open(y)\n    close(y)\n"
+    )
+    check = SequenceCheck("seq", "bad", [
+        SequenceStep("a", "open($X)"), SequenceStep("b", "close($X)"),
+    ], [SequencePathConstraint("a", "b", not_through=["commit($X)", "commit()"])])
+    policy = Policy("p", "", "error", [check])
+    assert sorted(v.line for v in _run_sequence_check(check, policy, str(tmp_path))) == (
+        [2 + (position == 0), 6] if position != 1 or blocker == "commit(y)" else [6]
+    )
+
+
 class TestSequenceCheckParsing:
     """Test YAML parsing of sequence check definitions."""
 
@@ -303,6 +338,23 @@ def _build_linear_graph(
 class TestCompileSequenceRuleBasic:
     """Test _compile_sequence_query() with pre-built FactGraphs."""
 
+    @pytest.mark.parametrize("kind", ["reads", "writes"])
+    @pytest.mark.parametrize("target_block", [0, 1])
+    def test_effect_uses_each_occurrences_binding(self, kind, target_block):
+        graph = FactGraph()
+        locations = []
+        for fq, var in [("app.first", "x"), ("app.second", "y")]:
+            locations.append(("app.py", fq, 0, 5, {"OBJ": var}))
+            graph.add_cfg_edge(CfgEdgeFact("app.py", fq, 0, 1, "fallthrough", 5, 6))
+            graph.add_def_use(DefUseFact("app.py", fq, var, "write", 0, target_block, 5))
+            graph.add_def_use(DefUseFact("app.py", fq, var, kind[:-1], target_block, target_block, 6))
+        check = SequenceCheck("effect", "bad", [
+            SequenceStep("load", "$OBJ = load()"),
+            SequenceStep("use", effect=f"{kind}($OBJ)"),
+        ])
+        result = graph.run_query(_compile_sequence_query(check, {"load": locations}))
+        assert {row[1] for row in result["rows"]} == {"app.first", "app.second"}
+
     def test_basic_two_step_violation(self):
         """Two pattern-matched steps, both present and reachable → violation."""
         g = _build_linear_graph()
@@ -441,7 +493,8 @@ class TestCompileSequenceRuleBasic:
         # Different functions — reachability won't connect
         assert len(result["rows"]) == 0
 
-    def test_unreachable_blocks_no_violation(self):
+    @pytest.mark.parametrize("reachable_occurrence", [False, True])
+    def test_unreachable_blocks_no_violation(self, reachable_occurrence):
         """If step B's block is not CFG-reachable from step A's → no violation."""
         g = FactGraph()
         fp, fq = "app.py", "app.process"
@@ -466,10 +519,12 @@ class TestCompileSequenceRuleBasic:
             "a": [("app.py", "app.process", 0, 5, {})],
             "b": [("app.py", "app.process", 1, 6, {})],
         }
+        if reachable_occurrence:
+            step_locations["a"].append(("app.py", "app.process", 1, 6, {}))
 
         query = _compile_sequence_query(check, step_locations)
         result = g.run_query(query)
-        assert len(result["rows"]) == 0
+        assert [row[2] for row in result["rows"]] == ([6] if reachable_occurrence else [])
 
 
 class TestCompileSequenceBlockers:
@@ -914,7 +969,7 @@ class TestCompileSequenceRule:
         query, step_data = result
         assert isinstance(query, str)
         assert isinstance(step_data, dict)
-        assert step_data["bindings"] == {"FD": "fd"}
+        assert step_data["bindings"] == {"close": [{"FD": "fd"}], "use": [{"FD": "fd"}]}
         assert len(step_data["step_locations"]["close"]) == 1
         assert len(step_data["step_locations"]["use"]) == 1
         # The compiled query is runnable and finds the resolved sequence.

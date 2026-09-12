@@ -25,4 +25,4 @@ sinks:
     message: "SQL injection: user input in connection.execute()"
 
 sanitizers:
-  - {pattern: "bindparam($X)", label: user_input}
+  - {pattern: "bindparam($X)", label: user_input, effect: returns}
