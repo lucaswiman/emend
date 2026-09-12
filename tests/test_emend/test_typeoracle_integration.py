@@ -212,11 +212,13 @@ class TestFindPatternTypeOracle:
         f = tmp_path / "test.py"
         f.write_text(source)
 
-        from emend.transform import find_pattern, replace_pattern
+        from emend.transform import find_pattern, find_pattern_in_project, replace_pattern
 
         pattern = f"$X:{constraint} = $Y"
         with pytest.raises(ValueError, match="requires a type oracle"):
             find_pattern(pattern, str(f))
+        with pytest.raises(ValueError, match="requires a type oracle"):
+            find_pattern_in_project(pattern, [str(f)])
         for apply in (False, True):
             with pytest.raises(ValueError, match="requires a type oracle"):
                 replace_pattern(pattern, "$X = 3", str(f), apply=apply)

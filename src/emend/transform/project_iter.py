@@ -87,6 +87,8 @@ def find_pattern_in_project(
     Returns a list of ``ProjectPatternMatch`` (file_path + match).
     """
     from .patterns import find_pattern, PatternMatch
+    from emend.pattern import parse_pattern
+    parse_pattern(pattern_str).oracle_constraints(type_oracle)
     # Validate constraints eagerly so callers see errors immediately.
     if inside and not_inside:
         raise ValueError("Cannot specify both 'inside' and 'not_inside' parameters")

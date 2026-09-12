@@ -18,6 +18,15 @@ class Pattern:
     raw: str
     metavars: list[MetaVar]
 
+    def oracle_constraints(self, oracle) -> dict[str, tuple[str, str]]:
+        constraints = {
+            mv.name: parse_oracle_type_constraint(mv.type_constraint)
+            for mv in self.metavars if is_oracle_type_constraint(mv.type_constraint)
+        }
+        if constraints and oracle is None:
+            raise ValueError("Type-constrained matching requires a type oracle")
+        return constraints
+
 
 class PatternTransformer(Transformer):
     """Transform parse tree to Pattern with extracted metavars."""

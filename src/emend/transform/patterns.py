@@ -12,8 +12,6 @@ from ..pattern import (
     compile_pattern_to_rust_ir,
     compile_constraint_to_rust_ir,
     Pattern,
-    is_oracle_type_constraint,
-    parse_oracle_type_constraint,
 )
 from emend import emend_core as _rust
 from emend.errors import BUG_EXCEPTIONS
@@ -240,12 +238,7 @@ def find_pattern(
 
     # Parse pattern
     pattern = parse_pattern(pattern_str)
-    oracle_constraints = {
-        mv.name: parse_oracle_type_constraint(mv.type_constraint)
-        for mv in pattern.metavars if is_oracle_type_constraint(mv.type_constraint)
-    }
-    if oracle_constraints and type_oracle is None:
-        raise ValueError("Type-constrained matching requires a type oracle")
+    oracle_constraints = pattern.oracle_constraints(type_oracle)
 
     # Read file (or use source_override)
     if source_override is not None:
