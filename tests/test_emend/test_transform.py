@@ -47,6 +47,20 @@ def assert_replace(tmp_path, source, pattern, replacement, count):
     return test_file.read_text()
 
 
+@pytest.mark.parametrize("extension,source,valid", [
+    ("py", "", True),
+    ("py", "class A:\n", False),
+    ("py", "def f():\n    # no body\n", False),
+    ("py", "class A:\n    pass\n", True),
+    ("rs", "fn f() {}", True),
+    ("ts", "function f() {}", True),
+])
+def test_complete_module_validation(extension, source, valid):
+    from emend import emend_core
+
+    assert emend_core.validate_syntax(source, extension, fragment=False) is valid
+
+
 def test_generated_cache_directory_is_not_a_project_marker(tmp_path):
     from emend.transform import _find_project_root
 
@@ -105,6 +119,67 @@ class TestReplacePattern:
         )
 
         assert count == 1
+
+    @pytest.mark.parametrize("extension", ["tsx", "jsx"])
+    @pytest.mark.parametrize("language", [None, "typescript"])
+    def test_replace_jsx_preserves_dialect(self, tmp_path, extension, language):
+        from emend.transform import find_pattern, replace_pattern
+
+        target = tmp_path / f"component.{extension}"
+        target.write_text("const f = () => <div>{print(1)}</div>;\n")
+        assert len(find_pattern("print($X)", str(target), language=language)) == 1
+        assert replace_pattern("print($X)", "log($X)", str(target),
+                               language=language, apply=True)[1] == 1
+        assert target.read_text() == "const f = () => <div>{log(1)}</div>;\n"
+
+    @pytest.mark.parametrize("argument", ["1", '"""first\nsecond"""'])
+    def test_replace_multiline_preserves_indentation_and_strings(self, tmp_path, argument):
+        from emend.transform import replace_pattern
+
+        target = tmp_path / "module.py"
+        source = f"def f():\n    print({argument})\n    return 2\n"
+        target.write_text(source)
+        assert replace_pattern("print($X)", 'log($X)\nlog("""a\nb""")', str(target), apply=True)[1] == 1
+        assert target.read_text() == f'def f():\n    log({argument})\n    log("""a\nb""")\n    return 2\n'
+
+    @pytest.mark.parametrize("extension,language,head,literal", [
+        ("tsx", "typescript", "function f()", "`a\nb`"),
+        ("rs", "rust", "fn f()", 'r#"a\nb"#'),
+    ])
+    def test_replace_multiline_language_strings(self, tmp_path, extension, language, head, literal):
+        from emend.transform import replace_pattern
+
+        target = tmp_path / f"module.{extension}"
+        target.write_text(f"{head} {{\n    print({literal});\n}}\n")
+        assert replace_pattern("print($X)", f"log($X);\nlog({literal})", str(target),
+                               language=language, apply=True)[1] == 1
+        assert target.read_text() == f"{head} {{\n    log({literal});\n    log({literal});\n}}\n"
+
+    def test_replace_validator_failure_cannot_write(self, tmp_path, monkeypatch):
+        from emend import emend_core
+        from emend.transform import replace_pattern
+
+        target = tmp_path / "module.py"
+        target.write_text("print(1)\n")
+        def validate(code, ext, *, fragment=True):
+            if not fragment:
+                raise RuntimeError("validator unavailable")
+            return True
+        monkeypatch.setattr(emend_core, "validate_syntax", validate)
+        with pytest.raises(RuntimeError, match="validator unavailable"):
+            replace_pattern("print($X)", "log($X)", str(target), apply=True)
+        assert target.read_text() == "print(1)\n"
+
+    @pytest.mark.parametrize("apply", [False, True])
+    def test_replace_rejects_invalid_enclosing_syntax(self, tmp_path, apply):
+        from emend.transform import replace_pattern
+
+        target = tmp_path / "module.py"
+        source = "value = print(1)\n"
+        target.write_text(source)
+        with pytest.raises(ValueError, match="invalid syntax"):
+            replace_pattern("print($X)", "if True:\n    log($X)", str(target), apply=apply)
+        assert target.read_text() == source
 
     def test_replace_simple(self, tmp_path):
         """Replace simple pattern without metavariables."""

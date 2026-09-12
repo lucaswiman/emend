@@ -667,7 +667,7 @@ class MyClass:
         p = tmp_path / "test.py"
         p.write_text(src)
 
-        _scope, file_data = _preparse_files([str(p)], symbol_scope=None)
+        _scope, file_data = _preparse_files([str(p)])
         _content, _tree, _qn_at, _def_loc, symbol_index = file_data[str(p)]
 
         # symbol_index should only contain class/function definitions with
