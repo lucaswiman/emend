@@ -212,7 +212,10 @@ Examples:
 
 ``analyze dupes`` detects exact structural duplicates (alpha-renamed AST
 subtrees) and sibling-sequence duplicates (shared statement runs across
-functions). Useful flags:
+functions) in Python, Rust, and TypeScript/JavaScript (including TSX/JSX).
+All modes share language-configured parsing and canonicalization; clusters
+never mix languages. Optional duplicate-cache prewarming supports the same
+languages. Useful flags:
 
 - ``--mode exact|sequence|all`` -- which detector(s) to run.
 - ``--file PATH`` -- restrict the scan to one file or directory (intra-scope only).

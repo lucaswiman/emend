@@ -16,6 +16,8 @@ comment_prefix = "#"
 keywords = ["True", "False", "None"]
 
 [duplicates]
+extra_keywords = ["self", "cls"]
+extra_candidate_nodes = ["decorated_definition"]
 comment_nodes = ["comment"]
 ignore_docstrings = true
 argument_nodes = ["argument_list"]

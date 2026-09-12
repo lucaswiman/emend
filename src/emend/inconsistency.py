@@ -6,14 +6,12 @@ tree-sitter parsing and canonicalizer, with language-configured structural roles
 
 from collections import Counter, defaultdict
 from difflib import SequenceMatcher, unified_diff
-from pathlib import Path
 
 from emend.duplicate import (
     _find_containing_symbol,
-    _preparse_files,
+    _parsed_inputs,
     canonicalize_subtree,
 )
-from emend.language_registry import detect_language, load_config, registry_snapshot
 
 
 def _is_docstring(node):
@@ -46,28 +44,6 @@ def _function_nodes(node, kinds):
         yield node
     for child in node.named_children():
         yield from _function_nodes(child, kinds)
-
-
-def _parsed_inputs(files):
-    registry = registry_snapshot()
-    groups = defaultdict(list)
-    for path in sorted({str(Path(p).resolve()) for p in files}):
-        language = detect_language(path, registry=registry)
-        if language in {"python", "typescript", "rust"}:
-            groups[language, Path(path).suffix.lstrip(".")].append(path)
-    for (language, extension), paths in groups.items():
-        document = load_config(language)
-        config = dict(document["duplicates"],
-            name_field=document["symbols"]["name_field"],
-            function_nodes=document["cfg"]["function_nodes"],
-            block_nodes=document["cfg"]["block_nodes"],
-            class_nodes=[s["node"] for s in document["scoping"]["scope_creators"] if s["kind"] == "class"],
-            label_fields={document["pattern_matching"]["attribute"]: document["pattern_matching"]["attr_field"]},
-        )
-        config["label_fields"].update(config.get("extra_label_fields", {}))
-        _, parsed = _preparse_files(paths, None, extension=extension)
-        for path, data in parsed.items():
-            yield language, config, path, data
 
 
 def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_changed_tokens=20):
