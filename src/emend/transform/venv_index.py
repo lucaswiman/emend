@@ -1,18 +1,39 @@
 """Venv symbol index — separate cache populated from site-packages.
 
-The venv index is built lazily on first lookup and refreshed when the venv's
-site-packages directory mtime changes.  It uses the same ``symbol_index``
-schema as the project cache but lives in a separate ``parse_venv.db`` so
-project re-indexing does not invalidate library symbols.
+The venv index is built lazily and refreshed from a cheap metadata inventory.
+Only added or changed files are parsed; deleted files are removed.  It uses the
+same ``symbol_index`` schema as the project cache but lives in a separate
+``parse_venv.db`` so project re-indexing does not invalidate library symbols.
 """
 from __future__ import annotations
 from pathlib import Path
 import hashlib
 import logging
+import os
 
 from emend.errors import BUG_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
+
+
+def _scan_venv_files(site_packages: Path) -> dict[str, tuple[int, int, int, int, int]]:
+    """Discover indexable files and return identities without reading contents."""
+    from emend.analysis_store import AnalysisStore
+    from emend.file_collection import collect_source_files_scandir
+
+    found = {}
+    files = collect_source_files_scandir(
+        str(site_packages),
+        language="python",
+        skip_dirs=["__pycache__", "*.dist-info", "*.egg-info"],
+    )
+    for path in files:
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        found[path] = AnalysisStore._stat_identity(stat)
+    return found
 
 
 def _venv_db_path(project_root: str) -> Path:
@@ -25,12 +46,13 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
     """Build or refresh the venv symbol index.
 
     Creates ``parse_venv.db`` in ``.emend/cache/`` with the same
-    ``symbol_index`` schema as the project cache.  The index is rebuilt
-    when the site-packages directory's mtime changes.
+    ``symbol_index`` schema as the project cache.  A metadata walk detects
+    nested additions, edits, and deletions; unchanged files are not reparsed.
 
     Returns the DB path, or ``None`` if venv lookup is disabled / no venv.
     """
     import sqlite3 as _sql3
+    from .cache import _initialize_cache_connection
 
     from emend.project_config import resolve_environment_path
 
@@ -41,42 +63,51 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
     db_path = _venv_db_path(project_root)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Check freshness: compare site-packages mtime with stored value
-    import os
-    try:
-        sp_mtime = os.stat(str(site_packages)).st_mtime_ns
-    except OSError:
+    if not site_packages.is_dir():
         return None
 
     try:
         conn = _sql3.connect(str(db_path), timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
     except _sql3.Error:
         logger.debug("could not open parse_venv.db", exc_info=True)
         return None
 
     try:
         # Create schema if needed
-        from .cache import _initialize_cache_connection
         _initialize_cache_connection(conn)
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS venv_meta "
-            "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            "CREATE TABLE IF NOT EXISTS venv_files ("
+            "path TEXT PRIMARY KEY, device INTEGER NOT NULL, inode INTEGER NOT NULL, "
+            "size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL, "
+            "content_hash BLOB NOT NULL)"
         )
-
-        # Check stored mtime
+        conn.execute("CREATE TABLE IF NOT EXISTS venv_meta "
+                     "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        current = _scan_venv_files(site_packages)
+        previous = {
+            row[0]: tuple(row[1:6])
+            for row in conn.execute(
+                "SELECT path, device, inode, size, mtime_ns, ctime_ns FROM venv_files"
+            )
+        }
         row = conn.execute(
-            "SELECT value FROM venv_meta WHERE key = 'site_packages_mtime'"
+            "SELECT value FROM venv_meta WHERE key = 'environment_path'"
         ).fetchone()
-        if row and row[0] == str(sp_mtime):
-            # Index is fresh
-            count = conn.execute("SELECT COUNT(*) FROM symbol_index").fetchone()[0]
-            if count > 0:
-                conn.close()
-                return db_path
-
+        environment_changed = row is None or row[0] != str(site_packages)
+        changed = [Path(path) for path, identity in current.items()
+                   if environment_changed or previous.get(path) != identity]
+        removed = (
+            previous.keys()
+            if environment_changed
+            else previous.keys() - current.keys()
+        )
+        if environment_changed or changed or removed:
+            _update_venv_index(
+                conn, site_packages, changed, removed, current, project_root,
+                reset=environment_changed,
+            )
         conn.close()
+        return db_path
     except _sql3.Error:
         logger.debug("venv index freshness check failed; rebuilding", exc_info=True)
         try:
@@ -84,57 +115,22 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
         except _sql3.Error:
             pass
 
-    # (Re)build the venv index
-    logger.info("Building venv symbol index for %s", site_packages)
-    _build_venv_index(str(db_path), str(site_packages), project_root, str(sp_mtime))
-    return db_path
+    return None
 
 
-def _build_venv_index(
-    db_path: str, site_packages: str, project_root: str, sp_mtime: str
+def _update_venv_index(
+    conn, sp: Path, changed, removed, current, project_root, *, reset=False
 ) -> None:
-    """Scan site-packages and populate the venv symbol index."""
-    import sqlite3 as _sql3
-    from emend.query import _collect_symbols
+    """Apply one inventory delta atomically."""
+    from emend.analysis_store import AnalysisStore
+    from emend.symbol_projection import _symbol_info_view
 
-    sp = Path(site_packages)
-    # Collect .py and .pyi files, skipping common non-package dirs
-    skip_names = {"__pycache__", ".git", "bin", "include", "share", "Scripts"}
-    py_files: list[Path] = []
-    stack = [sp]
-    while stack:
-        d = stack.pop()
-        try:
-            entries = list(d.iterdir())
-        except OSError:
-            continue
-        for entry in entries:
-            if entry.is_dir():
-                if entry.name not in skip_names and not entry.name.startswith("."):
-                    # Only descend into directories that look like Python packages
-                    # (have __init__.py or are dist-info) or are top-level
-                    if (entry / "__init__.py").exists() or (entry / "__init__.pyi").exists():
-                        stack.append(entry)
-                    elif entry.suffix in (".dist-info", ".egg-info"):
-                        pass  # skip metadata dirs
-                    elif entry.parent == sp:
-                        # Top-level dir without __init__.py — could be namespace package
-                        stack.append(entry)
-            elif entry.suffix in (".py", ".pyi"):
-                py_files.append(entry)
-
-    logger.info("Venv index: found %d Python files in %s", len(py_files), site_packages)
-
-    conn = _sql3.connect(db_path, timeout=30)
-    from .cache import _initialize_cache_connection
-    _initialize_cache_connection(conn)
-
-    # Clear old data
-    conn.execute("DELETE FROM symbol_index")
-    conn.commit()
-
+    changed = list(changed)
+    removed = list(removed)
     sym_rows: list[tuple] = []
-    for fpath in py_files:
+    indexed_files = []
+    store = AnalysisStore.open(project_root)
+    for fpath in changed:
         try:
             content = fpath.read_text(errors="replace")
         except OSError:
@@ -144,13 +140,16 @@ def _build_venv_index(
         content_hash = hashlib.md5(content.encode(), usedforsecurity=False).digest()
 
         try:
-            symbols = _collect_symbols(fpath, content)
+            symbols = _symbol_info_view(
+                store.symbols(content, fpath.suffix.lstrip(".")), str(fpath)
+            )
         except BUG_EXCEPTIONS:
             raise
         except Exception:
             # Unparseable library file; expected in site-packages scans.
             logger.debug("symbol collection failed for %s", fpath, exc_info=True)
             continue
+        indexed_files.append((str(fpath), *current[str(fpath)], content_hash))
 
         # Compute module_qn from path relative to site-packages
         rel = fpath.relative_to(sp)
@@ -187,25 +186,39 @@ def _build_venv_index(
                 0,  # has_noqa
             ))
 
-    if sym_rows:
-        conn.executemany(
-            "INSERT INTO symbol_index "
-            "(content_hash, file_path, name, qualified_name, module_qn, kind, "
-            "line, end_line, depth, parent, signature, returns, decorators, "
-            "is_entry_point, is_exported, has_noqa) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            sym_rows,
+    with conn:
+        if reset:
+            conn.execute("DELETE FROM symbol_index")
+            conn.execute("DELETE FROM venv_files")
+        for path in removed:
+            conn.execute("DELETE FROM symbol_index WHERE file_path = ?", (path,))
+            conn.execute("DELETE FROM venv_files WHERE path = ?", (path,))
+        for fpath in changed:
+            conn.execute("DELETE FROM symbol_index WHERE file_path = ?", (str(fpath),))
+            conn.execute("DELETE FROM venv_files WHERE path = ?", (str(fpath),))
+        if sym_rows:
+            conn.executemany(
+                "INSERT INTO symbol_index "
+                "(content_hash, file_path, name, qualified_name, module_qn, kind, "
+                "line, end_line, depth, parent, signature, returns, decorators, "
+                "is_entry_point, is_exported, has_noqa) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                sym_rows,
+            )
+        if indexed_files:
+            conn.executemany(
+                "INSERT OR REPLACE INTO venv_files "
+                "(path, device, inode, size, mtime_ns, ctime_ns, content_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)", indexed_files,
+            )
+        conn.execute(
+            "INSERT OR REPLACE INTO venv_meta VALUES ('environment_path', ?)",
+            (str(sp),),
         )
-        conn.commit()
-
-    # Store mtime
-    conn.execute(
-        "INSERT OR REPLACE INTO venv_meta (key, value) VALUES (?, ?)",
-        ("site_packages_mtime", sp_mtime),
+    logger.info(
+        "Venv index: updated %d symbols from %d changed files; removed %d files",
+        len(sym_rows), len(changed), len(removed),
     )
-    conn.commit()
-    conn.close()
-    logger.info("Venv index: indexed %d symbols from %d files", len(sym_rows), len(py_files))
 
 
 def lookup_venv_symbol(
@@ -220,7 +233,7 @@ def lookup_venv_symbol(
     """Search the venv symbol index for symbol definitions.
 
     Uses a separate ``parse_venv.db`` cache that is built lazily on first
-    lookup and refreshed when the venv's site-packages directory changes.
+    lookup and incrementally refreshed from the current file inventory.
 
     Returns a list of symbol dicts (same shape as ``query_symbol_index``),
     or an empty list if no venv is found or lookup is disabled.

@@ -6,6 +6,7 @@ paths via pyproject.toml [tool.emend] and .emend/config.toml.
 """
 
 import textwrap
+import os
 from pathlib import Path
 
 import pytest
@@ -93,6 +94,22 @@ class TestProjectConfig:
         load_project_config.cache_clear()
         cfg = get_environment_lookup_config(str(tmp_path))
         assert cfg.paths == ["my_venv"]
+
+    @pytest.mark.parametrize(
+        ("relative", "section"),
+        [("pyproject.toml", "tool.emend.environment_lookup"),
+         (".emend/config.toml", "environment_lookup")],
+    )
+    def test_live_environment_config_change(self, tmp_path, relative, section):
+        from emend.project_config import load_project_config
+
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        load_project_config.cache_clear()
+        path.write_text(f"[{section}]\npaths = ['first']\n")
+        assert load_project_config(str(tmp_path))["environment_lookup"]["paths"] == ["first"]
+        path.write_text(f"[{section}]\npaths = ['other']\n")
+        assert load_project_config(str(tmp_path))["environment_lookup"]["paths"] == ["other"]
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +330,22 @@ class TestLookupVenvSymbol:
         assert len(results) >= 1
         assert results[0]["name"] == "stub_only"
 
+    def test_dependency_scan_keeps_package_names_excluded_from_projects(self, tmp_path):
+        from emend.transform import lookup_venv_symbol
+        from emend.project_config import load_project_config
+
+        sp = _make_project_with_venv(tmp_path)
+        _add_package(sp, "build", "def build_api(): pass\n")
+        _add_package(sp, "dist", "def dist_api(): pass\n")
+        metadata = sp / "sample.dist-info"
+        metadata.mkdir()
+        (metadata / "ignored.py").write_text("def metadata_api(): pass\n")
+        load_project_config.cache_clear()
+
+        assert lookup_venv_symbol(str(tmp_path), name_pattern="build_api")
+        assert lookup_venv_symbol(str(tmp_path), name_pattern="dist_api")
+        assert not lookup_venv_symbol(str(tmp_path), name_pattern="metadata_api")
+
     def test_lookup_disabled(self, tmp_path):
         """Returns empty when venv lookup is disabled."""
         from emend.transform import lookup_venv_symbol
@@ -388,6 +421,107 @@ class TestLookupVenvSymbol:
 
         assert len(results1) >= 1
         assert len(results2) >= 1
+
+    def test_venv_index_incrementally_tracks_nested_changes(self, tmp_path):
+        from emend.transform import lookup_venv_symbol
+        from emend.project_config import load_project_config
+
+        sp = _make_project_with_venv(tmp_path)
+        pkg = _add_package(sp, "mypkg", "")
+        module = pkg / "mod.py"
+        module.write_text("def old_name(): pass\n")
+        load_project_config.cache_clear()
+
+        assert lookup_venv_symbol(str(tmp_path), name_pattern="old_name")
+        old_stat = module.stat()
+        module.write_text("def new_name(): pass\n")
+        os.utime(module, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+        assert not lookup_venv_symbol(str(tmp_path), name_pattern="old_name")
+        assert lookup_venv_symbol(str(tmp_path), name_pattern="new_name")
+        module.write_text("def old_name(): pass\n")
+        os.utime(module, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+        assert lookup_venv_symbol(str(tmp_path), name_pattern="old_name")
+        assert not lookup_venv_symbol(str(tmp_path), name_pattern="new_name")
+
+        added = pkg / "added.py"
+        added.write_text("def added_name(): pass\n")
+        assert lookup_venv_symbol(str(tmp_path), name_pattern="added_name")
+        added.unlink()
+        assert not lookup_venv_symbol(str(tmp_path), name_pattern="added_name")
+
+    def test_venv_warm_inventory_reuses_parses_and_excludes_cache_dirs(
+        self, tmp_path, monkeypatch
+    ):
+        from emend.analysis_store import AnalysisStore
+        from emend.transform import lookup_venv_symbol
+        from emend.project_config import load_project_config
+
+        sp = _make_project_with_venv(tmp_path)
+        _add_package(sp, "mypkg", "def hello(): pass\n")
+        hidden = sp / "mypkg" / "__pycache__"
+        hidden.mkdir()
+        (hidden / "ignored.py").write_text("def ignored(): pass\n")
+        calls = 0
+        original = AnalysisStore.symbols
+
+        def counted(self, source, ext="py"):
+            nonlocal calls
+            calls += 1
+            return original(self, source, ext)
+
+        monkeypatch.setattr(AnalysisStore, "symbols", counted)
+        load_project_config.cache_clear()
+        assert lookup_venv_symbol(str(tmp_path), name_pattern="hello")
+        cold_calls = calls
+        assert lookup_venv_symbol(str(tmp_path), name_pattern="hello")
+        assert calls == cold_calls
+        assert not lookup_venv_symbol(str(tmp_path), name_pattern="ignored")
+        (sp / "mypkg" / "__init__.py").write_text("def updated(): pass\n")
+        assert lookup_venv_symbol(str(tmp_path), name_pattern="updated")
+        assert calls == cold_calls + 1
+
+    def test_venv_index_tracks_environment_switch_and_migrates_old_cache(self, tmp_path):
+        import sqlite3
+        from emend.transform import lookup_venv_symbol, _venv_db_path
+        from emend.project_config import load_project_config
+
+        first = _make_project_with_venv(tmp_path, "env1")
+        second = _make_project_with_venv(tmp_path, "env2")
+        _add_package(first, "firstpkg", "def first_name(): pass\n")
+        _add_package(second, "secondpkg", "def second_name(): pass\n")
+        config = tmp_path / "pyproject.toml"
+        config.write_text("[tool.emend.environment_lookup]\npaths = ['env1']\n")
+        load_project_config.cache_clear()
+        assert lookup_venv_symbol(str(tmp_path), name_pattern="first_name")
+
+        config.write_text("[tool.emend.environment_lookup]\npaths = ['env2']\n")
+        assert not lookup_venv_symbol(str(tmp_path), name_pattern="first_name")
+        assert lookup_venv_symbol(str(tmp_path), name_pattern="second_name")
+
+        (second / "secondpkg" / "__init__.py").unlink()
+        with sqlite3.connect(_venv_db_path(str(tmp_path))) as conn:
+            conn.execute("DELETE FROM venv_files")
+            conn.execute("DELETE FROM venv_meta")
+        assert not lookup_venv_symbol(str(tmp_path), name_pattern="second_name")
+
+    def test_empty_venv_inventory_is_cached(self, tmp_path, monkeypatch):
+        import emend.transform.venv_index as venv_index
+        from emend.project_config import load_project_config
+
+        _make_project_with_venv(tmp_path)
+        updates = 0
+        original = venv_index._update_venv_index
+
+        def counted(*args, **kwargs):
+            nonlocal updates
+            updates += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(venv_index, "_update_venv_index", counted)
+        load_project_config.cache_clear()
+        assert venv_index.lookup_venv_symbol(str(tmp_path)) == []
+        assert venv_index.lookup_venv_symbol(str(tmp_path)) == []
+        assert updates == 1
 
     def test_separate_db_from_project(self, tmp_path):
         """Venv index uses parse_venv.db, not parse.db."""

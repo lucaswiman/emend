@@ -18,6 +18,8 @@ def test_scanner_follows_symlinks_without_directory_cycles(tmp_path):
     (dependency / "dep.py").touch()
     (project / "pkg").mkdir()
     (project / "pkg" / "local.py").touch()
+    (project / "build").mkdir()
+    (project / "build" / "generated.py").touch()
     for name, target in (("cycle", project), ("external", dependency),
                          ("alias", dependency), ("alias.py", project / "source.py"),
                          ("pkg-alias", project / "pkg"),
