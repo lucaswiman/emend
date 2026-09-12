@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 use std::path::PathBuf;
 
-use crate::scope::{LanguageConfig, ScopeResolver, StructuredImport};
+use crate::scope::{config_for_ext, LanguageConfig, ScopeResolver, StructuredImport};
 
 /// Convert a `StructuredImport` to a Python dict.
 fn structured_import_to_pydict(py: Python, si: &StructuredImport) -> PyResult<PyObject> {
@@ -16,6 +16,19 @@ fn structured_import_to_pydict(py: Python, si: &StructuredImport) -> PyResult<Py
         .map(|n| (n.name.clone(), n.alias.clone()))
         .collect();
     dict.set_item("names", names)?;
+    let name_spans: Vec<(String, usize, usize, Option<String>, Option<usize>, Option<usize>)> = si
+        .names
+        .iter()
+        .map(|n| (
+            n.name.clone(),
+            n.name_start_byte,
+            n.name_end_byte,
+            n.alias.clone(),
+            n.alias_range.map(|range| range.0),
+            n.alias_range.map(|range| range.1),
+        ))
+        .collect();
+    dict.set_item("name_spans", name_spans)?;
     dict.set_item("start_byte", si.start_byte)?;
     dict.set_item("end_byte", si.end_byte)?;
     dict.set_item("start_line", si.start_line)?;
@@ -33,21 +46,22 @@ pub struct PyScopeResolver {
 #[pymethods]
 impl PyScopeResolver {
     #[new]
-    #[pyo3(signature = (project_root, extension=None))]
-    fn new(project_root: &str, extension: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (project_root, extension=None, module_root=None, root_module_file=None))]
+    fn new(project_root: &str, extension: Option<&str>, module_root: Option<&str>, root_module_file: Option<&str>) -> PyResult<Self> {
         let root = PathBuf::from(project_root);
         let config = if let Some(ext) = extension {
-            // Use the same fallback behaviour as find_pattern_in_files: silently
-            // fall back to python_default() when the project-local config fails
-            // to load (e.g. malformed TOML), rather than propagating a
-            // RuntimeError that would silently empty all goto_definition results.
+            // A malformed project-local override must not change the requested
+            // language. Fall back to that language's embedded configuration.
             LanguageConfig::load_for_extension(ext, &root)
-                .unwrap_or_else(|_| LanguageConfig::python_default())
+                .unwrap_or_else(|_| config_for_ext(ext).clone())
         } else {
             LanguageConfig::python_default()
         };
         Ok(Self {
-            inner: ScopeResolver::new(config, root),
+            inner: ScopeResolver::new_with_module_root(
+                config, root.clone(), module_root.map(PathBuf::from).unwrap_or(root),
+                root_module_file.map(PathBuf::from),
+            ),
         })
     }
 
@@ -60,6 +74,12 @@ impl PyScopeResolver {
         })?;
         self.inner.index_file(&path_buf, source, &tree);
         Ok(())
+    }
+
+    /// Return the canonical module identity for a file under this resolver's
+    /// configured module/project roots, without parsing the file.
+    fn module_name_for_file(&self, path: &str) -> String {
+        self.inner.module_name_for_file(&PathBuf::from(path))
     }
 
     /// Index multiple files sequentially.
@@ -163,6 +183,18 @@ impl PyScopeResolver {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Positions of references resolved through an exact lexical import
+    /// binding.  Local shadows of an imported spelling are excluded.
+    fn import_bound_reference_positions(&self, path: &str) -> Vec<(usize, usize)> {
+        let path = PathBuf::from(path);
+        self.inner.file_scopes.get(&path).map(|fs| {
+            fs.references.iter()
+                .filter(|reference| reference.import_binding_id.is_some())
+                .map(|reference| (reference.line, reference.column))
+                .collect()
+        }).unwrap_or_default()
     }
 
     /// Returns structured import statements in a file.

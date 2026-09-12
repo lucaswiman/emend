@@ -21,9 +21,10 @@ from emend.analysis_snapshot import AnalysisSnapshot, ExtractedFile, FileRevisio
 from emend.errors import BUG_EXCEPTIONS
 from emend.project_config import find_project_root
 from emend.symbol_projection import SymbolInfo, _symbol_info_view
+from emend.sqlite_writer import SQLiteWriter
 
 
-EXTRACTION_ARTIFACT_VERSION = "7"
+EXTRACTION_ARTIFACT_VERSION = "9"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,11 @@ class AnalysisStore:
         self.facts_path = self.cache_dir / "facts.db"
         self._connection: sqlite3.Connection | None = None
         self._artifact_connection: sqlite3.Connection | None = None
+        self._reader_connections: set[sqlite3.Connection] = set()
         self._connection_lock = threading.RLock()
+        self._symbols_lock = threading.RLock()
+        self._writers: dict[bool, SQLiteWriter] = {}
+        self._closing = False
         # Source inventory/overlays and graph publication have independent
         # lifetimes. Never hold the source lock while deriving/materializing.
         self._source_lock = threading.RLock()
@@ -89,15 +94,15 @@ class AnalysisStore:
         from emend.symbol_projection import project_symbols
 
         key = (ext, hashlib.sha256(source.encode()).hexdigest())
-        with self._connection_lock:
+        with self._symbols_lock:
             if key not in self._symbols:
                 symbols = None
                 try:
                     conn = self.artifact_connection()
-                    conn.execute(
+                    self.write(lambda db: db.execute(
                         "CREATE TABLE IF NOT EXISTS symbol_projection "
                         "(identity TEXT PRIMARY KEY, payload BLOB NOT NULL)"
-                    )
+                    ).close(), artifacts=True)
                     from emend.language_registry import config_identity
                     config = config_identity(detect_language(f"file.{ext}") or "python")
                     identity = repr(("2", EXTRACTION_ARTIFACT_VERSION, key, config))
@@ -108,15 +113,13 @@ class AnalysisStore:
                         symbols = pickle.loads(zlib.decompress(row[0]))
                     else:
                         symbols = project_symbols(emend_core.collect_symbols_from_str(source, ext=ext))
-                        conn.execute(
+                        payload = zlib.compress(pickle.dumps(symbols))
+                        self.write(lambda db: db.execute(
                             "INSERT OR IGNORE INTO symbol_projection VALUES (?, ?)",
-                            (identity, zlib.compress(pickle.dumps(symbols))),
-                        )
-                        conn.commit()
+                            (identity, payload),
+                        ).close(), artifacts=True)
                 except (OSError, sqlite3.Error):
                     logger.debug("Symbol artifact cache unavailable", exc_info=True)
-                    if self._artifact_connection is not None:
-                        self._artifact_connection.rollback()
                 if symbols is None:
                     symbols = project_symbols(emend_core.collect_symbols_from_str(source, ext=ext))
                 if len(self._symbols) >= 256:
@@ -154,16 +157,58 @@ class AnalysisStore:
         self,
         schema_initializer: Callable[[sqlite3.Connection], None] | None = None,
     ) -> sqlite3.Connection:
-        """Return this project's long-lived SQLite connection."""
+        """Return the shared read-only connection; queue mutations with write()."""
         with self._connection_lock:
             if self._connection is None:
                 self.ensure_cache_directory()
-                self._connection = sqlite3.connect(
-                    str(self.db_path), check_same_thread=False
+                self._connection = self._read_connection(self.db_path)
+            conn = self._connection
+        if schema_initializer is not None:
+            self.write(schema_initializer)
+        return conn
+
+    @staticmethod
+    def _read_connection(path):
+        conn = sqlite3.connect(str(path), timeout=30, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA query_only=ON")
+        return conn
+
+    def reader(self, *, artifacts=False) -> sqlite3.Connection:
+        """Return an independent read handle tracked for store shutdown."""
+        with self._connection_lock:
+            if self._closing:
+                raise RuntimeError("Analysis store is closing")
+            self.ensure_cache_directory()
+            conn = self._read_connection(
+                self.artifact_path if artifacts else self.db_path
+            )
+            self._reader_connections.add(conn)
+            return conn
+
+    def close_reader(self, conn: sqlite3.Connection) -> None:
+        """Release a read handle previously returned by reader()."""
+        with self._connection_lock:
+            self._reader_connections.discard(conn)
+        conn.close()
+
+    def submit_write(self, transaction, *, artifacts=False):
+        """Queue a complete transaction; callers must observe its Future."""
+        with self._connection_lock:
+            if self._closing:
+                raise RuntimeError("Analysis store is closing")
+            writer = self._writers.get(artifacts)
+            if writer is None:
+                self.ensure_cache_directory()
+                writer = self._writers[artifacts] = SQLiteWriter(
+                    self.artifact_path if artifacts else self.db_path
                 )
-            if schema_initializer is not None:
-                schema_initializer(self._connection)
-            return self._connection
+        return writer.submit(transaction)
+
+    def write(self, transaction, *, artifacts=False):
+        """Queue a transaction and wait for its commit (or propagate failure)."""
+        return self.submit_write(transaction, artifacts=artifacts).result()
 
     @staticmethod
     def _prepare_cache_directory(path: Path) -> None:
@@ -209,6 +254,12 @@ class AnalysisStore:
         )
 
     def close(self) -> None:
+        with self._connection_lock:
+            self._closing = True
+            writers = list(self._writers.values())
+            self._writers.clear()
+        for writer in writers:
+            writer.close()
         self._discard_overlay_graph(close=True)
         self._overlays.clear()
         if self._typed_graph is not None:
@@ -217,7 +268,9 @@ class AnalysisStore:
             typed_graph.close()
             self._unlink(typed_path)
             self._typed_graph = None
-        self._type_oracle = None
+        if self._type_oracle is not None:
+            self._type_oracle[1].close()
+            self._type_oracle = None
         if self._disk_graph is not None:
             disk_path = self._graph_path(self._disk_graph)
             self._disk_graph.close()
@@ -231,10 +284,15 @@ class AnalysisStore:
             if self._artifact_connection is not None:
                 self._artifact_connection.close()
                 self._artifact_connection = None
+            for conn in self._reader_connections:
+                conn.close()
+            self._reader_connections.clear()
+            self._closing = False
 
     def _extraction_context_id(self, revisions: Iterable[FileRevision]) -> str:
         """Return the schema/config identity governing extracted facts."""
         from emend.fact_graph import FACT_GRAPH_SCHEMA_VERSION
+        from emend.analysis_linking import LINKER_VERSION
 
         configurations = {
             (revision.language, revision.analysis_config.identity)
@@ -243,6 +301,7 @@ class AnalysisStore:
         }
         payload = (
             FACT_GRAPH_SCHEMA_VERSION,
+            LINKER_VERSION,
             EXTRACTION_ARTIFACT_VERSION,
             tuple(sorted(configurations)),
         )
@@ -298,12 +357,12 @@ class AnalysisStore:
         if self._observed_loaded:
             return
         conn = self.connection()
-        conn.execute(
+        self.write(lambda db: db.execute(
             "CREATE TABLE IF NOT EXISTS analysis_file_revision ("
             "path TEXT PRIMARY KEY, device INTEGER NOT NULL, inode INTEGER NOT NULL, "
             "size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL, "
             "content_hash TEXT NOT NULL, language TEXT NOT NULL, module_name TEXT NOT NULL)"
-        )
+        ).close())
         self._observed_files = {
             row[0]: tuple(row[1:])
             for row in conn.execute(
@@ -319,31 +378,31 @@ class AnalysisStore:
         observed: dict[str, tuple[int, int, int, int, int, str, str, str]],
     ) -> None:
         """Persist only changed identities for fast, correct future processes."""
-        conn = self.connection()
         changed = [
             (path, *identity)
             for path, identity in observed.items()
             if previous.get(path) != identity
         ]
-        if changed:
+        deleted = set(previous) - set(observed)
+        def persist(conn):
             conn.executemany(
                 "INSERT OR REPLACE INTO analysis_file_revision "
                 "(path, device, inode, size, mtime_ns, ctime_ns, content_hash, "
                 "language, module_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 changed,
             )
-        deleted = set(previous) - set(observed)
-        if deleted:
             conn.executemany(
                 "DELETE FROM analysis_file_revision WHERE path = ?",
                 ((path,) for path in deleted),
             )
         if changed or deleted:
-            conn.commit()
+            self.write(persist)
 
     def _scan_disk(self) -> _DiskScan:
         """Read the current source inventory, hashing only stat changes."""
-        with self._source_lock:
+        from emend.project_config import module_context_snapshot
+
+        with self._source_lock, module_context_snapshot():
             return self._scan_disk_locked()
 
     def _scan_disk_locked(self) -> _DiskScan:
@@ -353,13 +412,7 @@ class AnalysisStore:
             get_module_separator,
             registry_and_config_snapshots,
         )
-        from emend.project_config import find_source_root
-
         self._load_observed_files()
-        # Source-root configuration is mutable during long editor sessions.
-        # Recompute it once per language for this inventory, then let the LRU
-        # absorb all per-file module-name lookups below.
-        find_source_root.cache_clear()
         previous = self._observed_files
         registry, configs = registry_and_config_snapshots(self.project_root)
         module_separators = {
@@ -459,11 +512,7 @@ class AnalysisStore:
         """Return an owner-held connection to the shared artifact database."""
         with self._connection_lock:
             if self._artifact_connection is None:
-                self._artifact_connection = sqlite3.connect(
-                    str(self.artifact_path), check_same_thread=False
-                )
-                self._artifact_connection.execute("PRAGMA journal_mode=WAL")
-                self._artifact_connection.execute("PRAGMA synchronous=NORMAL")
+                self._artifact_connection = self._read_connection(self.artifact_path)
             return self._artifact_connection
 
     def _extract_revisions(
@@ -926,6 +975,10 @@ class AnalysisStore:
                 and self._type_oracle[0] == oracle_key
                 else candidate
             )
+            if oracle is not candidate:
+                candidate.close()
+            if self._type_oracle is not None and self._type_oracle[1] is not oracle:
+                self._type_oracle[1].close()
             self._type_oracle = (oracle_key, oracle)
         cache_context = str(getattr(oracle, "cache_context_id", ""))
         key = (
@@ -1153,7 +1206,7 @@ class AnalysisStore:
         except (OSError, ValueError, TypeError, AttributeError):
             inherited_configs = ()
         for path in inherited_configs:
-            digest.update(str(path).encode())
+            digest.update(os.path.relpath(path, self.project_root).encode())
             digest.update(b"\0")
             try:
                 digest.update(path.read_bytes())

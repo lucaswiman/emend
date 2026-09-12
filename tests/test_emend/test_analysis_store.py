@@ -278,7 +278,7 @@ def test_project_stores_and_disk_caches_are_scoped(tmp_path):
                for root in (left, right))
 
 
-def test_editor_and_type_cache_borrow_store_connection(tmp_path):
+def test_editor_and_type_cache_use_independent_readers(tmp_path):
     from emend.editor_search import EditorSearchEngine
     from emend.type_oracle import _TypeOracleDiskCache
 
@@ -287,11 +287,26 @@ def test_editor_and_type_cache_borrow_store_connection(tmp_path):
     try:
         editor_connection = editor._get_conn()
         type_cache = _TypeOracleDiskCache(str(store.db_path))
-        assert editor_connection is store.connection()
-        assert type_cache._conn is editor_connection
+        assert editor_connection is not store.connection()
+        assert type_cache._conn is not editor_connection
+        assert len(store._reader_connections) == 2
+        type_cache.close()
     finally:
         editor.close()
+    assert not store._reader_connections
     assert store.connection().execute("SELECT 1").fetchone() == (1,)
+
+
+def test_dropped_type_cache_releases_its_reader(tmp_path):
+    import gc
+    from emend.type_oracle import _TypeOracleDiskCache
+
+    store = AnalysisStore.open(tmp_path)
+    cache = _TypeOracleDiskCache(str(store.artifact_path))
+    assert len(store._reader_connections) == 1
+    del cache
+    gc.collect()
+    assert not store._reader_connections
 
 
 def test_type_cache_reads_current_engine_dependencies_and_config(tmp_path):
@@ -936,13 +951,17 @@ def test_legacy_filtered_build_cannot_overwrite_owner_generation(tmp_path):
     }
 
 
+@pytest.mark.parametrize("inherited_config", [False, True])
 def test_type_batch_uses_one_snapshot_and_reuses_linked_worktree_payload(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, inherited_config
 ):
     main, linked = _linked_worktrees(tmp_path)
     for root in (main, linked):
         (root / "one.py").write_text("value = 1\n")
         (root / "two.py").write_text("other = 2\n")
+        if inherited_config:
+            (root / "tsconfig.json").write_text('{"extends":"./base.json"}')
+            (root / "base.json").write_text('{"compilerOptions":{"strict":true}}')
     target, dependency, unrelated = (
         main / "target.py", main / "dependency.py", main / "unrelated.py"
     )

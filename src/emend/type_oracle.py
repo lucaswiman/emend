@@ -471,6 +471,11 @@ class TypeOracle(ABC):
     def infer_file(self, path: Path, project_root: Path | None = None) -> FileTypes:
         """Return inferred types for all symbols/expressions in a file."""
 
+    def close(self) -> None:
+        cache = getattr(self, "_cache", None)
+        if cache is not None:
+            cache.close()
+
     def type_at(self, path: Path, line: int, col: int,
                 project_root: Path | None = None) -> TypeBinding | None:
         """Return the inferred type at a specific source position."""
@@ -1044,6 +1049,11 @@ class _FileTypeCache:
         with self._lock:
             return len(self._cache)
 
+    def close(self) -> None:
+        if self._db is not None:
+            self._db.close()
+            self._db = None
+
 
 class _TypeOracleDiskCache:
     """SQLite-backed persistent cache for TypeOracle results."""
@@ -1052,34 +1062,56 @@ class _TypeOracleDiskCache:
         import sqlite3
         self._lock = threading.Lock()
         path = Path(db_path).resolve()
+        self._artifacts = path.name != "parse.db"
         self._project_root = (
             path.parent.parent.parent
             if path.parent.name == "cache" and path.parent.parent.name == ".emend"
             else None
         )
+        self._store = None
         try:
             if self._project_root is not None:
                 from emend.analysis_store import AnalysisStore
 
                 self._store = AnalysisStore.open(self._project_root)
-                if path.name == "parse.db":
-                    self._conn = self._store.connection()
-                else:
-                    self._conn = self._store.artifact_connection()
+                self._conn = self._store.reader(artifacts=self._artifacts)
             else:
                 self._store = None
                 self._conn = sqlite3.connect(db_path, check_same_thread=False)
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-            self._conn.execute(
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._write(
                 "CREATE TABLE IF NOT EXISTS type_cache "
                 "(hash TEXT PRIMARY KEY, data BLOB)"
             )
-            self._conn.commit()
             logger.debug("type oracle disk cache opened at %s", db_path)
         except sqlite3.Error as exc:
             logger.debug("type oracle disk cache unavailable: %s", exc)
             self._conn = None
+
+    def close(self) -> None:
+        if self._conn is None:
+            return
+        if self._store is not None:
+            self._store.close_reader(self._conn)
+        else:
+            self._conn.close()
+        self._conn = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _write(self, sql, parameters=()):
+        if self._store is not None:
+            self._store.write(
+                lambda conn: conn.execute(sql, parameters).close(), artifacts=self._artifacts,
+            )
+        else:
+            with self._lock, self._conn:
+                self._conn.execute(sql, parameters)
 
     def get(self, content_hash: str) -> FileTypes | None:
         if self._conn is None:
@@ -1087,10 +1119,11 @@ class _TypeOracleDiskCache:
         try:
             import pickle
             import zlib
-            row = self._conn.execute(
-                "SELECT data FROM type_cache WHERE hash = ?",
-                (content_hash,),
-            ).fetchone()
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT data FROM type_cache WHERE hash = ?",
+                    (content_hash,),
+                ).fetchone()
             if row is not None:
                 ft = pickle.loads(zlib.decompress(row[0]))
                 ft.build_index()
@@ -1115,12 +1148,7 @@ class _TypeOracleDiskCache:
             data = zlib.compress(
                 pickle.dumps(ft, protocol=pickle.HIGHEST_PROTOCOL), level=1
             )
-            with self._lock:
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO type_cache VALUES (?, ?)",
-                    (content_hash, data),
-                )
-                self._conn.commit()
+            self._write("INSERT OR REPLACE INTO type_cache VALUES (?, ?)", (content_hash, data))
         except sqlite3.Error:
             logger.debug("type cache write failed for %s", content_hash, exc_info=True)
 
@@ -1128,15 +1156,10 @@ class _TypeOracleDiskCache:
         if self._conn is None:
             return
         try:
-            with self._lock:
-                if namespace is None:
-                    self._conn.execute("DELETE FROM type_cache")
-                else:
-                    self._conn.execute(
-                        "DELETE FROM type_cache WHERE hash LIKE ?",
-                        (f"{namespace}|%",),
-                    )
-                self._conn.commit()
+            if namespace is None:
+                self._write("DELETE FROM type_cache")
+            else:
+                self._write("DELETE FROM type_cache WHERE hash LIKE ?", (f"{namespace}|%",))
         except sqlite3.Error:
             logger.debug("type cache clear failed", exc_info=True)
 
@@ -1638,9 +1661,7 @@ class _LSPTypeOracle(TypeOracle):
         root = project_root or path.parent
         lsp = self._get_lsp(root)
         if not lsp:
-            ft = FileTypes(path=str(path))
-            self._cache.put(content_hash, ft)
-            return ft
+            return FileTypes(path=str(path))
 
         try:
             logger.info("Building type index for %s via %s", path, self._tool_name)
@@ -1682,7 +1703,7 @@ class _LSPTypeOracle(TypeOracle):
             raise
         except Exception:
             logger.debug("%s infer_file failed for %s", self._tool_name, path, exc_info=True)
-            ft = FileTypes(path=str(path))
+            return FileTypes(path=str(path))
 
         self._cache.put(content_hash, ft)
         return ft

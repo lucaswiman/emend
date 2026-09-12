@@ -55,22 +55,31 @@ def rename_symbol(
     scan_root = project_path if project_path else _find_project_root(selector.file_path)
     module_root = _find_project_root(selector.file_path)
     resolved_target = str(Path(selector.file_path).resolve())
-    target_module = _normalize_module_qn(_file_to_module(selector.file_path, module_root))
+    from emend.project_config import resolver_module_name_for_file
+    target_module = resolver_module_name_for_file(selector.file_path, module_root)
 
     # Use fully qualified name for matching
-    target_qn = f"{target_module}.{symbol_name}" if target_module else symbol_name
+    from emend.language_registry import get_module_separator
+    separator = get_module_separator(selector.language)
+    target_path = separator.join(selector.symbol_path)
+    target_qn = f"{target_module}{separator}{target_path}" if target_module else target_path
 
     # Use import graph to pre-filter files
     language = selector.language
     candidates = _files_importing_module(scan_root, target_module, language=language)
 
     diffs = {}
+    pending_contents: dict[str, str] = {}
+    wildcard_reexport = None
+
     for py_file, content, resolver in visit_project_ts(
-        name_hint=symbol_name,
+        # Export-star contains no symbol token, so Node rename traverses the
+        # exact semantic dependency candidates without the leaf-name filter.
+        name_hint="" if language in {"typescript", "javascript"} else symbol_name,
         project_path=scan_root,
         target_file=resolved_target,
         candidate_files=candidates,
-        target_qnames={target_qn},
+        target_qnames={target_qn, target_module},
         language=language,
     ):
         references = resolver.references_in_file(py_file)
@@ -86,12 +95,20 @@ def rename_symbol(
         symbol_name_bytes = symbol_name.encode('utf-8')
 
         for qn, line, col, offset, end_offset, kind, _ann in references:
+            if kind == "wildcard_reexport" and qn == target_module:
+                wildcard_reexport = py_file
             if qn == target_qn:
                 # Check if the text at the position matches symbol_name
                 # (to avoid renaming aliases or coincidental names in attributes)
                 # Now using end_offset for better precision!
                 if content_bytes[offset:end_offset].endswith(symbol_name_bytes):
-                    transform.replace_range(end_offset - len(symbol_name_bytes), end_offset, new_name)
+                    replacement = (
+                        f"{new_name} as {symbol_name}"
+                        if kind == "reexport" else new_name
+                    )
+                    transform.replace_range(
+                        end_offset - len(symbol_name_bytes), end_offset, replacement,
+                    )
                     changed = True
 
         if not changed:
@@ -112,7 +129,15 @@ def rename_symbol(
         diffs[py_file] = diff
 
         if apply:
-            Path(py_file).write_text(new_content)
+            pending_contents[py_file] = new_content
+
+    if wildcard_reexport is not None:
+        raise ValueError(
+            f"Cannot safely rename {target_qn}: wildcard re-export in "
+            f"{wildcard_reexport} has no symbol token to update"
+        )
+    for file_path, new_content in pending_contents.items():
+        Path(file_path).write_text(new_content)
 
     return diffs
 
@@ -160,12 +185,22 @@ def move_symbol(
     # to the destination file (issue #138 Bug 2).
     source_module = _file_to_module(selector.file_path, project_path)
 
+    from emend.ast_utils import find_nested_definitions, find_symbol_by_path
+    source_symbol = find_symbol_by_path(
+        find_nested_definitions(selector.file_path, ext=selector.extension),
+        selector.symbol_path,
+    )
+    moved_definition_range = (
+        (source_symbol.line_start, source_symbol.line_end)
+        if source_symbol is not None else None
+    )
+
     # Before removing the symbol, use the tree-sitter scope resolver to check
     # whether the source file has non-definition/non-import references to the
     # moved symbol (e.g. calls, type annotations).  After removal the name
     # becomes unresolved and the resolver can no longer see it.
     source_has_other_refs = _source_has_remaining_refs(
-        selector.file_path, symbol_name, project_path,
+        selector.file_path, symbol_name, project_path, moved_definition_range,
     )
 
     # Step 1: Copy symbol to destination (include_imports=True so the moved
@@ -201,6 +236,7 @@ def _source_has_remaining_refs(
     source_file: str,
     symbol_name: str,
     project_path: str | None,
+    moved_definition_range: tuple[int, int] | None = None,
 ) -> bool:
     """Check whether *source_file* references *symbol_name* outside its definition.
 
@@ -229,7 +265,11 @@ def _source_has_remaining_refs(
     target_suffix = f".{symbol_name}"
     return any(
         kind in ("read", "write", "call")
-        for qn, _line, _col, _off, _end, kind, _ann
+        and not (
+            moved_definition_range is not None
+            and moved_definition_range[0] <= line <= moved_definition_range[1]
+        )
+        for qn, line, _col, _off, _end, kind, _ann
         in resolver.references_in_file(resolved)
         if qn.endswith(target_suffix) or qn == symbol_name
     )
@@ -624,6 +664,25 @@ def _rename_module_references(
         old_module_bytes = old_module.encode('utf-8')
         old_bare_mod_bytes = old_bare_mod.encode('utf-8')
 
+        structured_imports = resolver.structured_imports_in_file(py_file)
+        alias_ranges = {
+            (alias_start, alias_end)
+            for imp in structured_imports
+            for _name, _start, _end, _alias, alias_start, alias_end in imp["name_spans"]
+            if alias_start is not None
+        }
+        relative_member_ranges = set()
+        for imp in structured_imports:
+            if imp["is_plain"] or not imp["level"]:
+                continue
+            relative_qn = "." * imp["level"] + imp["module"]
+            for imported_name, start, end, _alias, _alias_start, _alias_end in imp["name_spans"]:
+                member_qn = relative_qn + (sep if imp["module"] else "") + imported_name
+                if _resolve_relative_import_qn(
+                    member_qn, py_file, project_root, sep, src_text=imported_name,
+                ) == old_module:
+                    relative_member_ranges.add((start, end))
+
         for qn, line, col, offset, end_offset, kind, _ann in resolver.references_in_file(py_file):
             # Resolve relative QNs (e.g. ".models" -> "pkg.models") so that
             # the comparison against old_module works correctly.
@@ -635,6 +694,13 @@ def _rename_module_references(
                     resolved_qn = resolved
 
             if kind == "import":
+                # Alias identifiers are local bindings, not module syntax.
+                if (offset, end_offset) in alias_ranges:
+                    continue
+                if (offset, end_offset) in relative_member_ranges:
+                    transform.replace_range(offset, end_offset, new_bare_mod)
+                    changed = True
+                    continue
                 # Exact match: import old_module or from old_module import ...
                 if resolved_qn == old_module:
                     if qn.startswith(".") and resolved_qn != qn:

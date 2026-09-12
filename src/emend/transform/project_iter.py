@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 import hashlib
@@ -317,7 +316,6 @@ def _find_project_root(start_path: str) -> str:
     return str(find_project_root(start_path))
 
 
-@lru_cache(maxsize=64)
 def _find_source_root(project_root: str, language: str = "python") -> str:
     """Compatibility wrapper for the canonical source-root resolver."""
     from emend.project_config import find_source_root
@@ -371,14 +369,21 @@ def _files_importing_module(project_root: str, module_dotted: str, language: str
     to scanning all files).
     """
     from .index import query_import_graph
-    # Fast path: try cached import graph
-    cached = query_import_graph(project_root, module_dotted)
+    # The legacy graph stores dotted module names, which are lossy for TS/Rust.
+    # Their native scan below retains exact identities; QN caching stays enabled.
+    cached = query_import_graph(project_root, module_dotted) if language == "python" else None
     if cached is not None:
-        return set(cached) if cached else set()
+        return set(cached)
 
     source_files = _collect_source_files(project_root, language=language)
     try:
-        matching = _rust.files_importing_module(source_files, module_dotted)
+        from emend.project_config import module_resolution_context
+
+        module_root, root_module = module_resolution_context(project_root, language)
+        matching = _rust.files_importing_module(
+            source_files, module_dotted, project_root, str(module_root),
+            str(root_module) if root_module else None,
+        )
         return set(matching)
     except Exception:
         logger.debug("Rust files_importing_module failed", exc_info=True)
@@ -396,10 +401,10 @@ def visit_project_ts(
     """Iterate over source files using tree-sitter + PyScopeResolver.
 
     Yields (file_path, content, resolver).
-    The same resolver instance is used for all files in the batch.
     """
     t_start = time.monotonic()
     project_root = str(Path(project_path).resolve())
+    from emend.project_config import module_resolution_context
     source_files = _collect_source_files(project_root, language=language)
 
     if candidate_files is not None:
@@ -427,10 +432,8 @@ def visit_project_ts(
                 filtered_contents.append((py_file, content))
                 continue
 
-            content_hash = hashlib.md5(
-                content.encode(), usedforsecurity=False
-            ).digest()
             from .index import _get_cached_qnames
+            content_hash = hashlib.md5(content.encode(), usedforsecurity=False).digest()
             cached_qns = _get_cached_qnames(
                 content_hash,
                 file_path=str(py_file),
@@ -446,7 +449,13 @@ def visit_project_ts(
     for py_file, content in file_contents:
         ext = Path(py_file).suffix.lstrip('.')
         try:
-            resolver = _rust.PyScopeResolver(project_root, ext)
+            module_root, root_module = module_resolution_context(
+                project_root, language, file_path=py_file,
+            )
+            resolver = _rust.PyScopeResolver(
+                project_root, ext, str(module_root),
+                str(root_module) if root_module else None,
+            )
             resolver.index_file(py_file, content)
         except Exception:
             logger.debug("scope resolver failed for %s, skipping", py_file, exc_info=True)

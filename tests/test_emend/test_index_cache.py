@@ -16,6 +16,37 @@ import pytest
 SOURCE = "def hello():\n    return 42\n"
 
 
+def test_source_root_change_refreshes_editor_projection_without_content_edits(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    from emend import emend_core
+    from emend.transform import index
+    from emend.transform.index import warm_caches, _ensure_index_fresh
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'context'\n")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "hello.py").write_text(SOURCE)
+    warm_caches(str(tmp_path), type_engine="none", jobs=1)
+    batches = Mock(wraps=index._index_batch)
+    monkeypatch.setattr(index, "_index_batch", batches)
+    symbols = Mock(wraps=emend_core.collect_symbols_from_str)
+    monkeypatch.setattr(emend_core, "collect_symbols_from_str", symbols)
+    with sqlite3.connect(tmp_path / ".emend/cache/parse.db") as conn:
+        def names():
+            return conn.execute("SELECT module_qn FROM symbol_index WHERE name = 'hello'").fetchall()
+
+        assert names() == [("app.hello.hello",)]
+        config = tmp_path / "setup.cfg"
+        for payload, expected in [("[options]\npackage_dir =\n    = app\n", "hello.hello"), ("", "app.hello.hello")]:
+            config.write_text(payload)
+            assert _ensure_index_fresh(str(tmp_path))
+            assert names() == [(expected,)]
+            count = batches.call_count
+            assert _ensure_index_fresh(str(tmp_path))
+            assert batches.call_count == count
+    assert batches.call_count == 2
+    symbols.assert_not_called()
+
+
 @pytest.mark.parametrize("failure", [None, "extraction", "writer"])
 def test_native_facts_stream_from_initial_index_without_reloading(tmp_path, monkeypatch, failure):
     from contextlib import closing
@@ -193,6 +224,7 @@ class TestIndexBatchCacheHit:
 
     @pytest.mark.parametrize("legacy_schema", [False, True])
     def test_cold_then_warm_cache_preserves_rows(self, tmp_path, legacy_schema):
+        import hashlib
         from emend.transform import _index_batch
 
         db_path = tmp_path / "parse.db"
@@ -205,6 +237,10 @@ class TestIndexBatchCacheHit:
         assert _db_row_count(db_path, "qn_index") == 1
         assert _index_batch(args) == (0, 0, 1, 0, 0, 0, 0)
         assert _db_row_count(db_path, "qn_index") == 1
+        with sqlite3.connect(db_path) as conn:
+            content_hash = hashlib.md5(SOURCE.encode(), usedforsecurity=False).digest()
+            assert conn.execute("SELECT content_hash FROM symbol_index").fetchone() == (content_hash,)
+            assert conn.execute("SELECT hash FROM qn_index").fetchone() != (content_hash,)
 
 
 class TestWarmCachesSkipped:
@@ -791,7 +827,8 @@ class TestIndexStatus:
         assert info is not None
         assert info["file_manifest_count"] == 2
         assert info["symbol_index_count"] >= 2  # hello + Foo
-        assert info["schema_version"] == "6"
+        from emend.transform.cache import _SCHEMA_VERSION
+        assert info["schema_version"] == _SCHEMA_VERSION
 
     def test_status_returns_none_without_index(self, tmp_path):
         """get_index_status returns None when no index exists."""
@@ -840,3 +877,21 @@ class TestIndexStatus:
         # and silently prints "unknown" otherwise.
         assert info.get("git_head") == head
         assert info.get("indexed_at")  # non-empty timestamp string
+
+def test_owned_cache_initializer_configures_and_commits_migration(tmp_path):
+    from contextlib import closing
+    from emend.transform.cache import _initialize_cache_connection
+
+    path = tmp_path / "parse.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE qn_index (hash BLOB PRIMARY KEY, qnames BLOB)")
+        conn.execute("INSERT INTO qn_index VALUES (X'01', X'02')")
+
+    with closing(sqlite3.connect(path)) as conn:
+        _initialize_cache_connection(conn)
+        assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        assert conn.execute("PRAGMA synchronous").fetchone() == (1,)
+
+    with sqlite3.connect(path) as conn:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(qn_index)")]
+        assert columns == ["file_path", "hash", "qnames"]

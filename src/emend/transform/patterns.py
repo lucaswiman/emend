@@ -68,7 +68,7 @@ def _filter_matches_by_import(
         return []
 
     # Use a single resolver per file for efficiency
-    resolver = _rust.PyScopeResolver(project_root)
+    resolver = _rust.PyScopeResolver(project_root, Path(file_path).suffix.lstrip("."))
     resolver.index_file(file_path, content)
 
     # Resolve references once and index by (line, col) for O(1) lookup.
@@ -109,30 +109,15 @@ def _filter_matches_by_scope_local(
     if not matches:
         return []
 
-    resolver = _rust.PyScopeResolver(project_root)
+    resolver = _rust.PyScopeResolver(project_root, Path(file_path).suffix.lstrip("."))
     resolver.index_file(file_path, content)
 
-    # Build a set of names that are imported (defined via import statements).
-    imported_names: set[str] = set()
-    references = resolver.references_in_file(file_path)
-    for qn, line, col, offset, end_offset, kind, _ann in references:
-        if kind == "import":
-            # Extract the local name from the qualified name
-            # (e.g., "os.path.join" → "join")
-            local_name = qn.rsplit(".", 1)[-1] if "." in qn else qn
-            imported_names.add(local_name)
+    imported_positions = set(resolver.import_bound_reference_positions(file_path))
 
-    filtered = []
-    for match in matches:
-        _root_match = re.search(r"[a-zA-Z_]\w*", match.node_text or "")
-        root_name = _root_match.group(0) if _root_match else None
-        if not root_name:
-            continue
-
-        if root_name not in imported_names:
-            filtered.append(match)
-
-    return filtered
+    return [
+        match for match in matches
+        if (match.line, match.col) not in imported_positions
+    ]
 
 
 def _filter_matches_by_type_oracle(

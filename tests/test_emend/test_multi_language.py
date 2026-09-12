@@ -482,6 +482,33 @@ fn foo() {}
 # ============================================================================
 
 class TestSourceRootDetection:
+    @pytest.mark.parametrize("build_config", [
+        'sources = ["python_sources"]',
+        'sources = { "python_sources" = "" }',
+        '[tool.setuptools.package-dir]\n"" = "python_sources"',
+    ])
+    def test_configured_python_source_layouts(self, tmp_path, build_config):
+        from emend.project_config import find_source_root
+        table = "" if build_config.startswith("[") else "[tool.hatch.build]\n"
+        (tmp_path / "pyproject.toml").write_text(
+            f"{table}{build_config}\n"
+        )
+        (tmp_path / "python_sources").mkdir()
+
+        find_source_root.cache_clear()
+        assert find_source_root(str(tmp_path)) == tmp_path / "python_sources"
+
+    def test_setuptools_explicit_packages_list_does_not_crash(self, tmp_path):
+        from emend.project_config import find_source_root
+        (tmp_path / "pyproject.toml").write_text(
+            '[tool.setuptools]\npackages = ["pkg"]\n'
+        )
+        (tmp_path / "src" / "pkg").mkdir(parents=True)
+        (tmp_path / "src" / "pkg" / "__init__.py").write_text("")
+
+        find_source_root.cache_clear()
+        assert find_source_root(str(tmp_path)) == tmp_path / "src"
+
     def test_rust_src_layout(self, tmp_path):
         from emend.transform import _find_source_root
         (tmp_path / "Cargo.toml").write_text('[package]\nname = "foo"\n')
