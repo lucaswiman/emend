@@ -22,7 +22,12 @@ def _scan_venv_files(site_packages: Path) -> dict[str, tuple[int, int, int, int,
     from emend.file_collection import collect_source_files_scandir
 
     found = {}
-    for path in collect_source_files_scandir(str(site_packages), language="python"):
+    files = collect_source_files_scandir(
+        str(site_packages),
+        language="python",
+        skip_dirs=["__pycache__", "*.dist-info", "*.egg-info"],
+    )
+    for path in files:
         try:
             stat = os.stat(path)
         except OSError:

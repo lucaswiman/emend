@@ -330,6 +330,22 @@ class TestLookupVenvSymbol:
         assert len(results) >= 1
         assert results[0]["name"] == "stub_only"
 
+    def test_dependency_scan_keeps_package_names_excluded_from_projects(self, tmp_path):
+        from emend.transform import lookup_venv_symbol
+        from emend.project_config import load_project_config
+
+        sp = _make_project_with_venv(tmp_path)
+        _add_package(sp, "build", "def build_api(): pass\n")
+        _add_package(sp, "dist", "def dist_api(): pass\n")
+        metadata = sp / "sample.dist-info"
+        metadata.mkdir()
+        (metadata / "ignored.py").write_text("def metadata_api(): pass\n")
+        load_project_config.cache_clear()
+
+        assert lookup_venv_symbol(str(tmp_path), name_pattern="build_api")
+        assert lookup_venv_symbol(str(tmp_path), name_pattern="dist_api")
+        assert not lookup_venv_symbol(str(tmp_path), name_pattern="metadata_api")
+
     def test_lookup_disabled(self, tmp_path):
         """Returns empty when venv lookup is disabled."""
         from emend.transform import lookup_venv_symbol
