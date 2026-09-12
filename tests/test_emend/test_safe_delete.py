@@ -136,6 +136,59 @@ class TestSafeDeleteCascade:
         from emend.transform import warm_caches
         warm_caches(project_path, type_engine="none")
 
+    @pytest.mark.parametrize("owner", ["class C:", "def C():"])
+    def test_cascade_uses_full_symbol_identity(self, tmp_path, owner):
+        from emend.transform import safe_delete
+        project = self._setup_project(tmp_path)
+        src = project / "main.py"
+        src.write_text("def helper():\n    return 1\ndef remove():\n    return helper()\n"
+                       "def own_helper():\n    return 2\n"
+                       f"{owner}\n    def remove():\n        return own_helper()\n    keep = 3\n"
+                       "print(remove())\n")
+        plan = safe_delete(parse_extended_selector(f"{src}::C.remove"),
+                           cascade=True, project_path=str(project))
+        assert {d["selector"] for d in plan.deletions} == {f"{src}::C.remove", f"{src}::own_helper"}
+
+    @pytest.mark.parametrize("protection", [None, "script", "noqa", "test_file", "string"])
+    def test_cascade_respects_retained_helpers(self, tmp_path, protection):
+        from emend.transform import safe_delete
+        project = self._setup_project(tmp_path)
+        (project / "pyproject.toml").write_text(
+            '[project]\nname="demo"\nversion="0.0.0"\n' +
+            ('[project.scripts]\nmycli="main:helper"\n' if protection == "script" else ''))
+        src = project / ("test_main.py" if protection == "test_file" else "main.py")
+        comment = "  # noqa: emend:deadcode" if protection == "noqa" else ""
+        src.write_text(f"def helper():{comment}\n    return 1\ndef remove():\n    return helper()\n")
+        if protection == "string":
+            (project / "consumer.py").write_text('import main\ngetattr(main, "helper")()\n')
+        plan = safe_delete(parse_extended_selector(f"{src}::remove"),
+                           cascade=True, project_path=str(project))
+        assert {d["name"] for d in plan.deletions} == ({"remove"} if protection else {"remove", "helper"})
+
+    @pytest.mark.parametrize("cascade", [False, True])
+    def test_delete_rejects_empty_suite_before_writing(self, tmp_path, cascade):
+        from emend.transform import safe_delete
+        project = self._setup_project(tmp_path)
+        src = project / "main.py"
+        source = "class C:\n    def remove(self):\n        return 1\n"
+        src.write_text(source)
+        with pytest.raises(ValueError, match="invalid syntax"):
+            safe_delete(parse_extended_selector(f"{src}::C.remove"),
+                        cascade=cascade, project_path=str(project), apply=True)
+        assert src.read_text() == source
+
+    def test_cascade_validates_all_files_before_writing(self, tmp_path):
+        from emend.transform import safe_delete
+        project = self._setup_project(tmp_path)
+        files = {"main.py": "from helpers import helper\ndef remove():\n    return helper()\n",
+                 "helpers.py": "def helper():\n    return 1\nclass Unfinished:\n"}
+        for name, source in files.items():
+            (project / name).write_text(source)
+        with pytest.raises(ValueError, match="invalid syntax"):
+            safe_delete(parse_extended_selector(f"{project / 'main.py'}::remove"),
+                        cascade=True, project_path=str(project), apply=True)
+        assert {name: (project / name).read_text() for name in files} == files
+
     def test_cascade_removes_only_caller(self, tmp_path):
         """When a helper is only called by the deleted function, cascade removes it too."""
         from emend.transform import safe_delete
