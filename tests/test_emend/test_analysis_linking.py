@@ -67,6 +67,7 @@ def test_linking_is_pure_and_preserves_unresolved_calls(tmp_path):
         ("typescript", "pkg/ui/mod", "pkg/ui/mod.ts", "../shared", "run", "go", {"pkg.shared"}, "pkg.shared.run"),
         ("typescript", "pkg/mod", "pkg/mod.ts", "./tools", "", "tools.run", {"pkg.tools"}, "pkg.tools.run"),
         ("typescript", "mod", "mod.ts", "../../tools", "run", "go", set(), "go"),
+        ("typescript", "mod", "mod.ts", "tools", "run", "go", {"tools"}, "<external>.tools.run"),
         ("rust", "nested::deep", "nested/deep.rs", "crate::helpers", "run", "go", {"helpers"}, "helpers.run"),
         ("rust", "nested::deep", "nested/deep.rs", "super::helpers", "run", "go", {"nested.helpers"}, "nested.helpers.run"),
         ("rust", "nested::deep", "nested/deep.rs", "self::helpers", "run", "go", {"nested.deep.helpers"}, "nested.deep.helpers.run"),
@@ -88,6 +89,31 @@ def test_imports_link_from_original_name_and_raw_module(
     )[0]
     assert linked.rows["fg_refs"][0][0] == target
     assert linked.rows["calls"][0][1] == target
+
+
+@pytest.mark.parametrize("specifier", ["react", "./react"])
+def test_package_imports_do_not_reference_same_named_local_module(tmp_path, specifier, monkeypatch):
+    from unittest.mock import Mock
+    from emend import analysis_extraction, analysis_linking
+    from emend.analysis_store import AnalysisStore
+
+    (tmp_path / "react.ts").write_text("export function greet() {}\n")
+    (tmp_path / "consumer.ts").write_text(
+        f"import {{ greet }} from '{specifier}';\ngreet();\n"
+    )
+    store = AnalysisStore.open(tmp_path)
+    graph = store.query_facts()
+    callers = graph.callers_datalog("react.greet")
+    assert bool(callers) == (specifier == "./react")
+    if specifier == "react":
+        assert graph.callers_datalog("<external>.react.greet")
+    extract = Mock(wraps=analysis_extraction._extract_file_facts)
+    monkeypatch.setattr(analysis_extraction, "_extract_file_facts", extract)
+    monkeypatch.setattr(analysis_linking, "LINKER_VERSION", "next")
+    relinked = store.query_facts()
+    assert relinked.snapshot.snapshot_id != graph.snapshot.snapshot_id
+    assert relinked.callers_datalog("react.greet") == callers
+    extract.assert_not_called()
 
 
 def test_exact_import_binding_prevents_file_global_alias_guess(tmp_path):
@@ -188,6 +214,7 @@ def test_catalog_uses_actual_revision_language_and_module_identity(tmp_path):
     [
         ("python", "src/pkg/mod.py", "src/pkg/helpers.py", "from .helpers import run as go\ndef f():\n    go()\n    missing()\n", "pkg.helpers.run"),
         ("typescript", "src/pkg/mod.ts", "src/pkg/helpers.ts", 'import { run as go } from "./helpers";\nfunction f() { go(); missing(); }\n', "pkg.helpers.run"),
+        ("typescript", "src/mod.ts", "src/index.ts", 'import { run as go } from "./index";\nfunction f() { go(); missing(); }\n', "index.run"),
         ("typescript", "src/pkg/mod.ts", "src/pkg/helpers.ts", 'import * as helpers from "./helpers";\nfunction f() { helpers.run(); missing(); }\n', "pkg.helpers.run"),
         ("rust", "src/main.rs", "src/helpers.rs", "use crate::helpers::run as go;\nfn f() { go(); missing(); }\n", "helpers.run"),
         ("rust", "src/main.rs", "src/helpers.rs", "use crate::helpers;\nfn f() { helpers::run(); missing(); }\n", "helpers.run"),

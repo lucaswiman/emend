@@ -447,6 +447,7 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(extract_imports, m)?)?;
     m.add_function(wrap_pyfunction!(collect_callees, m)?)?;
     m.add_function(wrap_pyfunction!(files_importing_module, m)?)?;
+    m.add_function(wrap_pyfunction!(scope::resolve_node_import, m)?)?;
     m.add_function(wrap_pyfunction!(symbols::collect_symbols_batch, m)?)?;
     m.add_function(wrap_pyfunction!(symbols::collect_symbols_from_str, m)?)?;
     m.add_function(wrap_pyfunction!(symbols::get_symbol_component_range, m)?)?;

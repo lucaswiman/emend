@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Parse/index cache version remains shared with ``index.py``.  FactGraph has
 # its own marker because its Cozo relation shape can change independently.
-_SCHEMA_VERSION = "7"
+_SCHEMA_VERSION = "8"
 
 def _resolve_shared_data_root(project_root: str) -> Path:
     """Return the main checkout root for user-managed shared data.
@@ -123,6 +123,8 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_manifest_hash "
         "ON file_manifest(content_hash)"
     )
+    if "scope_hash" not in {row[1] for row in conn.execute("PRAGMA table_info(file_manifest)")}:
+        conn.execute("ALTER TABLE file_manifest ADD COLUMN scope_hash BLOB")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS symbol_index ("
         "  content_hash BLOB NOT NULL,"

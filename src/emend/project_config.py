@@ -15,6 +15,8 @@ import logging
 import stat as stat_module
 import sys
 from dataclasses import dataclass, field
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -26,7 +28,7 @@ def load_jsonc(path: Path) -> dict[str, Any]:
     """Load a JSON-with-comments configuration file."""
     import json
 
-    raw = path.read_text()
+    raw = _read_config_bytes(path).decode("utf-8")
     cleaned: list[str] = []
     index = 0
     quoted = escaped = False
@@ -169,10 +171,62 @@ class _ModuleContextEntry:
     module_root: Path
     crate_roots: tuple[Path, ...]
     watched: tuple[Path, ...]
-    signatures: tuple[tuple[bool, int, int, int, int, int, int], ...]
+    config_files: frozenset[Path]
+    signatures: tuple[object, ...]
 
 
 _MODULE_CONTEXT_CACHE: dict[tuple[Path, str], _ModuleContextEntry] = {}
+
+
+@dataclass
+class _ContextSnapshot:
+    contents: dict[Path, bytes | None] = field(default_factory=dict)
+    entries: dict[tuple[Path, str], _ModuleContextEntry] = field(default_factory=dict)
+
+
+_CONTEXT_SNAPSHOT: ContextVar[_ContextSnapshot | None] = ContextVar("module_context", default=None)
+
+
+@contextmanager
+def module_context_snapshot():
+    """Share exact configuration bytes and module roots within one operation."""
+    current = _CONTEXT_SNAPSHOT.get()
+    if current is not None:
+        yield current
+        return
+    token = _CONTEXT_SNAPSHOT.set(_ContextSnapshot())
+    try:
+        yield _CONTEXT_SNAPSHOT.get()
+    finally:
+        _CONTEXT_SNAPSHOT.reset(token)
+
+
+def _read_config_bytes(path: Path) -> bytes:
+    snapshot = _CONTEXT_SNAPSHOT.get()
+    if snapshot is None:
+        return path.read_bytes()
+    if path not in snapshot.contents:
+        try:
+            snapshot.contents[path] = path.read_bytes()
+        except OSError:
+            snapshot.contents[path] = None
+    content = snapshot.contents[path]
+    if content is None:
+        raise FileNotFoundError(path)
+    return content
+
+
+def _context_signatures(watched, config_files):
+    signatures = []
+    for path in watched:
+        if path in config_files:
+            try:
+                signatures.append(_read_config_bytes(path))
+            except OSError:
+                signatures.append(None)
+        else:
+            signatures.append(_path_signature(path))
+    return tuple(signatures)
 
 
 def _path_signature(path: Path) -> tuple[bool, int, int, int, int, int, int]:
@@ -195,6 +249,7 @@ def _source_root_and_inputs(
     if language == "python":
         pyproject = root / "pyproject.toml"
         setup_cfg = root / "setup.cfg"
+        parsed["config_files"] = {pyproject, setup_cfg}
         watched.extend((pyproject, setup_cfg))
         data = _load_toml(pyproject)
         tool = data.get("tool", {})
@@ -228,7 +283,7 @@ def _source_root_and_inputs(
 
             try:
                 config = configparser.ConfigParser()
-                config.read(setup_cfg)
+                config.read_string(_read_config_bytes(setup_cfg).decode("utf-8"))
                 package_dir = config.get(
                     "options", "package_dir", fallback=""
                 )
@@ -252,6 +307,7 @@ def _source_root_and_inputs(
             return src.resolve(), tuple(watched), parsed
     elif language == "rust":
         cargo_path = root / "Cargo.toml"
+        parsed["config_files"] = {cargo_path}
         watched.extend((cargo_path, root / "src" / "lib.rs", root / "src" / "main.rs"))
         cargo = _load_toml(cargo_path)
         parsed["cargo"] = cargo
@@ -264,10 +320,12 @@ def _source_root_and_inputs(
             return (root / "src").resolve(), tuple(watched), parsed
     elif language == "typescript":
         tsconfig = root / "tsconfig.json"
+        parsed["config_files"] = {tsconfig}
         watched.append(tsconfig)
         if tsconfig.is_file():
             try:
                 compiler, origins, sources = load_typescript_config(root)
+                parsed["config_files"].update(sources)
                 watched.extend(sources)
                 root_dir = compiler.get("rootDir")
                 root_base = origins.get("rootDir", root)
@@ -313,21 +371,23 @@ def _build_module_context(root: Path, language: str) -> _ModuleContextEntry:
                 roots.append(binary_path)
                 watched = (*watched, binary_path)
     watched = tuple(dict.fromkeys(watched))
+    config_files = frozenset(parsed.get("config_files", ()))
     return _ModuleContextEntry(
-        module_root, tuple(dict.fromkeys(roots)), watched,
-        tuple(_path_signature(path) for path in watched),
+        module_root, tuple(dict.fromkeys(roots)), watched, config_files,
+        _context_signatures(watched, config_files),
     )
 
 
 def _module_context_entry(root: Path, language: str) -> _ModuleContextEntry:
     key = (root, language)
-    entry = _MODULE_CONTEXT_CACHE.get(key)
-    if entry is None or entry.signatures != tuple(
-        _path_signature(path) for path in entry.watched
-    ):
-        entry = _build_module_context(root, language)
-        _MODULE_CONTEXT_CACHE[key] = entry
-    return entry
+    with module_context_snapshot() as snapshot:
+        if key not in snapshot.entries:
+            entry = _MODULE_CONTEXT_CACHE.get(key)
+            if entry is None or entry.signatures != _context_signatures(entry.watched, entry.config_files):
+                entry = _build_module_context(root, language)
+                _MODULE_CONTEXT_CACHE[key] = entry
+            snapshot.entries[key] = entry
+        return snapshot.entries[key]
 
 
 def _clear_module_context_cache() -> None:
@@ -438,8 +498,7 @@ def _load_toml(path: Path) -> dict[str, Any]:
                 import tomli as tomllib  # type: ignore[no-redef]
             except ImportError:
                 return {}
-        with open(path, "rb") as fh:
-            return tomllib.load(fh)
+        return tomllib.loads(_read_config_bytes(path).decode("utf-8"))
     except (OSError, ValueError):
         # TOMLDecodeError subclasses ValueError in both tomllib and tomli.
         logger.debug("Could not parse %s", path, exc_info=True)
