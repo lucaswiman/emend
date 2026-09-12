@@ -422,6 +422,19 @@ jobs:
           name: sdist
           path: dist/*.tar.gz
 
+  # Verify that non-editable artifacts carry the language data consumed at runtime.
+  package-smoke:
+    name: Package resource smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14t'
+      - uses: astral-sh/setup-uv@v10.0.1
+      - run: make test-package
+
   # ── Publish to PyPI ───────────────────────────────────────────────────────
   publish:
     name: Publish to PyPI
@@ -438,6 +451,7 @@ jobs:
       - windows
       - windows-freethread
       - sdist
+      - package-smoke
     runs-on: ubuntu-latest
     environment:
       name: pypi

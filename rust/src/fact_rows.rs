@@ -837,7 +837,7 @@ mod tests {
             "pkg/mod.py",
             "pkg.mod",
             "python",
-            include_str!("../../languages/python/config.toml"),
+            include_str!("../../src/emend/languages/python/config.toml"),
         )
         .unwrap();
         assert_eq!(batch.rows.len(), 22);
