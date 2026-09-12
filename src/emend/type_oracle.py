@@ -1638,9 +1638,7 @@ class _LSPTypeOracle(TypeOracle):
         root = project_root or path.parent
         lsp = self._get_lsp(root)
         if not lsp:
-            ft = FileTypes(path=str(path))
-            self._cache.put(content_hash, ft)
-            return ft
+            return FileTypes(path=str(path))
 
         try:
             logger.info("Building type index for %s via %s", path, self._tool_name)
@@ -1682,7 +1680,7 @@ class _LSPTypeOracle(TypeOracle):
             raise
         except Exception:
             logger.debug("%s infer_file failed for %s", self._tool_name, path, exc_info=True)
-            ft = FileTypes(path=str(path))
+            return FileTypes(path=str(path))
 
         self._cache.put(content_hash, ft)
         return ft

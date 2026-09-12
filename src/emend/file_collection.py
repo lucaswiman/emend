@@ -24,57 +24,37 @@ def collect_source_files_scandir(root_path: str, language: str = "python") -> li
 def detect_project_languages(project_root: str) -> list[str]:
     """Detect which languages are present in a project.
 
-    Inspects the project root for language markers:
-    - Python: any .py file or pyproject.toml/setup.py
-    - TypeScript: package.json, tsconfig.json, or any .ts/.tsx/.js/.jsx file
-    - Rust: Cargo.toml or any .rs file
+    Walks source files using the configured language-extension registry and
+    also checks root-level Python, TypeScript, and Rust project markers.
 
     Returns a list of detected language names (e.g. ``["python", "typescript"]``).
     """
-    import os
-
     root = Path(project_root).resolve()
-    detected: list[str] = []
+    from emend import emend_core as _rust
+    from emend.language_registry import registry_snapshot
 
-    def _scan_dir(directory: Path) -> list[str]:
-        names: list[str] = []
-        try:
-            for entry in os.scandir(str(directory)):
-                names.append(entry.name)
-        except OSError:
-            pass
-        return names
-
-    root_names = set(_scan_dir(root))
-
-    all_names: set[str] = set(root_names)
-    for entry_name in root_names:
-        child = root / entry_name
-        if entry_name.startswith(".") or entry_name in {
-            "node_modules", "target", "__pycache__", ".venv", "venv",
-        }:
-            continue
-        if child.is_dir():
-            all_names.update(_scan_dir(child))
-    if (root / "src").is_dir():
-        all_names.update(_scan_dir(root / "src"))
+    extension_languages, language_extensions = registry_snapshot(root)
+    extensions = sorted(extension_languages)
+    files = _rust.collect_files(str(root), extensions)
+    detected = {
+        extension_languages[Path(file).suffix.removeprefix(".").lower()]
+        for file in files
+        if Path(file).suffix.removeprefix(".").lower() in extension_languages
+    }
 
     py_markers = {"pyproject.toml", "setup.py", "setup.cfg"}
-    py_exts = (".py", ".pyi")
-    if py_markers & root_names or any(n.endswith(py_exts) for n in all_names):
-        detected.append("python")
+    if any((root / marker).is_file() for marker in py_markers):
+        detected.add("python")
 
     ts_markers = {"package.json", "tsconfig.json"}
-    ts_exts = (".ts", ".tsx", ".js", ".jsx")
-    if ts_markers & root_names or any(n.endswith(ts_exts) for n in all_names):
-        detected.append("typescript")
+    if any((root / marker).is_file() for marker in ts_markers):
+        detected.add("typescript")
 
     rs_markers = {"Cargo.toml", "Cargo.lock"}
-    rs_exts = (".rs",)
-    if rs_markers & root_names or any(n.endswith(rs_exts) for n in all_names):
-        detected.append("rust")
+    if any((root / marker).is_file() for marker in rs_markers):
+        detected.add("rust")
 
-    return detected
+    return [language for language in language_extensions if language in detected]
 
 
 def collect_all_source_files(
@@ -85,17 +65,15 @@ def collect_all_source_files(
 ) -> list[str]:
     """Collect source files for all detected (or specified) languages.
 
-    When *languages* is ``None``, calls :func:`detect_project_languages` to
-    determine which languages are present.  Returns a de-duplicated list of
-    absolute file paths.
+    When *languages* is ``None``, scans once for every configured extension.
+    Returns a de-duplicated list of absolute file paths.
     """
-    if languages is None:
-        languages = detect_project_languages(root_path)
     from emend import emend_core as _rust
     from emend.language_registry import registry_snapshot
 
-    registry = registry or registry_snapshot()
+    registry = registry or registry_snapshot(root_path)
     language_extensions = registry[1]
+    languages = languages if languages is not None else list(language_extensions)
     extensions = sorted({
         extension
         for language in languages
