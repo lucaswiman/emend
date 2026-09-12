@@ -13,12 +13,13 @@ import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field
-from hashlib import blake2b
+from hashlib import blake2b, md5
 from pathlib import Path
 from typing import Any, Iterator
 
 from emend import emend_core
 from emend.errors import BUG_EXCEPTIONS
+from emend.language_registry import detect_language, load_config, registry_snapshot
 
 logger = logging.getLogger(__name__)
 from emend.duplicate_heuristics import (
@@ -35,21 +36,44 @@ from emend.duplicate_heuristics import (
 # ---------------------------------------------------------------------------
 
 # Cached payloads include the containing function/class symbol. Bump this whenever
-# the payload shape changes so stale rows cannot produce different output from
+# the payload shape or canonicalization changes so stale rows cannot differ from
 # the cold (fresh-parse) path.
-DUP_CACHE_VERSION = "4"
+DUP_CACHE_VERSION = "6"
 
-# Canonicalizer: node kinds that are candidate roots
-_FUNCTION_KINDS: frozenset[str] = frozenset({
-    "function_definition", "class_definition", "decorated_definition",
-})
-_CONTROL_FLOW_KINDS: frozenset[str] = frozenset({
-    "if_statement", "for_statement", "while_statement", "try_statement",
-})
+def _duplicate_cache_key(file_path, content):
+    """Content addressing includes the grammar, not the worktree path."""
+    return md5((Path(file_path).suffix + "\0" + content).encode(), usedforsecurity=False).hexdigest()
 
-# Python keywords and builtins kept as-is during canonicalization
-import keyword as _keyword_mod
-_PYTHON_KEYWORDS: frozenset[str] = frozenset(_keyword_mod.kwlist) | {"self", "cls"}
+
+def _duplicate_config(language):
+    document = load_config(language)
+    config = dict(document["duplicates"],
+        name_field=document["symbols"]["name_field"],
+        function_nodes=document["cfg"]["function_nodes"],
+        block_nodes=document["cfg"]["block_nodes"],
+        class_nodes=[s["node"] for s in document["scoping"]["scope_creators"] if s["kind"] == "class"],
+        label_fields={document["pattern_matching"]["attribute"]: document["pattern_matching"]["attr_field"]},
+    )
+    config["label_fields"].update(config.get("extra_label_fields", {}))
+    config["keywords"] = set(document["trace"]["keywords"]) | set(config.get("extra_keywords", []))
+    config["candidate_nodes"] = set(config["function_nodes"] + config["class_nodes"] + document["cfg"].get("container_nodes", []) + config.get("extra_candidate_nodes", []))
+    config["control_nodes"] = {node for key in ("if_nodes", "for_nodes", "while_nodes", "try_nodes", "loop_nodes", "match_nodes") for node in document["cfg"].get(key, [])}
+    return config
+
+
+def _parsed_inputs(files):
+    registry = registry_snapshot()
+    groups = defaultdict(list)
+    for path in sorted({str(Path(p).resolve()) for p in files}):
+        language = detect_language(path, registry=registry)
+        if language in {"python", "typescript", "rust"}:
+            groups[language, Path(path).suffix.lstrip(".")].append(path)
+    for (language, extension), paths in groups.items():
+        config = _duplicate_config(language)
+        _, parsed = _preparse_files(paths, None, extension=extension)
+        for path, data in parsed.items():
+            yield language, config, path, data
+
 
 # Minimum contiguous run; individual shared statements are not duplicates.
 MIN_SEQUENCE_STATEMENTS = 4
@@ -92,18 +116,18 @@ def _count_named_statements(block) -> int:
     return block.named_child_count
 
 
-def _iter_candidates(tree) -> Iterator:
+def _iter_candidates(tree, config) -> Iterator:
     """Yield candidate subtree roots for canonicalization."""
     root = tree.root
 
     def walk(n) -> Iterator:
         k = n.kind
-        if k in _FUNCTION_KINDS:
+        if k in config["candidate_nodes"]:
             yield n
             body = n.child_by_field_name("body")
-            if body is not None and _count_named_statements(body) >= 2:
+            if body is not None and body.kind in config["block_nodes"] and _count_named_statements(body) >= 2:
                 yield body
-        elif k in _CONTROL_FLOW_KINDS:
+        elif k in config["control_nodes"]:
             body = n.child_by_field_name("body") or n.child_by_field_name("consequence")
             if body is not None and _count_named_statements(body) >= 2:
                 yield n
@@ -199,6 +223,7 @@ def canonicalize_subtree(
     *,
     binding_scope: tuple[int, int] | None = None,
     bound_map: dict[str, str] | None = None,
+    config: dict | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Canonicalize a subtree with production rules.
 
@@ -214,10 +239,14 @@ def canonicalize_subtree(
 
     if bound_map is None:
         bound_map = {}
+    config = config or {}
+    comments = config.get("comment_nodes", ["comment"])
+    classes = config.get("class_nodes", ["class_definition"])
+    labels = config.get("label_fields", {"attribute": "attribute", "keyword_argument": "name"})
     class_scopes: set[str] = set()
 
     def record_class(n):
-        if n.kind == "class_definition":
+        if n.kind in classes:
             name = n.child_by_field_name("name")
             if name is not None and (qn := qn_at.get(name.start_point)):
                 class_scopes.add(qn)
@@ -237,12 +266,14 @@ def canonicalize_subtree(
     token_seq: list[str] = []
 
     def walk(n, preserve_name: bool = False):
-        if n.kind == "comment":
+        if n.kind in comments:
             return
 
         kind_seq.append(n.kind)
 
-        if n.child_count == 0:
+        # string_content may have escape children without nodes for the text
+        # between them. Traversing only children silently drops that text.
+        if n.child_count == 0 or n.kind == "string_content":
             text = n.text()
             if n.kind == "identifier" and not preserve_name:
                 qn = qn_at.get(n.start_point)
@@ -253,9 +284,7 @@ def canonicalize_subtree(
         else:
             # These names are labels, not variable references, even when the
             # resolver reports a same-spelled local at their position.
-            label = n.child_by_field_name(
-                "attribute" if n.kind == "attribute" else "name"
-            ) if n.kind in ("attribute", "keyword_argument") else None
+            label = n.child_by_field_name(labels[n.kind]) if n.kind in labels else None
             for child in n.children():
                 walk(child, label is not None and child.start_byte == label.start_byte)
 
@@ -315,13 +344,14 @@ def _is_trivial(
     token_seq: tuple[str, ...],
     node_count: int,
     depth: int,
+    keywords: set[str],
 ) -> bool:
     """Return True if the subtree should be excluded from dup detection."""
     if node_count < _MIN_NODE_COUNT:
         return True
     if depth < _MIN_DEPTH:
         return True
-    unique_non_kw = len(set(token_seq) - _PYTHON_KEYWORDS)
+    unique_non_kw = len(set(token_seq) - keywords)
     if unique_non_kw < _MIN_UNIQUE_NON_KW:
         return True
     vocab = len(set(kind_seq)) + len(set(token_seq))
@@ -345,10 +375,11 @@ def _stmt_canonical_hash(
     qn_at: dict[tuple[int, int], str],
     def_loc: dict[str, tuple[int, int]],
     bound_map: dict[str, str],
+    config: dict,
 ) -> bytes:
     """Hash a statement using the same semantics as exact subtree detection."""
     return _canonical_hash(*canonicalize_subtree(
-        stmt, qn_at, def_loc, binding_scope=(func_start, func_end), bound_map=bound_map,
+        stmt, qn_at, def_loc, binding_scope=(func_start, func_end), bound_map=bound_map, config=config,
     ))
 
 
@@ -362,11 +393,12 @@ _PreparedDuplicateFile = tuple[Any, dict, dict, list[tuple[str, int, int]]]
 def _prepare_duplicate_file(
     file_path: str, content: str, scope_resolver
 ) -> _PreparedDuplicateFile | None:
-    tree = emend_core.parse_source(content, "py")
+    extension = Path(file_path).suffix.lstrip(".")
+    tree = emend_core.parse_source(content, extension)
     if tree is None:
         return None
     qn_at, def_loc = _build_qn_at(file_path, scope_resolver)
-    return tree, qn_at, def_loc, _build_symbol_index(content, ext="py")
+    return tree, qn_at, def_loc, _build_symbol_index(content, ext=extension)
 
 
 def canonicalize_file_for_cache(
@@ -396,11 +428,12 @@ def canonicalize_file_for_cache(
     if prepared is None:
         return []
     tree, qn_at, def_loc, symbol_index = prepared
+    config = _duplicate_config(detect_language(file_path))
 
     out: list[dict] = []
-    for cand in _iter_candidates(tree):
+    for cand in _iter_candidates(tree, config):
         try:
-            kind_seq, token_seq = canonicalize_subtree(cand, qn_at, def_loc)
+            kind_seq, token_seq = canonicalize_subtree(cand, qn_at, def_loc, config=config)
         except BUG_EXCEPTIONS:
             raise
         except Exception:
@@ -410,7 +443,7 @@ def canonicalize_file_for_cache(
         node_count = len(kind_seq)
         depth = _node_depth(cand)
 
-        if _is_trivial(kind_seq, token_seq, node_count, depth):
+        if _is_trivial(kind_seq, token_seq, node_count, depth, config["keywords"]):
             continue
 
         start_line = cand.start_point[0]
@@ -463,32 +496,33 @@ def build_statement_seqs_for_cache(
     if prepared is None:
         return []
     tree, qn_at, def_loc, symbol_index = prepared
+    config = _duplicate_config(detect_language(file_path))
 
     out: list[dict] = []
 
     def visit(node) -> None:
-        if node.kind == "function_definition":
+        if node.kind in config["function_nodes"]:
             func_start = node.start_point[0]
             func_end = node.end_point[0]
             func_qn = _find_containing_symbol(func_start, symbol_index)
 
             body = node.child_by_field_name("body")
-            if body is not None:
+            if body is not None and body.kind in config["block_nodes"]:
                 hashes_list: list[str] = []
                 ranges_list: list[list[int]] = []
                 kinds_list: list[str] = []
                 bound_map: dict[str, str] = {}
-                parameters = node.child_by_field_name("parameters")
+                parameters = node.child_by_field_name("parameters") or node.child_by_field_name("parameter")
                 if parameters is not None:
                     canonicalize_subtree(parameters, qn_at, def_loc,
-                                         binding_scope=(func_start, func_end), bound_map=bound_map)
+                                         binding_scope=(func_start, func_end), bound_map=bound_map, config=config)
 
                 for stmt in body.named_children():
-                    if stmt.kind == "comment":
+                    if stmt.kind in config["comment_nodes"]:
                         continue
                     try:
                         h = _stmt_canonical_hash(
-                            stmt, func_start, func_end, qn_at, def_loc, bound_map
+                            stmt, func_start, func_end, qn_at, def_loc, bound_map, config
                         )
                     except BUG_EXCEPTIONS:
                         raise
@@ -511,19 +545,8 @@ def build_statement_seqs_for_cache(
                         }
                     )
 
-            # Recurse into body for nested functions.
-            if body is not None:
-                for child in body.named_children():
-                    visit(child)
-
-        elif node.kind in ("class_definition", "decorated_definition"):
-            body = node.child_by_field_name("body")
-            if body is not None:
-                for child in body.named_children():
-                    visit(child)
-        else:
-            for child in node.named_children():
-                visit(child)
+        for child in node.named_children():
+            visit(child)
 
     for child in tree.root.named_children():
         visit(child)
@@ -532,19 +555,19 @@ def build_statement_seqs_for_cache(
 
 
 def _build_duplicate_payload_for_cache(
-    file_path: str, content: str, scope_resolver
+    file_path: str, content: str, scope_resolver, *, _prepared=None, mode="all"
 ) -> dict[str, list[dict]]:
     """Build both duplicate views from one parsed and projected file."""
-    prepared = _prepare_duplicate_file(file_path, content, scope_resolver)
+    prepared = _prepared or _prepare_duplicate_file(file_path, content, scope_resolver)
     if prepared is None:
         return {"subtrees": [], "sequences": []}
     return {
         "subtrees": canonicalize_file_for_cache(
             file_path, content, scope_resolver, _prepared=prepared
-        ),
+        ) if mode in ("exact", "all") else [],
         "sequences": build_statement_seqs_for_cache(
             file_path, content, scope_resolver, _prepared=prepared
-        ),
+        ) if mode in ("sequence", "all") else [],
     }
 
 
@@ -553,10 +576,9 @@ def _build_duplicate_payload_for_cache(
 # ---------------------------------------------------------------------------
 
 
-def _collect_py_files(root_path: str) -> list[str]:
-    """Collect Python source files under *root_path*."""
-    from emend.file_collection import collect_source_files
-    return collect_source_files(root_path, language="python")
+def _collect_duplicate_files(root_path: str) -> list[str]:
+    from emend.file_collection import collect_all_source_files
+    return collect_all_source_files(root_path, ["python", "rust", "typescript"])
 
 
 # ---------------------------------------------------------------------------
@@ -568,24 +590,25 @@ _FileData = dict[str, tuple[str, Any, dict, dict, list[tuple[str, int, int]]]]
 
 
 def _preparse_files(
-    py_files: list[str],
+    source_files: list[str],
     symbol_scope: str | None,
+    *, extension: str = "py",
 ) -> tuple[Any, _FileData]:
-    """Read, parse, and index all *py_files* once.
+    """Read, parse, and index all *source_files* once.
 
     Returns ``(scope_resolver, file_data)`` where *file_data* maps each
     successfully parsed file to its ``(content, tree, qn_at, def_loc,
     symbol_index)`` tuple.
     """
-    project_root = str(Path(py_files[0]).parent) if py_files else "."
+    project_root = str(Path(source_files[0]).parent) if source_files else "."
     try:
-        scope_resolver = emend_core.PyScopeResolver(project_root, "py")
+        scope_resolver = emend_core.PyScopeResolver(project_root, extension)
     except TypeError:
         scope_resolver = emend_core.PyScopeResolver(project_root)
 
     file_data: _FileData = {}
 
-    for file_path in py_files:
+    for file_path in source_files:
         if symbol_scope and symbol_scope not in file_path:
             continue
         try:
@@ -597,7 +620,7 @@ def _preparse_files(
             scope_resolver.index_file(file_path, content)
         except Exception:
             logger.debug("index_file failed for %s", file_path, exc_info=True)
-        tree = emend_core.parse_source(content, "py")
+        tree = emend_core.parse_source(content, extension)
         if tree is None:
             continue
 
@@ -614,49 +637,6 @@ def _preparse_files(
 # ---------------------------------------------------------------------------
 
 
-def _subtree_cands_from_file_data(
-    file_data: _FileData,
-    min_lines: int,
-) -> dict[bytes, list[dict]]:
-    """Group canonicalized subtree candidates by canonical hash (fresh parse)."""
-    hash_to_cands: dict[bytes, list[dict]] = {}
-    for file_path, (content, tree, qn_at, def_loc, symbol_index) in file_data.items():
-        for cand in _iter_candidates(tree):
-            start_0 = cand.start_point[0]
-            end_0 = cand.end_point[0]
-            if end_0 - start_0 + 1 < min_lines:
-                continue
-
-            try:
-                kind_seq, token_seq = canonicalize_subtree(cand, qn_at, def_loc)
-            except BUG_EXCEPTIONS:
-                raise
-            except Exception:
-                logger.debug("canonicalize_subtree failed in %s", file_path, exc_info=True)
-                continue
-
-            nc = len(kind_seq)
-            depth = _node_depth(cand)
-            if _is_trivial(kind_seq, token_seq, nc, depth):
-                continue
-
-            ch = _canonical_hash(kind_seq, token_seq)
-            symbol = _find_containing_symbol(start_0, symbol_index)
-            unique_non_kw = len(set(token_seq) - _PYTHON_KEYWORDS)
-
-            hash_to_cands.setdefault(ch, []).append({
-                "file": file_path,
-                "symbol": symbol,
-                "start_line": start_0 + 1,
-                "end_line": end_0 + 1,
-                "node_count": nc,
-                "unique_non_kw": unique_non_kw,
-                "kind_seq": kind_seq,
-                "token_seq": token_seq,
-            })
-    return hash_to_cands
-
-
 def _subtree_cands_from_cached(
     cached: dict[str, dict],
     min_lines: int,
@@ -664,14 +644,15 @@ def _subtree_cands_from_cached(
     """Group canonicalized subtree candidates by canonical hash (cached payloads)."""
     hash_to_cands: dict[str, list[dict]] = {}
     for file_path, payload in cached.items():
+        keywords = _duplicate_config(detect_language(file_path))["keywords"]
         for s in payload.get("subtrees", []):
             total_lines = s.get("total_lines", s["end_line"] - s["start_line"] + 1)
             if total_lines < min_lines:
                 continue
             ks = tuple(s.get("kind_seq", ()))
             ts = tuple(s.get("token_seq", ()))
-            unique_non_kw = len(set(ts) - _PYTHON_KEYWORDS)
-            hash_to_cands.setdefault(s["canonical_hash"], []).append({
+            unique_non_kw = len(set(ts) - keywords)
+            hash_to_cands.setdefault((detect_language(file_path), s["canonical_hash"]), []).append({
                 "file": file_path,
                 # Cache payloads generated by version 2 include the same
                 # containing symbol as the fresh-parse path.
@@ -718,14 +699,16 @@ def _exact_clusters_from_cands(
         rep = cands[0]
         ks = tuple(rep.get("kind_seq", ()))
         ts = tuple(rep.get("token_seq", ()))
-        penalty = (
+        penalty = is_tiny_same_file_fragment(members, int(avg_nc))
+        # These suppressions describe Python protocols, not arbitrary names in
+        # other languages. Structural matching itself is shared.
+        penalty += (
             is_abstract_stub(ks, ts)
             + is_trivial_validator(int(avg_nc), ks, ts)
             + is_property_wrapper(ks, ts)
-            + is_tiny_same_file_fragment(members, int(avg_nc))
             + is_init_self_assignment(ks, ts)
             + is_dunder_boilerplate(rep.get("symbol", ""), ks)
-        )
+        ) if detect_language(rep["file"]) == "python" else 0
         score = max(0.0, score - penalty)
         if score <= 0.0:
             continue
@@ -735,18 +718,6 @@ def _exact_clusters_from_cands(
             explanation="same canonical subtree (alpha-renamed AST)",
         ))
     return clusters
-
-
-def _query_exact_clusters(
-    file_data: _FileData,
-    min_lines: int,
-    cross_file,
-) -> list[DuplicateCluster]:
-    """Find exact structural duplicates by grouping on canonical hash."""
-    return _exact_clusters_from_cands(
-        _subtree_cands_from_file_data(file_data, min_lines),
-        cross_file,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -763,7 +734,9 @@ def _repeated_statement_runs(all_seqs: list[dict], covered):
     tokens, locations = [], []
     token_ids = {}
     for i, seq in enumerate(all_seqs):
+        language = detect_language(seq["file"])
         for pos, token in enumerate(seq["hashes"]):
+            token = (language, token)
             tokens.append(token_ids.setdefault(token, len(token_ids)))
             locations.append((i, pos))
         tokens.append(-i - 1)
@@ -901,27 +874,6 @@ def _sequence_clusters_from_seqs(
     return clusters
 
 
-def _query_sequence_clusters(
-    file_data: _FileData,
-    scope_resolver,
-    min_lines: int,
-    cross_file,
-) -> list[DuplicateCluster]:
-    """Find contiguous sibling-sequence duplicates."""
-    all_seqs: list[dict] = []
-    for file_path, (content, _tree, _qn_at, _def_loc, _symbol_index) in file_data.items():
-        try:
-            seqs = build_statement_seqs_for_cache(file_path, content, scope_resolver)
-        except BUG_EXCEPTIONS:
-            raise
-        except Exception:
-            logger.debug("build_statement_seqs_for_cache failed in %s", file_path, exc_info=True)
-            continue
-        for seq in seqs:
-            all_seqs.append({"file": file_path, **seq})
-    return _sequence_clusters_from_seqs(all_seqs, min_lines, cross_file)
-
-
 # ---------------------------------------------------------------------------
 # Public query / format API
 # ---------------------------------------------------------------------------
@@ -929,14 +881,13 @@ def _query_sequence_clusters(
 
 def _load_cached_payloads(
     project_path: str,
-    py_files: list[str],
+    source_files: list[str],
 ) -> dict[str, dict] | None:
     """Try to load per-file subtree/sequence payloads from dup_cache.
 
     Returns ``{file_path: {"subtrees": [...], "sequences": [...]}}`` for
     files that have a cache hit, or ``None`` if the cache is unavailable.
     """
-    import hashlib
     import pickle
     import sqlite3
     import zlib
@@ -968,15 +919,13 @@ def _load_cached_payloads(
         return None
 
     result: dict[str, dict] = {}
-    for file_path in py_files:
+    for file_path in source_files:
         try:
             with open(file_path, encoding="utf-8", errors="replace") as fh:
                 content = fh.read()
         except OSError:
             continue
-        content_hash = hashlib.md5(
-            content.encode(), usedforsecurity=False,
-        ).hexdigest()
+        content_hash = _duplicate_cache_key(file_path, content)
         blob = cached_rows.get(content_hash)
         if blob is not None:
             try:
@@ -1036,45 +985,40 @@ def query_duplicates(
         return []
 
     if root.is_file():
-        py_files = [str(root)]
+        source_files = [str(root)]
     else:
         resolved = str(root.resolve())
         if file_scope:
             scope_path = Path(file_scope)
             if scope_path.is_file():
-                py_files = [str(scope_path)]
+                source_files = [str(scope_path)]
             elif scope_path.is_dir():
-                py_files = _collect_py_files(str(scope_path))
+                source_files = _collect_duplicate_files(str(scope_path))
             else:
-                py_files = [p for p in _collect_py_files(resolved) if file_scope in p]
+                source_files = [p for p in _collect_duplicate_files(resolved) if file_scope in p]
         else:
-            py_files = _collect_py_files(resolved)
+            source_files = _collect_duplicate_files(resolved)
 
-    if not py_files:
+    if not source_files:
         return []
 
     if symbol_scope:
-        py_files = [p for p in py_files if symbol_scope in p]
+        source_files = [p for p in source_files if symbol_scope in p]
 
-    cached = _load_cached_payloads(project_path, py_files)
-    if cached is not None and len(cached) == len(py_files):
-        logger.debug("query_duplicates: using cached payloads for %d files", len(cached))
-        clusters: list[DuplicateCluster] = []
-        if mode in ("exact", "all"):
-            clusters.extend(_clusters_from_cached_subtrees(cached, min_lines, cross_file))
-        if mode in ("sequence", "all"):
-            clusters.extend(_clusters_from_cached_sequences(cached, min_lines, cross_file))
-    else:
-        scope_resolver, file_data = _preparse_files(py_files, symbol_scope=None)
-        if not file_data:
-            return []
-        clusters = []
-        if mode in ("exact", "all"):
-            clusters.extend(_query_exact_clusters(file_data, min_lines, cross_file))
-        if mode in ("sequence", "all"):
-            clusters.extend(_query_sequence_clusters(
-                file_data, scope_resolver, min_lines, cross_file,
-            ))
+    source_files = [str(Path(p).resolve()) for p in source_files]
+    cached = _load_cached_payloads(project_path, source_files) or {}
+    for _language, _config, path, data in _parsed_inputs(
+        p for p in source_files if p not in cached
+    ):
+        content, tree, qn_at, def_loc, symbols = data
+        prepared = (tree, qn_at, def_loc, symbols)
+        cached[path] = _build_duplicate_payload_for_cache(path, content, None, _prepared=prepared, mode=mode)
+    cached = dict(sorted(cached.items()))
+    clusters = []
+    if mode in ("exact", "all"):
+        clusters.extend(_clusters_from_cached_subtrees(cached, min_lines, cross_file))
+    if mode in ("sequence", "all"):
+        clusters.extend(_clusters_from_cached_sequences(cached, min_lines, cross_file))
 
     if involves_file:
         target = str(Path(involves_file).resolve())

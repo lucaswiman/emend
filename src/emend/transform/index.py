@@ -1292,12 +1292,13 @@ def warm_caches(
     # Optional duplicate prewarming. Ordinary indexing leaves this analysis
     # to its consumers, which can compute payloads in memory on demand.
     if build_duplicates:
+        from emend.language_registry import detect_language
         announce_phase("Duplicate analysis")
         try:
             t_dup = time.monotonic()
             _compute_duplicate_payloads(db_path, project_root, file_contents)
             stats["dup_cached"] = len(
-                [fc for fc in file_contents if fc[0].endswith(".py")]
+                [fc for fc in file_contents if detect_language(fc[0]) in {"python", "rust", "typescript"}]
             )
             logger.info(
                 "warm_caches: duplicate analysis done in %.3fs",
@@ -1341,18 +1342,18 @@ def _compute_duplicate_payloads(
 ) -> None:
     """Compute and cache per-file duplicate analysis payloads.
 
-    For each Python file whose content hash is not already in ``dup_cache``,
+    For each supported file whose grammar/content hash is not already in ``dup_cache``,
     builds canonical subtree + sibling-sequence payloads via
     :mod:`emend.duplicate` and stores the compressed payload in ``parse.db``
     (``dup_cache`` table).
 
-    Only Python (``.py``) files are processed in production v1.
     """
     import pickle
     import sqlite3 as _sqlite3
     import zlib
 
-    from emend.duplicate import DUP_CACHE_VERSION as DUP_VERSION
+    from emend.duplicate import DUP_CACHE_VERSION as DUP_VERSION, _duplicate_cache_key
+    from emend.language_registry import detect_language
 
     conn = _sqlite3.connect(db_path, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -1370,43 +1371,36 @@ def _compute_duplicate_payloads(
         # Table might not exist yet
         logger.debug("dup_cache read failed; recomputing all payloads", exc_info=True)
 
-    # Filter to Python files only and compute content hashes.
-    py_files: list[tuple[str, str, str]] = []  # (path, content, content_hash)
+    # Filter supported grammars and compute content-addressed cache keys.
+    source_files: list[tuple[str, str, str]] = []  # (path, content, content_hash)
     for file_path, content in file_contents:
-        if not file_path.endswith(".py"):
+        if detect_language(file_path) not in {"python", "rust", "typescript"}:
             continue
-        content_hash = hashlib.md5(
-            content.encode(), usedforsecurity=False
-        ).hexdigest()
-        py_files.append((file_path, content, content_hash))
+        content_hash = _duplicate_cache_key(file_path, content)
+        source_files.append((file_path, content, content_hash))
 
-    # The payload cache is content-addressed, so if every current Python file
+    # The payload cache is content-addressed, so if every current source file
     # is present there is no need to rebuild a project-wide scope resolver.
     # On large repositories constructing that resolver dominates warm runs.
-    if all(content_hash in cached_hashes for _, _, content_hash in py_files):
+    if all(content_hash in cached_hashes for _, _, content_hash in source_files):
         conn.close()
         return
 
-    # Build a scope resolver and index all Python files up front so that
-    # canonicalize_file_for_cache / build_statement_seqs_for_cache get
-    # accurate qualified-name information even for files that reference each
-    # other.  Files that are already cached are still indexed (cheap) so that
-    # cross-file qualified names resolve correctly.
-    scope_resolver = _rust.PyScopeResolver(str(Path(project_root).resolve()))
-    for file_path, content, _hash in py_files:
-        try:
-            scope_resolver.index_file(file_path, content)
-        except Exception:
-            logger.debug("scope indexing failed for %s", file_path, exc_info=True)
+    resolvers = {}
+    for file_path, content, _hash in source_files:
+        extension = Path(file_path).suffix.lstrip(".")
+        if extension not in resolvers:
+            resolvers[extension] = _rust.PyScopeResolver(str(Path(project_root).resolve()), extension)
+        resolvers[extension].index_file(file_path, content)
 
     from emend.duplicate import _build_duplicate_payload_for_cache
 
-    for file_path, content, content_hash in py_files:
+    for file_path, content, content_hash in source_files:
         if content_hash in cached_hashes:
             continue
         try:
             payload = _build_duplicate_payload_for_cache(
-                file_path, content, scope_resolver
+                file_path, content, resolvers[Path(file_path).suffix.lstrip(".")]
             )
             data = zlib.compress(pickle.dumps(payload))
             conn.execute(
