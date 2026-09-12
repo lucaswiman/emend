@@ -12,6 +12,7 @@ Currently supports:
 from __future__ import annotations
 
 import logging
+import stat as stat_module
 import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -109,13 +110,17 @@ def load_typescript_config(
             json_candidate = candidate.with_suffix(candidate.suffix + ".json")
             if json_candidate.is_file():
                 return json_candidate.resolve()
+        if specifier.startswith(".") or Path(specifier).is_absolute():
+            return base if base.suffix else base.with_suffix(".json")
         return None
 
     def load(path: Path) -> tuple[dict[str, Any], dict[str, Path], list[Path]]:
         path = path.resolve()
-        if path in seen or not path.is_file():
+        if path in seen:
             return {}, {}, []
         seen.add(path)
+        if not path.is_file():
+            return {}, {}, [path]
         data = load_jsonc(path)
         options: dict[str, Any] = {}
         origins: dict[str, Path] = {}
@@ -159,12 +164,39 @@ def find_project_root(start: str | Path = ".") -> Path:
     return path
 
 
-@lru_cache(maxsize=64)
-def find_source_root(project_root: str, language: str = "python") -> Path:
-    """Return the configured or conventional source root for *language*."""
-    root = Path(project_root).resolve()
+@dataclass(frozen=True)
+class _ModuleContextEntry:
+    module_root: Path
+    crate_roots: tuple[Path, ...]
+    watched: tuple[Path, ...]
+    signatures: tuple[tuple[bool, int, int, int, int, int, int], ...]
+
+
+_MODULE_CONTEXT_CACHE: dict[tuple[Path, str], _ModuleContextEntry] = {}
+
+
+def _path_signature(path: Path) -> tuple[bool, int, int, int, int, int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return False, 0, 0, 0, 0, 0, 0
+    return (
+        True, stat_module.S_IFMT(stat.st_mode), stat.st_dev, stat.st_ino, stat.st_size,
+        stat.st_mtime_ns, stat.st_ctime_ns,
+    )
+
+
+def _source_root_and_inputs(
+    root: Path, language: str,
+) -> tuple[Path, tuple[Path, ...], dict[str, Any]]:
+    """Compute one source root and return the configuration inputs consumed."""
+    watched = [root / "src"]
+    parsed: dict[str, Any] = {}
     if language == "python":
-        data = _load_toml(root / "pyproject.toml")
+        pyproject = root / "pyproject.toml"
+        setup_cfg = root / "setup.cfg"
+        watched.extend((pyproject, setup_cfg))
+        data = _load_toml(pyproject)
         tool = data.get("tool", {})
         candidates = [tool.get("maturin", {}).get("python-source")]
 
@@ -185,10 +217,12 @@ def find_source_root(project_root: str, language: str = "python") -> Path:
         if isinstance(sources, (list, dict)):
             candidates.extend(sources)
         for relative in candidates:
-            if isinstance(relative, str) and relative and (root / relative).is_dir():
-                return (root / relative).resolve()
+            if isinstance(relative, str) and relative:
+                candidate = root / relative
+                watched.append(candidate)
+                if candidate.is_dir():
+                    return candidate.resolve(), tuple(watched), parsed
 
-        setup_cfg = root / "setup.cfg"
         if setup_cfg.is_file():
             import configparser
 
@@ -201,43 +235,111 @@ def find_source_root(project_root: str, language: str = "python") -> Path:
                 for part in package_dir.splitlines():
                     if part.strip().startswith("="):
                         candidate = root / part.split("=", 1)[1].strip()
+                        watched.append(candidate)
                         if candidate.is_dir():
-                            return candidate.resolve()
+                            return candidate.resolve(), tuple(watched), parsed
             except (OSError, UnicodeDecodeError, configparser.Error):
                 logger.debug("setup.cfg source-root detection failed", exc_info=True)
 
         src = root / "src"
-        if src.is_dir() and any(
+        children = list(src.iterdir()) if src.is_dir() else []
+        for child in children:
+            watched.extend((child, child / "__init__.py"))
+        if any(
             child.is_dir() and (child / "__init__.py").is_file()
-            for child in src.iterdir()
+            for child in children
         ):
-            return src.resolve()
+            return src.resolve(), tuple(watched), parsed
     elif language == "rust":
-        lib_path = _load_toml(root / "Cargo.toml").get("lib", {}).get("path")
-        if lib_path and (root / lib_path).parent.is_dir():
-            return (root / lib_path).parent.resolve()
+        cargo_path = root / "Cargo.toml"
+        watched.extend((cargo_path, root / "src" / "lib.rs", root / "src" / "main.rs"))
+        cargo = _load_toml(cargo_path)
+        parsed["cargo"] = cargo
+        lib_path = cargo.get("lib", {}).get("path")
+        if lib_path:
+            watched.extend((root / lib_path, (root / lib_path).parent))
+            if (root / lib_path).parent.is_dir():
+                return (root / lib_path).parent.resolve(), tuple(watched), parsed
         if (root / "src").is_dir():
-            return (root / "src").resolve()
+            return (root / "src").resolve(), tuple(watched), parsed
     elif language == "typescript":
         tsconfig = root / "tsconfig.json"
+        watched.append(tsconfig)
         if tsconfig.is_file():
             try:
-                compiler, origins, _sources = load_typescript_config(root)
+                compiler, origins, sources = load_typescript_config(root)
+                watched.extend(sources)
                 root_dir = compiler.get("rootDir")
                 root_base = origins.get("rootDir", root)
-                if root_dir and (root_base / root_dir).is_dir():
-                    return (root_base / root_dir).resolve()
+                if root_dir:
+                    root_dir_path = root_base / root_dir
+                    watched.append(root_dir_path)
+                    if root_dir_path.is_dir():
+                        return root_dir_path.resolve(), tuple(watched), parsed
                 base_url = compiler.get("baseUrl")
                 base_base = origins.get("baseUrl", root)
-                if base_url and base_url != "." and (base_base / base_url).is_dir():
-                    return (base_base / base_url).resolve()
+                if base_url and base_url != ".":
+                    base_url_path = base_base / base_url
+                    watched.append(base_url_path)
+                    if base_url_path.is_dir():
+                        return base_url_path.resolve(), tuple(watched), parsed
             except (OSError, ValueError, TypeError, AttributeError):
                 logger.debug("tsconfig source-root detection failed", exc_info=True)
         if (root / "src").is_dir():
-            return (root / "src").resolve()
+            return (root / "src").resolve(), tuple(watched), parsed
     elif (root / "src").is_dir():
-        return (root / "src").resolve()
-    return root
+        return (root / "src").resolve(), tuple(watched), parsed
+    return root, tuple(watched), parsed
+
+
+def _build_module_context(root: Path, language: str) -> _ModuleContextEntry:
+    module_root, watched, parsed = _source_root_and_inputs(root, language)
+    roots: list[Path] = []
+    if language == "rust":
+        cargo = parsed.get("cargo", {})
+        lib_path = cargo.get("lib", {}).get("path")
+        if lib_path:
+            roots.append((root / lib_path).resolve())
+        elif (module_root / "lib.rs").is_file():
+            roots.append(module_root / "lib.rs")
+        main = (root / "src" if (root / "src").is_dir() else root) / "main.rs"
+        watched = (*watched, main)
+        if main.is_file():
+            roots.append(main)
+        binaries = cargo.get("bin", [])
+        for binary in binaries if isinstance(binaries, list) else []:
+            if isinstance(binary, dict) and binary.get("path"):
+                binary_path = (root / binary["path"]).resolve()
+                roots.append(binary_path)
+                watched = (*watched, binary_path)
+    watched = tuple(dict.fromkeys(watched))
+    return _ModuleContextEntry(
+        module_root, tuple(dict.fromkeys(roots)), watched,
+        tuple(_path_signature(path) for path in watched),
+    )
+
+
+def _module_context_entry(root: Path, language: str) -> _ModuleContextEntry:
+    key = (root, language)
+    entry = _MODULE_CONTEXT_CACHE.get(key)
+    if entry is None or entry.signatures != tuple(
+        _path_signature(path) for path in entry.watched
+    ):
+        entry = _build_module_context(root, language)
+        _MODULE_CONTEXT_CACHE[key] = entry
+    return entry
+
+
+def _clear_module_context_cache() -> None:
+    _MODULE_CONTEXT_CACHE.clear()
+
+
+def find_source_root(project_root: str, language: str = "python") -> Path:
+    """Return the cached configured or conventional source root."""
+    return _module_context_entry(Path(project_root).resolve(), language).module_root
+
+
+find_source_root.cache_clear = _clear_module_context_cache  # type: ignore[attr-defined]
 
 
 def module_name_for_file(
@@ -253,7 +355,7 @@ def module_name_for_file(
     path = Path(file_path).resolve()
     root = Path(project_root).resolve() if project_root else find_project_root(path)
     language = language or detect_language(path) or "python"
-    source_root = find_source_root(str(root), language)
+    source_root, _root_module = module_resolution_context(root, language, file_path=path)
     try:
         relative = path.relative_to(source_root)
     except ValueError:
@@ -262,11 +364,53 @@ def module_name_for_file(
     directories = list(relative.parts[:-1])
     module_parts = (
         directories
-        if directories and (stem == "__init__" or language == "rust" and stem == "mod")
+        if directories and (
+            stem == "__init__"
+            or language == "rust" and stem == "mod"
+        )
         else [*directories, stem]
     )
     separator = module_separator or get_module_separator(language)
     return separator.join(module_parts) if module_parts else stem
+
+
+def module_resolution_context(
+    project_root: str | Path, language: str, *, file_path: str | Path | None = None,
+) -> tuple[Path, Path | None]:
+    """Return the configured module root and optional crate-root file."""
+    root = Path(project_root).resolve()
+    entry = _module_context_entry(root, language)
+    module_root, roots = entry.module_root, entry.crate_roots
+    if language != "rust":
+        return module_root, None
+    selected = Path(file_path).resolve() if file_path is not None else None
+    if selected in roots:
+        return module_root, selected
+    if len(roots) == 1:
+        return module_root, roots[0]
+    # With both library and binary crate roots, assigning one project-wide
+    # root would conflate their root symbols.  Keep explicit file identities;
+    # shared physical submodules remain addressable without guessing ownership.
+    return module_root, None
+
+
+def resolver_module_name_for_file(
+    file_path: str | Path, project_root: str | Path | None = None,
+) -> str:
+    """Return the module identity emitted by the configured scope resolver."""
+    from emend import emend_core
+    from emend.language_registry import detect_language
+
+    path = Path(file_path).resolve()
+    root = Path(project_root).resolve() if project_root else find_project_root(path)
+    module_root, crate_root = module_resolution_context(
+        root, detect_language(path) or "python", file_path=path,
+    )
+    resolver = emend_core.PyScopeResolver(
+        str(root), path.suffix.lstrip("."), str(module_root),
+        str(crate_root) if crate_root else None,
+    )
+    return resolver.module_name_for_file(str(path))
 
 
 @dataclass

@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Parse/index cache version remains shared with ``index.py``.  FactGraph has
 # its own marker because its Cozo relation shape can change independently.
-_SCHEMA_VERSION = "6"
+_SCHEMA_VERSION = "7"
 
 def _resolve_shared_data_root(project_root: str) -> Path:
     """Return the main checkout root for user-managed shared data.

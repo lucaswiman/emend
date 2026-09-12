@@ -227,6 +227,8 @@ pub enum ReferenceKind {
     Write,
     Call,
     Import,
+    Reexport,
+    WildcardReexport,
     Definition,
 }
 
@@ -237,6 +239,8 @@ impl ReferenceKind {
             ReferenceKind::Write => "write",
             ReferenceKind::Call => "call",
             ReferenceKind::Import => "import",
+            ReferenceKind::Reexport => "reexport",
+            ReferenceKind::WildcardReexport => "wildcard_reexport",
             ReferenceKind::Definition => "definition",
         }
     }
@@ -285,6 +289,7 @@ pub struct ScopedImportBinding {
     pub byte_offset: usize,
     pub line: usize,
     pub binding: ImportBinding,
+    pub raw_module_path: String,
 }
 
 /// A name imported within a single import statement.
@@ -1119,6 +1124,103 @@ pub struct ImportGraph {
     pub file_to_module: HashMap<PathBuf, String>,
 }
 
+/// Resolve an import spelling into the same module identity used for files.
+/// Syntax extraction remains language-configured; only path semantics differ
+/// by the configured resolution strategy.
+fn canonical_import_module(
+    raw: &str,
+    owner: &str,
+    separator: &str,
+    strategy: &str,
+    crate_root: Option<&str>,
+    crate_reference: bool,
+) -> String {
+    let raw = raw.trim_matches(['\'', '"']);
+    let slash = if separator.is_empty() { "." } else { separator };
+    let mut parts: Vec<&str> = Vec::new();
+    let mut relative = false;
+
+    if strategy == "rust" || separator == "::" {
+        let mut incoming = raw.split("::").peekable();
+        match incoming.peek().copied() {
+            Some("crate") => {
+                incoming.next();
+                let remaining = incoming.clone().count();
+                if remaining <= usize::from(crate_reference) {
+                    if let Some(root) = crate_root { parts.extend(root.split(slash)); }
+                    else { parts.push("crate"); }
+                }
+                relative = true;
+            }
+            Some("self") => {
+                incoming.next();
+                parts.extend(owner.split(slash));
+                relative = true;
+            }
+            Some("super") => {
+                parts.extend(owner.split(slash));
+                while incoming.peek() == Some(&"super") {
+                    incoming.next();
+                    parts.pop();
+                }
+                relative = true;
+            }
+            _ => {}
+        }
+        if relative { parts.extend(incoming); }
+    }
+
+    let resolved = if relative { parts.join(slash) } else { raw.to_string() };
+    if strategy == "node" {
+        format!("<external>{slash}{}", normalize_node_module(resolved, slash))
+    } else { resolved }
+}
+
+fn normalize_node_module(mut module: String, separator: &str) -> String {
+    for extension in [".tsx", ".jsx", ".ts", ".js"] {
+        if module.ends_with(extension) {
+            module.truncate(module.len() - extension.len());
+            break;
+        }
+    }
+    let index_suffix = format!("{separator}index");
+    if module == "index" {
+        module.clear();
+    } else if module.ends_with(&index_suffix) {
+        module.truncate(module.len() - index_suffix.len());
+    }
+    module
+}
+
+fn join_module_name(module: &str, name: &str, separator: &str) -> String {
+    if module.is_empty() { name.to_string() }
+    else { format!("{module}{separator}{name}") }
+}
+
+fn canonical_node_import(
+    raw: &str, file_path: &Path, module_root: &Path, project_root: &Path,
+    separator: &str,
+) -> Option<String> {
+    let raw = raw.trim_matches(['\'', '"']);
+    if !(raw.starts_with("./") || raw.starts_with("../")) { return None; }
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    for component in file_path.parent()?.join(raw).components() {
+        match component {
+            std::path::Component::ParentDir => { parts.pop(); }
+            std::path::Component::CurDir => {}
+            other => parts.push(other.as_os_str().to_owned()),
+        }
+    }
+    let resolved: PathBuf = parts.iter().collect();
+    let relative = resolved.strip_prefix(module_root)
+        .or_else(|_| resolved.strip_prefix(project_root)).ok()?;
+    Some(normalize_node_module(
+        relative.components().filter_map(|part| part.as_os_str().to_str())
+            .collect::<Vec<_>>().join(separator),
+        separator,
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Build context -- collects mutable state during tree walk
 // ---------------------------------------------------------------------------
@@ -1134,10 +1236,18 @@ struct BuildContext<'a> {
     imports: HashMap<String, ImportBinding>,
     scoped_imports: Vec<ScopedImportBinding>,
     definitions: Vec<(QualifiedName, Location)>,
+    import_owner: String,
+    module_separator: String,
+    resolution: String,
+    crate_root: Option<String>,
+    module_root: PathBuf,
+    project_root: PathBuf,
 }
 
 impl<'a> BuildContext<'a> {
-    fn new(source: &'a str, file_path: &'a Path) -> Self {
+    fn new(source: &'a str, file_path: &'a Path, import_owner: String,
+           module_separator: &str, resolution: &str, crate_root: Option<String>,
+           module_root: PathBuf, project_root: PathBuf) -> Self {
         Self {
             source: source.as_bytes(),
             file_path,
@@ -1147,6 +1257,12 @@ impl<'a> BuildContext<'a> {
             imports: HashMap::new(),
             scoped_imports: Vec::new(),
             definitions: Vec::new(),
+            import_owner,
+            module_separator: module_separator.to_string(),
+            resolution: resolution.to_string(),
+            crate_root,
+            module_root,
+            project_root,
         }
     }
 
@@ -1214,24 +1330,52 @@ impl<'a> BuildContext<'a> {
         line: usize,
         binding: ImportBinding,
     ) {
+        let raw_binding = binding.clone();
+        let raw_module_path = raw_binding.module_path.clone();
+        let mut canonical_binding = binding;
+        let mut owner = self.import_owner.clone();
+        if self.resolution == "rust" {
+            let mut nested = Vec::new();
+            let mut current = Some(scope_id);
+            while let Some(id) = current {
+                let Some(scope) = self.scope(id) else { break };
+                if scope.kind == ScopeKind::Module {
+                    if let Some(name) = &scope.owner_name { nested.push(name.clone()); }
+                }
+                current = scope.parent;
+            }
+            nested.reverse();
+            for name in nested {
+                if !owner.is_empty() { owner.push_str(&self.module_separator); }
+                owner.push_str(&name);
+            }
+        }
+        canonical_binding.module_path = canonical_node_import(
+            &canonical_binding.module_path, self.file_path,
+            &self.module_root, &self.project_root, &self.module_separator,
+        ).unwrap_or_else(|| canonical_import_module(
+            &canonical_binding.module_path, &owner, &self.module_separator,
+            &self.resolution, self.crate_root.as_deref(), false,
+        ));
         let binding_id = format!(
             "{}:{}:{}:{}:{}",
             scope_id.0,
             byte_offset,
-            binding.local_name,
-            binding.module_path,
-            binding.imported_name.as_deref().unwrap_or(""),
+            canonical_binding.local_name,
+            canonical_binding.module_path,
+            canonical_binding.imported_name.as_deref().unwrap_or(""),
         );
         if scope_id.0 == 0 {
             self.imports
-                .insert(binding.local_name.clone(), binding.clone());
+                .insert(raw_binding.local_name.clone(), raw_binding);
         }
         self.scoped_imports.push(ScopedImportBinding {
             binding_id,
             scope_id,
             byte_offset,
             line,
-            binding,
+            raw_module_path,
+            binding: canonical_binding,
         });
     }
 }
@@ -1250,7 +1394,9 @@ pub struct ScopeResolver {
     pub qn_index: HashMap<String, Vec<Location>>,
     /// Reverse index: file → QN names defined in that file (for O(1) removal).
     file_qns: HashMap<PathBuf, Vec<String>>,
+    pub module_root: PathBuf,
     pub project_root: PathBuf,
+    pub root_module_file: Option<PathBuf>,
 }
 
 impl FileScope {
@@ -1416,24 +1562,41 @@ impl FileScope {
 
 impl ScopeResolver {
     pub fn new(config: LanguageConfig, project_root: PathBuf) -> Self {
+        Self::new_with_module_root(config, project_root.clone(), project_root, None)
+    }
+
+    pub fn new_with_module_root(
+        config: LanguageConfig, project_root: PathBuf, module_root: PathBuf,
+        root_module_file: Option<PathBuf>,
+    ) -> Self {
         Self {
             config,
             file_scopes: HashMap::new(),
             import_graph: ImportGraph::default(),
             qn_index: HashMap::new(),
             file_qns: HashMap::new(),
+            module_root,
             project_root,
+            root_module_file,
         }
     }
 
-    fn derive_module_path(&self, file_path: &Path, separator: &str) -> String {
+    pub(crate) fn derive_module_path(&self, file_path: &Path, separator: &str) -> String {
         derive_module_path(
             file_path,
-            &self.project_root,
+            if file_path.starts_with(&self.module_root) {
+                &self.module_root
+            } else {
+                &self.project_root
+            },
             separator,
             &self.config.imports.resolution,
             &self.config.language.file_extensions,
         )
+    }
+
+    pub(crate) fn module_name_for_file(&self, file_path: &Path) -> String {
+        self.derive_module_path(file_path, &self.config.qualified_names.module_separator)
     }
 
     pub fn get_symbols(&self, path: &Path) -> Vec<crate::symbols::RustSymbol> {
@@ -1527,7 +1690,27 @@ impl ScopeResolver {
         content_hash: [u8; 16],
         module_path: String,
     ) -> FileScope {
-        let mut ctx = BuildContext::new(source, path);
+        let separator = &self.config.qualified_names.module_separator;
+        let import_owner = if self.config.imports.resolution == "node"
+            && path.file_stem().and_then(|value| value.to_str()) == Some("index")
+        {
+            if module_path.is_empty() { "index".to_string() }
+            else { format!("{module_path}{separator}index") }
+        } else {
+            module_path.clone()
+        };
+        let crate_root = self.root_module_file.as_ref().map(|root| {
+            derive_module_path(
+                root, &self.module_root, separator,
+                &self.config.imports.resolution,
+                &self.config.language.file_extensions,
+            )
+        });
+        let mut ctx = BuildContext::new(
+            source, path, import_owner, separator,
+            &self.config.imports.resolution, crate_root,
+            self.module_root.clone(), self.project_root.clone(),
+        );
 
         // Create the module-level scope
         let root_node = tree.root_node();
@@ -1690,11 +1873,53 @@ impl ScopeResolver {
         // Track whether we're inside an import statement.
         let child_in_import = in_import || is_plain_import || is_from_import;
 
+        // A wildcard re-export contains no symbol token to rewrite. Record its
+        // canonical source module so mutating clients can fail before making a
+        // partial rename that breaks downstream imports.
+        if node_kind == "export_statement" {
+            fn find_star(node: tree_sitter::Node) -> Option<tree_sitter::Node> {
+                if node.kind() == "*" { return Some(node); }
+                let mut cursor = node.walk();
+                if cursor.goto_first_child() {
+                    loop {
+                        if let Some(found) = find_star(cursor.node()) { return Some(found); }
+                        if !cursor.goto_next_sibling() { break; }
+                    }
+                }
+                None
+            }
+            if let (Some(source_node), Some(star)) = (
+                node.child_by_field_name("source"), find_star(node),
+            ) {
+                let raw_source = node_text(source_node, source);
+                let imported = canonical_node_import(
+                    raw_source, file_path, &self.module_root, &self.project_root,
+                    &self.config.qualified_names.module_separator,
+                ).unwrap_or_else(|| raw_source.trim_matches(['\'', '"']).to_string());
+                qn_set.insert(imported.clone());
+                refs.push(Reference {
+                    file: file_path.to_path_buf(),
+                    line: star.start_position().row + 1,
+                    column: star.start_position().column,
+                    byte_offset: star.start_byte(),
+                    end_byte: star.end_byte(),
+                    lexical_qn: "*".to_string(),
+                    qn: QualifiedName { name: imported },
+                    resolved: true,
+                    import_binding_id: None,
+                    kind: ReferenceKind::WildcardReexport,
+                    in_annotation: false,
+                });
+            }
+        }
+
         // Special handling for imports: record module name references
         if is_plain_import {
+            let mut handled = false;
             for_each_child(&node, |child| {
                 let ck = child.kind();
                 if cfg_imports.dotted_name.as_deref() == Some(ck) {
+                    handled = true;
                     let qn = node_text(child, source).to_string();
                     qn_set.insert(qn.clone());
                     refs.push(Reference {
@@ -1711,6 +1936,7 @@ impl ScopeResolver {
                         in_annotation: false,
                     });
                 } else if cfg_imports.aliased_import.as_deref() == Some(ck) {
+                    handled = true;
                     if let Some(name_node) = child.child_by_field_name("name") {
                         let qn = node_text(name_node, source).to_string();
                         qn_set.insert(qn.clone());
@@ -1732,8 +1958,11 @@ impl ScopeResolver {
                     // and we don't want a reference for the alias name here.
                 }
             });
-            // We've handled the children we care about
-            return;
+            // Recursive use trees (Rust) need the regular aggregate-path
+            // walker below; simple imports have been fully recorded here.
+            if handled {
+                return;
+            }
         }
 
         if is_from_import {
@@ -1789,7 +2018,7 @@ impl ScopeResolver {
         }
 
         // Identifier and aggregate-path references differ only in resolution.
-        let mut record_reference = |lexical_qn: String, target: Option<(String, Option<String>)>| {
+        let mut record_reference = |lexical_qn: String, target: Option<(String, Option<String>)>, kind: Option<ReferenceKind>| {
             let resolved = target.is_some();
             let (qn, import_binding_id) = target.unwrap_or_else(|| (lexical_qn.clone(), None));
             if resolved {
@@ -1805,7 +2034,7 @@ impl ScopeResolver {
                 qn: QualifiedName { name: qn },
                 resolved,
                 import_binding_id,
-                kind: self.classify_reference(&node, in_import),
+                kind: kind.unwrap_or_else(|| self.classify_reference(&node, in_import)),
                 in_annotation,
             });
         };
@@ -1826,12 +2055,64 @@ impl ScopeResolver {
             let is_keyword = self.config.language.keywords.iter().any(|k| k == name);
 
             if !is_attr_name && !self.is_qualified_component(&node) && !is_keyword {
-                let resolved = self.resolve_identifier_detail(
+                let exported_token = if self.config.imports.resolution == "node" {
+                    let mut ancestor = node.parent();
+                    let mut export = None;
+                    while let Some(parent) = ancestor {
+                        if parent.kind() == "export_statement" { export = Some(parent); break; }
+                        ancestor = parent.parent();
+                    }
+                    export.and_then(|statement| statement.child_by_field_name("source")).map(|source_node| {
+                        let mut owner = module_path.to_string();
+                        if file_path.file_stem().and_then(|value| value.to_str()) == Some("index") {
+                            if !owner.is_empty() { owner.push_str(&self.config.qualified_names.module_separator); }
+                            owner.push_str("index");
+                        }
+                        let raw_source = node_text(source_node, source);
+                        let imported = canonical_node_import(
+                            raw_source, file_path, &self.module_root, &self.project_root,
+                            &self.config.qualified_names.module_separator,
+                        ).unwrap_or_else(|| canonical_import_module(
+                            raw_source, &owner,
+                            &self.config.qualified_names.module_separator,
+                            &self.config.imports.resolution, None, false,
+                        ));
+                        let unaliased_name = node.parent().is_some_and(|specifier| {
+                            specifier.kind() == "export_specifier"
+                                && specifier.child_by_field_name("name") == Some(node)
+                                && specifier.child_by_field_name("alias").is_none()
+                        });
+                        ((join_module_name(&imported, name, &self.config.qualified_names.module_separator), None), unaliased_name)
+                    })
+                } else { None };
+                let imported_token = if in_import {
+                    node.parent().filter(|parent| parent.kind() == "import_specifier")
+                        .and_then(|specifier| {
+                            let local = specifier.child_by_field_name("alias")
+                                .map(|alias| node_text(alias, source)).unwrap_or(name);
+                            self.visible_import(
+                                local, node.start_byte(), current_scope,
+                                scopes, scope_index, imports,
+                            )
+                        })
+                        .filter(|scoped| scoped.binding.imported_name.as_deref() == Some(name))
+                        .map(|scoped| (
+                            join_module_name(
+                                &scoped.binding.module_path, name,
+                                &self.config.qualified_names.module_separator,
+                            ),
+                            Some(scoped.binding_id.clone()),
+                        ))
+                } else { None };
+                let preserve_export = exported_token.as_ref().is_some_and(|(_, preserve)| *preserve);
+                let resolved = exported_token.map(|(target, _)| target).or(imported_token).or_else(|| self.resolve_identifier_detail(
                     name, node.start_byte(), module_path,
-                    scopes, scope_index, imports,
-                    current_scope,
+                    scopes, scope_index, imports, current_scope,
+                ));
+                record_reference(
+                    name.to_string(), resolved,
+                    preserve_export.then_some(ReferenceKind::Reexport),
                 );
-                record_reference(name.to_string(), resolved);
             }
         }
 
@@ -1844,6 +2125,55 @@ impl ScopeResolver {
             && node_kind == path_cfg.scoped_identifier;
         if (is_attribute || is_scoped_path) && !self.is_qualified_component(&node) {
             if let Some(full_name) = self.collect_dotted_name(&node, source) {
+                let rust_rooted = self.config.imports.resolution == "rust"
+                    && (full_name.starts_with("crate::")
+                        || full_name.starts_with("self::")
+                        || full_name.starts_with("super::"));
+                if rust_rooted {
+                    let mut owner = module_path.to_string();
+                    let mut nested = Vec::new();
+                    let mut scope = Some(current_scope);
+                    while let Some(id) = scope {
+                        let Some(index) = scope_index.get(&id) else { break };
+                        let current = &scopes[*index];
+                        if current.kind == ScopeKind::Module {
+                            if let Some(name) = &current.owner_name { nested.push(name.clone()); }
+                        }
+                        scope = current.parent;
+                    }
+                    nested.reverse();
+                    for name in nested {
+                        if !owner.is_empty() { owner.push_str(&self.config.qualified_names.module_separator); }
+                        owner.push_str(&name);
+                    }
+                    let crate_root = self.root_module_file.as_ref().map(|root| self.derive_module_path(
+                        root, &self.config.qualified_names.module_separator,
+                    ));
+                    let mut target = canonical_import_module(
+                        &full_name, &owner,
+                        &self.config.qualified_names.module_separator,
+                        &self.config.imports.resolution,
+                        crate_root.as_deref(),
+                        true,
+                    );
+                    if full_name.starts_with("crate::") {
+                        let first = full_name.trim_start_matches("crate::").split("::").next();
+                        let inline = first.is_some_and(|name| scopes.iter().any(|scope| {
+                            scope.kind == ScopeKind::Module
+                                && scope.owner_name.as_deref() == Some(name)
+                        }));
+                        if inline {
+                            if let Some(root) = crate_root.as_deref() {
+                                target = join_module_name(
+                                    root, &target,
+                                    &self.config.qualified_names.module_separator,
+                                );
+                            }
+                        }
+                    }
+                    record_reference(full_name, Some((target, None)), None);
+                    return;
+                }
                 let receiver_qn = if is_attribute {
                     self.resolve_receiver_method(
                         &node, source, module_path, scopes, scope_index, imports, method_targets, current_scope,
@@ -1857,7 +2187,7 @@ impl ScopeResolver {
                         &full_name, node.start_byte(), module_path,
                         scopes, scope_index, imports, current_scope,
                     ));
-                record_reference(full_name, resolved);
+                record_reference(full_name, resolved, None);
             }
         }
 
@@ -2121,7 +2451,10 @@ impl ScopeResolver {
                 imp.module_path.clone()
             } else if let Some(ref imported_name) = imp.imported_name {
                 // `from foo import bar` → foo.bar
-                format!("{}{}{}", imp.module_path, self.config.qualified_names.module_separator, imported_name)
+                join_module_name(
+                    &imp.module_path, imported_name,
+                    &self.config.qualified_names.module_separator,
+                )
             } else {
                 // `import foo` → foo
                 imp.module_path.clone()
@@ -2162,6 +2495,14 @@ impl ScopeResolver {
         }
         let root = parts[0];
         let rest = parts[1];
+        let output_separator = &self.config.qualified_names.module_separator;
+
+        // A local root shadows any outer import of the same spelling.
+        if let Some(root_qn) = self.resolve_in_scope_chain(
+            root, scope_id, module_path, scopes, scope_index,
+        ) {
+            return Some((format!("{}{}{}", root_qn, output_separator, rest), None));
+        }
 
         // Check imports for root
         if let Some(scoped) = self.visible_import(
@@ -2172,22 +2513,15 @@ impl ScopeResolver {
                 return None;
             }
             let qn = if imp.is_star {
-                format!("{}{}{}", imp.module_path, separator, rest)
+                format!("{}{}{}", imp.module_path, output_separator, rest)
             } else if let Some(ref imported_name) = imp.imported_name {
                 // `from foo import bar` + `bar.baz` → `foo.bar.baz`
-                format!("{}{}{}{}{}", imp.module_path, separator, imported_name, separator, rest)
+                format!("{}{}{}{}{}", imp.module_path, output_separator, imported_name, output_separator, rest)
             } else {
                 // `import os` + `os.path.join` → `os.path.join`
-                format!("{}{}{}", imp.module_path, separator, rest)
+                format!("{}{}{}", imp.module_path, output_separator, rest)
             };
             return Some((qn, Some(scoped.binding_id.clone())));
-        }
-
-        // Check local bindings for root
-        if let Some(root_qn) = self.resolve_in_scope_chain(
-            root, scope_id, module_path, scopes, scope_index,
-        ) {
-            return Some((format!("{}{}{}", root_qn, separator, rest), None));
         }
 
         None
@@ -2331,7 +2665,10 @@ impl ScopeResolver {
                     _ => {
                         // Local variable — compute QN if at module level
                         if scope.kind == ScopeKind::Module {
-                            return Some(format!("{}.{}", module_path, name));
+                            return Some(join_module_name(
+                                module_path, name,
+                                &self.config.qualified_names.module_separator,
+                            ));
                         }
                         // Local variables in functions get <locals> QN
                         return Some(self.compute_qn_str(
@@ -2380,8 +2717,15 @@ impl ScopeResolver {
 
             match scope.kind {
                 ScopeKind::Module => {
-                    parts.push(module_path.to_string());
-                    break;
+                    if scope.parent.is_none() {
+                        if !module_path.is_empty() {
+                            parts.push(module_path.to_string());
+                        }
+                        break;
+                    }
+                    if let Some(owner) = &scope.owner_name {
+                        parts.push(owner.clone());
+                    }
                 }
                 ScopeKind::Function if self.config.qualified_names.nested_function_prefix => {
                     if let Some(parent_id) = scope.parent {
@@ -2431,13 +2775,16 @@ impl ScopeResolver {
         // Check if this node creates a new scope
         let scope_for_children =
             if let Some(creator) = self.config.scoping.scope_creators.iter().find(|c| c.node_type == node_kind) {
-                if creator.kind == ScopeKind::Module {
+                if creator.kind == ScopeKind::Module && node.parent().is_none() {
                     current_scope
                 } else {
                     let scope_id = ctx.alloc_scope_id();
                     let is_member_container = self.config.symbols.member_container_node()
                         .map_or(false, |kind| kind == node_kind);
-                    let owner_name = if is_member_container {
+                    let owner_name = if creator.kind == ScopeKind::Module {
+                        node.child_by_field_name(self.config.symbols.name_field())
+                            .map(|owner| ctx.text(owner).to_string())
+                    } else if is_member_container {
                         self.config.symbols.member_container_owner(node)
                             .map(|owner| ctx.text(owner).to_string())
                     } else {
@@ -4732,7 +5079,15 @@ def handler():
         assert_eq!(file.imports["run"].imported_name.as_deref(), Some("compute"));
         assert!(!file.imports.contains_key("local"));
         assert!(file.references.iter().any(|reference| {
-            reference.lexical_qn == "run" && reference.qn.name == "crate::utils::compute"
+            reference.lexical_qn == "run" && reference.qn.name == "utils::compute"
         }));
+    }
+
+    #[test]
+    fn canonical_imports_preserve_module_identity() {
+        assert_eq!(canonical_node_import("./dep", Path::new("/project/pkg/index.ts"), Path::new("/project"), Path::new("/project"), "/").as_deref(), Some("pkg/dep"));
+        assert_eq!(canonical_node_import("../dep.js", Path::new("/project/pkg/sub/file.ts"), Path::new("/project"), Path::new("/project"), "/").as_deref(), Some("pkg/dep"));
+        assert_eq!(canonical_import_module("self::child", "container", "::", "rust", None, false), "container::child");
+        assert_eq!(canonical_import_module("super::child", "container::caller", "::", "rust", None, false), "container::child");
     }
 }

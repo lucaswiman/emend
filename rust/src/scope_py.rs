@@ -46,8 +46,8 @@ pub struct PyScopeResolver {
 #[pymethods]
 impl PyScopeResolver {
     #[new]
-    #[pyo3(signature = (project_root, extension=None))]
-    fn new(project_root: &str, extension: Option<&str>) -> PyResult<Self> {
+    #[pyo3(signature = (project_root, extension=None, module_root=None, root_module_file=None))]
+    fn new(project_root: &str, extension: Option<&str>, module_root: Option<&str>, root_module_file: Option<&str>) -> PyResult<Self> {
         let root = PathBuf::from(project_root);
         let config = if let Some(ext) = extension {
             // A malformed project-local override must not change the requested
@@ -58,7 +58,10 @@ impl PyScopeResolver {
             LanguageConfig::python_default()
         };
         Ok(Self {
-            inner: ScopeResolver::new(config, root),
+            inner: ScopeResolver::new_with_module_root(
+                config, root.clone(), module_root.map(PathBuf::from).unwrap_or(root),
+                root_module_file.map(PathBuf::from),
+            ),
         })
     }
 
@@ -71,6 +74,12 @@ impl PyScopeResolver {
         })?;
         self.inner.index_file(&path_buf, source, &tree);
         Ok(())
+    }
+
+    /// Return the canonical module identity for a file under this resolver's
+    /// configured module/project roots, without parsing the file.
+    fn module_name_for_file(&self, path: &str) -> String {
+        self.inner.module_name_for_file(&PathBuf::from(path))
     }
 
     /// Index multiple files sequentially.
@@ -174,6 +183,18 @@ impl PyScopeResolver {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Positions of references resolved through an exact lexical import
+    /// binding.  Local shadows of an imported spelling are excluded.
+    fn import_bound_reference_positions(&self, path: &str) -> Vec<(usize, usize)> {
+        let path = PathBuf::from(path);
+        self.inner.file_scopes.get(&path).map(|fs| {
+            fs.references.iter()
+                .filter(|reference| reference.import_binding_id.is_some())
+                .map(|reference| (reference.line, reference.column))
+                .collect()
+        }).unwrap_or_default()
     }
 
     /// Returns structured import statements in a file.
