@@ -1,6 +1,6 @@
 """Pattern matching, find, replace, copy, and symbol source utilities."""
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 import logging
@@ -47,6 +47,7 @@ class PatternMatch:
     end_line: int | None = None
     col: int | None = None
     end_col: int | None = None
+    capture_positions: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
 
 
 
@@ -124,73 +125,39 @@ def _filter_matches_by_type_oracle(
     constraints: dict[str, tuple[str, str]],
     type_oracle: TypeOracle,
     file_path: str,
+    source: str | None = None,
 ) -> list[PatternMatch]:
-    """Post-filter pattern matches using inferred types from TypeOracle.
-
-    Filters each match based on metavar type constraints (e.g., :type[X] or :returns[X]).
-    """
+    """Require every actual capture occurrence to satisfy its type constraint."""
     if not matches:
         return []
-
-    from pathlib import Path
     from emend.type_oracle import parse_type_string
 
-    # Get type info for the file
+    if source is not None and source != Path(file_path).read_text():
+        raise ValueError("Type-constrained matching requires source matching the file analyzed by the oracle")
     file_types = type_oracle.infer_file(Path(file_path))
+    if not file_types.complete:
+        raise ValueError("Type-constrained matching requires complete type inference")
+    parsed = {name: (kind, parse_type_string(typ)) for name, (kind, typ) in constraints.items()}
 
-    # Read source to find capture positions
-    source_lines = Path(file_path).read_text().splitlines()
-
-    filtered = []
-    for match in matches:
-        keep = True
-        for metavar_name, (kind, type_str) in constraints.items():
-            captured_text = match.captures.get(metavar_name)
-            if captured_text is None:
-                keep = False
-                break
-
-            # Find the position of the captured text within the match
-            match_line = match.line
-            if match_line is None or match_line < 1:
-                keep = False
-                break
-
-            # Look up type binding at the match position
-            # Try to find the captured name in the source line
-            line_idx = match_line - 1
-            if line_idx >= len(source_lines):
-                keep = False
-                break
-
-            line_text = source_lines[line_idx]
-            col = line_text.find(captured_text)
-            if col < 0:
-                keep = False
-                break
-
-            binding = file_types.type_at(match_line, col + 1)  # 1-indexed col
+    def satisfies(match, name, kind, expected):
+        positions = match.capture_positions.get(name, [])
+        if not positions:
+            return False
+        for line, col in positions:
+            binding = file_types.type_at(line, col)
             if binding is None:
-                keep = False
-                break
+                return False
+            actual = binding.type_descriptor
+            if kind == "returns":
+                actual = actual.return_type
+            if actual is None or not actual.matches(expected):
+                return False
+        return True
 
-            if kind == "type":
-                constraint_td = parse_type_string(type_str)
-                if not binding.type_descriptor.matches(constraint_td):
-                    keep = False
-                    break
-            elif kind == "returns":
-                # For returns constraint, check the return type
-                constraint_td = parse_type_string(type_str)
-                ret_type = binding.type_descriptor.return_type
-                if ret_type is None or not ret_type.matches(constraint_td):
-                    keep = False
-                    break
-
-        if keep:
-            filtered.append(match)
-
-    return filtered
+    return [match for match in matches if all(
+        satisfies(match, name, kind, expected)
+        for name, (kind, expected) in parsed.items()
+    )]
 
 
 def find_pattern(
@@ -276,23 +243,26 @@ def find_pattern(
         raise ValueError(f"Unknown inside/not_inside constraint: '{not_inside}'")
 
     # Find matches using Rust engine
-    raw_matches = _rust.find_pattern_in_files(
+    raw_matches = _rust.find_pattern_spans_in_files(
         [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir,
         extension=ext
     )
-
-
     matches = []
     for m in raw_matches:
-        captures = {k: v for k, v in m[6].items() if k != "_"}
+        captures = {k: v["text"] for k, v in m["captures"].items() if k != "_"}
         matches.append(PatternMatch(
-            node_text=m[5],
+            node_text=m["matched_text"],
             captures=captures,
-            line=m[1],
-            col=m[2],
-            end_line=m[3],
-            end_col=m[4],
-            matched_text=m[5],
+            line=m["line"],
+            col=m["column"],
+            end_line=m["end_line"],
+            end_col=m["end_column"],
+            matched_text=m["matched_text"],
+            capture_positions={
+                name: [(r["start_line"], r["start_column"] + 1)
+                       for r in capture["ranges"]]
+                for name, capture in m["captures"].items() if name != "_"
+            },
         ))
 
     # Post-filter by scope if requested
@@ -327,7 +297,7 @@ def find_pattern(
     # Post-filter by TypeOracle type constraints
     if oracle_constraints:
         matches = _filter_matches_by_type_oracle(
-            matches, oracle_constraints, type_oracle, file_path
+            matches, oracle_constraints, type_oracle, file_path, source_code
         )
 
     return matches

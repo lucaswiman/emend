@@ -1368,6 +1368,36 @@ fn glob_matches(pattern: &str, text: &str) -> bool {
     true
 }
 
+type CaptureRange = (usize, usize, usize, usize, usize, usize);
+
+#[derive(Clone, Default)]
+struct Captures {
+    text: HashMap<String, String>,
+    ranges: Option<HashMap<String, Vec<CaptureRange>>>,
+}
+
+impl Captures {
+    fn get(&self, name: &str) -> Option<&String> {
+        self.text.get(name)
+    }
+
+    fn insert(&mut self, name: String, text: String, nodes: &[Node]) {
+        if let Some(ranges) = &mut self.ranges {
+            let positions = ranges.entry(name.clone()).or_default();
+            if self.text.get(&name).is_some_and(|previous| previous != &text) {
+                positions.clear();
+            }
+            positions.extend(nodes.iter().map(|node| {
+                let start = node.start_position();
+                let end = node.end_position();
+                (node.start_byte(), node.end_byte(), start.row + 1, start.column,
+                 end.row + 1, end.column)
+            }));
+        }
+        self.text.insert(name, text);
+    }
+}
+
 /// Match a tree-sitter node against a pattern node.
 /// Returns Some(node) if it matches, where 'node' is the node to use for
 /// positional information (usually the node itself, but may be a child
@@ -1376,7 +1406,7 @@ fn matches_node<'a>(
     node: Node<'a>,
     source: &[u8],
     pattern: &PatternNode,
-    captures: &mut HashMap<String, String>,
+    captures: &mut Captures,
     config: &LanguageConfig,
 ) -> Option<Node<'a>> {
     // Unwrap parenthesized_expression for specific pattern types that look "through" parens.
@@ -1407,9 +1437,8 @@ fn matches_node<'a>(
                 if existing != &text {
                     return None;
                 }
-            } else {
-                captures.insert(name.clone(), text);
             }
+            captures.insert(name.clone(), text, &[node]);
             Some(node)
         }
         PatternNode::Ellipsis => Some(node),
@@ -1419,9 +1448,8 @@ fn matches_node<'a>(
                 if existing != &text {
                     return None;
                 }
-            } else {
-                captures.insert(name.clone(), text);
             }
+            captures.insert(name.clone(), text, &[node]);
             Some(node)
         }
 
@@ -2068,7 +2096,7 @@ fn matches_node<'a>(
             let matched = if negated { !type_match } else { type_match };
             if matched {
                 if let Some(n) = name {
-                    captures.insert(n.clone(), node_text(node, source).to_string());
+                    captures.insert(n.clone(), node_text(node, source).to_string(), &[node]);
                 }
                 Some(node)
             } else {
@@ -2278,7 +2306,7 @@ fn matches_node<'a>(
                         }
                     }
                     GlobalName::Metavar(name) => {
-                        captures.insert(name.clone(), node_text(*child, source).to_string());
+                        captures.insert(name.clone(), node_text(*child, source).to_string(), &[*child]);
                     }
                 }
             }
@@ -2304,7 +2332,7 @@ fn matches_node<'a>(
                         }
                     }
                     GlobalName::Metavar(name) => {
-                        captures.insert(name.clone(), node_text(*child, source).to_string());
+                        captures.insert(name.clone(), node_text(*child, source).to_string(), &[*child]);
                     }
                 }
             }
@@ -2428,7 +2456,7 @@ fn matches_node<'a>(
                         }
                     }
                     NameOrMetavar::Metavar(name) => {
-                        captures.insert(name.clone(), actual_mod.to_string());
+                        captures.insert(name.clone(), actual_mod.to_string(), &node.child_by_field_name(&config.imports.module_field).into_iter().collect::<Vec<_>>());
                     }
                 }
             }
@@ -2649,7 +2677,7 @@ fn match_args(
     call_args: &[Node],
     source: &[u8],
     exact: bool,
-    captures: &mut HashMap<String, String>,
+    captures: &mut Captures,
     config: &LanguageConfig,
 ) -> bool {
     let has_ellipsis = arg_patterns.iter().any(|a| matches!(a, ArgPattern::Ellipsis | ArgPattern::EllipsisMetavar(_)));
@@ -2708,7 +2736,7 @@ fn match_args(
     if arg_patterns.len() == 1 && matches!(arg_patterns[0], ArgPattern::Ellipsis | ArgPattern::EllipsisMetavar(_)) {
         if let ArgPattern::EllipsisMetavar(name) = &arg_patterns[0] {
              let text: Vec<_> = call_args.iter().map(|n| node_text(*n, source)).collect();
-             captures.insert(name.clone(), text.join(", "));
+             captures.insert(name.clone(), text.join(", "), &call_args);
         }
         return true;
     }
@@ -2771,11 +2799,11 @@ fn match_args(
         // Capture prefix/suffix if metavars were used for ellipsis
         if let ArgPattern::EllipsisMetavar(name) = &arg_patterns[0] {
              let text: Vec<_> = call_args[..start].iter().map(|n| node_text(*n, source)).collect();
-             temp_captures.insert(name.clone(), text.join(", "));
+             temp_captures.insert(name.clone(), text.join(", "), &call_args[..start]);
         }
         if let ArgPattern::EllipsisMetavar(name) = &arg_patterns[arg_patterns.len()-1] {
              let text: Vec<_> = call_args[start+non_ellipsis.len()..].iter().map(|n| node_text(*n, source)).collect();
-             temp_captures.insert(name.clone(), text.join(", "));
+             temp_captures.insert(name.clone(), text.join(", "), &call_args[start+non_ellipsis.len()..]);
         }
         *captures = temp_captures;
         return true;
@@ -2783,7 +2811,7 @@ fn match_args(
     false
 }
 
-fn param_has_default(param: Node, source: &[u8], dv: &PatternNode, captures: &mut HashMap<String, String>, config: &LanguageConfig) -> bool {
+fn param_has_default(param: Node, source: &[u8], dv: &PatternNode, captures: &mut Captures, config: &LanguageConfig) -> bool {
     if param.kind() != "default_parameter" && param.kind() != "typed_default_parameter" {
         return false;
     }
@@ -2798,7 +2826,7 @@ fn match_params(
     param_patterns: &[ParamPattern],
     params: &[Node],
     source: &[u8],
-    captures: &mut HashMap<String, String>,
+    captures: &mut Captures,
     config: &LanguageConfig,
 ) -> bool {
     let has_ellipsis = param_patterns
@@ -2829,7 +2857,7 @@ fn match_params(
                     }
                     if let Some(name) = cap_name {
                         if let Some(id_node) = params[i].named_child(0) {
-                            captures.insert(name.clone(), node_text(id_node, source).to_string());
+                            captures.insert(name.clone(), node_text(id_node, source).to_string(), &[id_node]);
                         }
                     }
                 }
@@ -2839,7 +2867,7 @@ fn match_params(
                     }
                     if let Some(name) = cap_name {
                         if let Some(id_node) = params[i].named_child(0) {
-                            captures.insert(name.clone(), node_text(id_node, source).to_string());
+                            captures.insert(name.clone(), node_text(id_node, source).to_string(), &[id_node]);
                         }
                     }
                 }
@@ -2880,7 +2908,7 @@ fn match_params(
                     }
                     if let Some(name) = cap_name {
                         if let Some(id_node) = param.named_child(0) {
-                            temp_captures.insert(name.clone(), node_text(id_node, source).to_string());
+                            temp_captures.insert(name.clone(), node_text(id_node, source).to_string(), &[id_node]);
                         }
                     }
                 }
@@ -2890,7 +2918,7 @@ fn match_params(
                     }
                     if let Some(name) = cap_name {
                         if let Some(id_node) = param.named_child(0) {
-                            temp_captures.insert(name.clone(), node_text(id_node, source).to_string());
+                            temp_captures.insert(name.clone(), node_text(id_node, source).to_string(), &[id_node]);
                         }
                     }
                 }
@@ -2900,11 +2928,11 @@ fn match_params(
         // Capture prefix/suffix if metavars were used for ellipsis
         if let ParamPattern::EllipsisMetavar(name) = &param_patterns[0] {
              let text: Vec<_> = params[..start].iter().map(|n| node_text(*n, source)).collect();
-             temp_captures.insert(name.clone(), text.join(", "));
+             temp_captures.insert(name.clone(), text.join(", "), &params[..start]);
         }
         if let ParamPattern::EllipsisMetavar(name) = &param_patterns[param_patterns.len()-1] {
              let text: Vec<_> = params[start+non_ellipsis.len()..].iter().map(|n| node_text(*n, source)).collect();
-             temp_captures.insert(name.clone(), text.join(", "));
+             temp_captures.insert(name.clone(), text.join(", "), &params[start+non_ellipsis.len()..]);
         }
         *captures = temp_captures;
         return true;
@@ -2916,7 +2944,7 @@ fn match_sequence(
     patterns: &[PatternNode],
     nodes: &[Node],
     source: &[u8],
-    captures: &mut HashMap<String, String>,
+    captures: &mut Captures,
     config: &LanguageConfig,
 ) -> bool {
     // Find ellipsis position
@@ -2967,7 +2995,7 @@ fn match_sequence(
     if let PatternNode::EllipsisMetavar(name) = &patterns[eidx] {
         let middle_nodes = &nodes[prefix.len()..suffix_start];
         let text: Vec<_> = middle_nodes.iter().map(|n| node_text(*n, source)).collect();
-        temp_captures.insert(name.clone(), text.join(", "));
+        temp_captures.insert(name.clone(), text.join(", "), &middle_nodes);
     }
 
     *captures = temp_captures;
@@ -2982,7 +3010,7 @@ fn match_fstring(
     parts: &[FStringPart],
     node: Node,
     source: &[u8],
-    captures: &mut HashMap<String, String>,
+    captures: &mut Captures,
     config: &LanguageConfig,
 ) -> bool {
     if node.kind() != config.pattern_matching.string {
@@ -3033,7 +3061,7 @@ fn match_generator(
     pattern: &ComprehensionGenerator,
     node: Node,
     source: &[u8],
-    captures: &mut HashMap<String, String>,
+    captures: &mut Captures,
     config: &LanguageConfig,
 ) -> bool {
     if node.kind() != config.pattern_matching.for_in_clause {
@@ -3073,7 +3101,7 @@ fn match_generators(
     patterns: &[ComprehensionGenerator],
     nodes: &[Node],
     source: &[u8],
-    captures: &mut HashMap<String, String>,
+    captures: &mut Captures,
     config: &LanguageConfig,
 ) -> bool {
     if nodes.len() != patterns.len() {
@@ -3094,7 +3122,7 @@ fn match_generators_with_ifs(
     patterns: &[ComprehensionGenerator],
     groups: &[(Node, Vec<Node>)],
     source: &[u8],
-    captures: &mut HashMap<String, String>,
+    captures: &mut Captures,
     config: &LanguageConfig,
 ) -> bool {
     if groups.len() != patterns.len() {
@@ -3138,7 +3166,7 @@ fn match_dict_elements(
     patterns: &[DictElementPattern],
     nodes: &[Node],
     source: &[u8],
-    captures: &mut HashMap<String, String>,
+    captures: &mut Captures,
     config: &LanguageConfig,
 ) -> bool {
     let has_ellipsis = patterns.iter().any(|p| matches!(p, DictElementPattern::Ellipsis | DictElementPattern::EllipsisMetavar(_)));
@@ -3192,7 +3220,7 @@ fn match_dict_elements(
                 .filter(|(i, _)| !used[*i])
                 .map(|(_, n)| node_text(*n, source))
                 .collect();
-            temp_captures.insert(name.clone(), text.join(", "));
+            temp_captures.insert(name.clone(), text.join(", "), &nodes.iter().enumerate().filter(|(i, _)| !used[*i]).map(|(_, node)| *node).collect::<Vec<_>>());
         }
     }
     *captures = temp_captures;
@@ -3203,7 +3231,7 @@ fn match_dict_element(
     pattern: &DictElementPattern,
     node: Node,
     source: &[u8],
-    captures: &mut HashMap<String, String>,
+    captures: &mut Captures,
     config: &LanguageConfig,
 ) -> bool {
     match pattern {
@@ -3246,7 +3274,7 @@ fn match_import_alias<'a>(
     pattern: &ImportAlias,
     node: Node<'a>,
     source: &[u8],
-    captures: &mut HashMap<String, String>,
+    captures: &mut Captures,
     config: &LanguageConfig,
 ) -> bool {
     let imp_text = node_text(node, source);
@@ -3269,7 +3297,7 @@ fn match_import_alias<'a>(
             }
         }
         NameOrMetavar::Metavar(mv_name) => {
-            captures.insert(mv_name.clone(), actual_name.to_string());
+            captures.insert(mv_name.clone(), actual_name.to_string(), &node.child_by_field_name("name").or_else(|| if actual_alias.is_none() { Some(node) } else { None }).into_iter().collect::<Vec<_>>());
         }
     }
 
@@ -3284,7 +3312,7 @@ fn match_import_alias<'a>(
             }
         }
         (Some(NameOrMetavar::Metavar(mv_name)), Some(actual)) => {
-            captures.insert(mv_name.clone(), actual.to_string());
+            captures.insert(mv_name.clone(), actual.to_string(), &node.child_by_field_name("alias").into_iter().collect::<Vec<_>>());
         }
     }
     true
@@ -3313,7 +3341,7 @@ fn walk_with_ancestors<'a, F>(
 }
 
 fn any_ancestor_matches(ancestors: &[Node], source: &[u8], pattern: &PatternNode, config: &LanguageConfig) -> bool {
-    let mut dummy_captures = HashMap::new();
+    let mut dummy_captures = Captures::default();
     ancestors
         .iter()
         .any(|anc| matches_node(*anc, source, pattern, &mut dummy_captures, config).is_some())
@@ -3340,7 +3368,7 @@ fn find_pattern_in_tree(
         source_bytes,
         &mut ancestors,
         &mut |node, ancs| {
-            let mut captures = HashMap::new();
+            let mut captures = Captures::default();
             let matched_node = match matches_node(node, source_bytes, pattern, &mut captures, config) {
                 Some(n) => n,
                 None => return,
@@ -3376,7 +3404,7 @@ fn find_pattern_in_tree(
                 end.row + 1,
                 end.column,
                 text,
-                captures,
+                captures.text,
             ));
         },
     );
@@ -3417,54 +3445,6 @@ struct PatternSpanHit {
     captures: HashMap<String, (String, Vec<(usize, usize, usize, usize, usize, usize)>)>,
 }
 
-fn exact_capture_ranges(
-    root: Node,
-    text: &str,
-    source: &[u8],
-) -> Vec<(usize, usize, usize, usize, usize, usize)> {
-    fn walk(
-        node: Node,
-        text: &str,
-        source: &[u8],
-        out: &mut Vec<(usize, usize, usize, usize, usize, usize)>,
-    ) {
-        if node_text(node, source) == text {
-            let start = node.start_position();
-            let end = node.end_position();
-            out.push((node.start_byte(), node.end_byte(), start.row + 1,
-                      start.column, end.row + 1, end.column));
-            return;
-        }
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            walk(child, text, source, out);
-        }
-    }
-    let mut ranges = Vec::new();
-    walk(root, text, source, &mut ranges);
-    if ranges.is_empty() {
-        // Import aliases and similar captures may be token substrings rather
-        // than named nodes. Their exact byte occurrence is still recoverable.
-        let full = node_text(root, source);
-        let mut offset = 0;
-        while let Some(relative) = full[offset..].find(text) {
-            let start_byte = root.start_byte() + offset + relative;
-            let end_byte = start_byte + text.len();
-            let prefix = &source[..start_byte];
-            let start_line = prefix.iter().filter(|&&b| b == b'\n').count() + 1;
-            let start_col = prefix.iter().rev().take_while(|&&b| b != b'\n').count();
-            let captured = &source[start_byte..end_byte];
-            let lines = captured.iter().filter(|&&b| b == b'\n').count();
-            let end_col = if lines == 0 { start_col + captured.len() }
-                else { captured.iter().rev().take_while(|&&b| b != b'\n').count() };
-            ranges.push((start_byte, end_byte, start_line, start_col,
-                         start_line + lines, end_col));
-            offset += relative + text.len().max(1);
-        }
-    }
-    ranges
-}
-
 fn find_pattern_spans_in_tree(
     tree: &tree_sitter::Tree,
     source: &[u8],
@@ -3477,7 +3457,7 @@ fn find_pattern_spans_in_tree(
     let mut results = Vec::new();
     let mut ancestors = Vec::new();
     walk_with_ancestors(tree.root_node(), source, &mut ancestors, &mut |node, ancs| {
-        let mut captures = HashMap::new();
+        let mut captures = Captures { ranges: Some(HashMap::new()), ..Captures::default() };
         let Some(matched) = matches_node(node, source, pattern, &mut captures, config) else { return };
         if inside.is_some_and(|p| !any_ancestor_matches(ancs, source, p, config)) { return; }
         if not_inside.is_some_and(|p| any_ancestor_matches(ancs, source, p, config)) { return; }
@@ -3486,9 +3466,10 @@ fn find_pattern_spans_in_tree(
         }) { return; }
         let start = matched.start_position();
         let end = matched.end_position();
-        let captures = captures.into_iter().map(|(name, text)| {
-            let ranges = exact_capture_ranges(matched, &text, source);
-            (name, (text, ranges))
+        let mut ranges = captures.ranges.unwrap_or_default();
+        let captures = captures.text.into_iter().map(|(name, text)| {
+            let positions = ranges.remove(&name).unwrap_or_default();
+            (name, (text, positions))
         }).collect();
         results.push(PatternSpanHit {
             file: file.into(), line: start.row + 1, column: start.column,
@@ -3865,6 +3846,31 @@ mod span_tests {
         assert_eq!(capture.0, "user.value");
         assert_eq!(capture.1.len(), 1);
         assert_eq!(&source[capture.1[0].0..capture.1[0].1], "user.value");
+    }
+
+    #[test]
+    fn capture_ranges_follow_bindings_not_equal_text() {
+        let metavar = || ArgPattern::Pattern(PatternNode::Metavar("X".into()));
+        for (source, args, expected) in [
+            ("sink(sink)\n", vec![metavar()], vec![(1, 5)]),
+            ("sink(x, x)\n", vec![metavar(), metavar()], vec![(1, 5), (1, 8)]),
+            ("sink(\n  x\n)\n", vec![metavar()], vec![(2, 2)]),
+            ("sink(a, x, y, x, 1)\n", vec![ArgPattern::EllipsisMetavar("REST".into()), metavar(),
+                ArgPattern::Pattern(PatternNode::Integer("1".into()))], vec![(1, 14)]),
+        ] {
+            let tree = crate::pattern::parse_by_extension(source, "py").unwrap();
+            let pattern = PatternNode::Call {
+                func: Box::new(PatternNode::Name("sink".into())), args, exact_args: true,
+            };
+            let hits = find_pattern_spans_in_tree(&tree, source.as_bytes(), "sample.py",
+                &pattern, None, None, crate::scope::config_for_ext("py"));
+            assert_eq!(hits.len(), 1, "{source}");
+            let positions: Vec<_> = hits[0].captures["X"].1.iter().map(|r| (r.2, r.3)).collect();
+            assert_eq!(positions, expected, "{source}");
+            if let Some(rest) = hits[0].captures.get("REST") {
+                assert_eq!(rest.1.iter().map(|r| &source[r.0..r.1]).collect::<Vec<_>>(), vec!["a", "x", "y"]);
+            }
+        }
     }
 }
 

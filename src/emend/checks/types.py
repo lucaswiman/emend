@@ -28,6 +28,8 @@ class TypeCheck:
         """Require one explicit root capture, never guess a nested subject."""
         from emend.pattern import parse_pattern, is_oracle_type_constraint
 
+        if self.kind not in {"has_type", "returns"}:
+            raise ValueError(f"Invalid type check kind: {self.kind!r}")
         pattern = parse_pattern(self.symbol_pattern)
         if len(pattern.metavars) == 1:
             mv = pattern.metavars[0]
@@ -96,6 +98,7 @@ def run_type_check(
         {subject: ("returns" if check.kind == "returns" else "type", check.expected_type)},
         type_oracle,
         file_path,
+        source,
     )
 
     typed_positions = {(m.line, m.col) for m in typed_matches}
