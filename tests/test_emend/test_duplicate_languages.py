@@ -62,6 +62,24 @@ def test_duplicate_cache_keys_include_grammar_but_not_path():
     assert key("name.ts", source) != key("name.tsx", source)
 
 
+@pytest.mark.parametrize('extension,header,binding', [
+    ('ts', 'function compute(value: number)', 'const'),
+    ('rs', 'fn compute(value: i32) -> i32', 'let'),
+])
+@pytest.mark.parametrize('separator', [' ', '\n'])
+@pytest.mark.parametrize('mode', ['exact', 'sequence'])
+def test_free_bindings_outside_function_are_not_alpha_renamed(tmp_path, extension, header, binding, separator, mode):
+    for name,free in [('one', 'LEFT'), ('two', 'RIGHT')]:
+        (tmp_path / f'{name}.{extension}').write_text(
+            f'const {free}: {"i32" if extension == "rs" else "number"} = 1;{separator}{header} {{\n'
+            f'{binding} first = value + {free};\n{binding} second = first * 23;\n'
+            f'{binding} third = second - {free};\n{binding} fourth = third / 7;\nreturn fourth;\n}}\n')
+    assert query_duplicates(str(tmp_path), mode=mode) == []
+    target = tmp_path / f'two.{extension}'
+    target.write_text(target.read_text().replace('RIGHT', 'LEFT'))
+    assert query_duplicates(str(tmp_path), mode=mode)
+
+
 def test_duplicate_sequences_do_not_mix_languages():
     # Even identical canonical statement hashes cannot link different languages.
     sequences = [dict(file=f"file.{ext}", function_qn="compute", hashes=["a"] * 4,
