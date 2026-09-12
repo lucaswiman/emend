@@ -222,7 +222,8 @@ functions). Useful flags:
 - ``--min-lines N`` / ``--min-score S`` -- tighten the signal/noise floor.
 - ``--json`` -- machine-readable output with line ranges, scores, and members.
 
-``emend dupes PATH --near`` compares near-identical Python function bodies and
+``emend dupes PATH --near`` compares near-identical Python, Rust, and
+TypeScript/JavaScript function bodies (including TSX/JSX) within each language and
 prints their differences for review, not confirmed bugs. Use ``--json`` for
 structured results and ``--limit`` to cap pairs (default: 50). Near mode does
 not accept exact/sequence filters such as ``--mode`` or ``--check-file``.

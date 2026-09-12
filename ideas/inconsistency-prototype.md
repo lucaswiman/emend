@@ -1,6 +1,6 @@
 # Inconsistency detection prototype
 
-The first experiment finds small differences between near-identical Python
+The detector finds small differences between near-identical Python, Rust, and TypeScript/JavaScript
 function bodies. It is a review-candidate generator, not a bug detector. Source
 analysis uses tree-sitter through the existing duplicate detector; no Python AST
 parser or source-parsing regexes were added.
@@ -22,8 +22,14 @@ default). Exact/sequence-specific filter flags are rejected in near mode.
 Lint and MCP integration are not registered yet.
 
 The command accepts a file or directory (default: current directory); missing paths are
-errors. Mixed-directory scans ignore non-Python files using the language
-registry. Parenthesized docstrings are ignored just like ordinary docstrings.
+errors. Mixed-directory scans use each file's grammar and scope configuration,
+and compare candidates only within a language. TSX/JSX, methods, and TypeScript
+arrow/function expressions are supported. Parenthesized Python docstrings are
+ignored; JavaScript directives remain executable differences.
+
+Rust and TypeScript local identities include their containing function, so
+same-named locals do not collide across functions. Local reference selectors
+use that scope, e.g. `lib.rs::compute.count`.
 
 ## Experiment, 2026-09-07
 
@@ -83,8 +89,8 @@ output. Very common implementations can be missed by the posting cap; very large
 functions can make sequence alignment expensive. Local names are numbered in
 encounter order, so inserting a binding may disrupt alignment. Function defaults,
 decorators, signatures, cross-function effects, and equivalent alternative
-algorithms are outside this experiment. The existing duplicate parser limits the
-prototype to Python. It reparses on each run; it is not integrated with the
+algorithms are outside this experiment. Structural roles and trivia are configured
+in the language TOMLs. It reparses on each run; it is not integrated with the
 analysis snapshot cache and should not be polled continuously by an editor.
 
 Behavioral probes exercise missing guards, changed operators/constants, moved

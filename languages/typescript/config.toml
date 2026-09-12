@@ -7,6 +7,11 @@ file_extensions = ["ts", "tsx", "js", "jsx"]
 comment_prefix = "//"
 keywords = ["undefined", "null", "true", "false"]
 
+[duplicates]
+comment_nodes = ["comment"]
+argument_nodes = ["arguments"]
+binding_name_fields = { variable_declarator = "name" }
+
 [comments]
 line_prefix = "//"
 
@@ -69,6 +74,7 @@ node = "for_of_statement"
 target = "left"
 
 [bindings.parameters]
+single_parameter_field = "parameter"
 param_nodes = ["identifier", "required_parameter", "optional_parameter"]
 name_field = "name"
 
@@ -91,7 +97,7 @@ identifier = "identifier"
 [qualified_names]
 module_separator = "/"
 class_member_prefix = true
-nested_function_prefix = false
+nested_function_prefix = true
 locals_marker = ""
 
 [exports]

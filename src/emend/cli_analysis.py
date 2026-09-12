@@ -1033,7 +1033,7 @@ def cfg_cmd(
 
 def dupes_cmd(
     path: Annotated[str, typer.Argument(help="Project root directory")] = ".",
-    near: Annotated[bool, typer.Option("--near", help="Experimental Python near-clone differences; supports PATH, --limit and --json")] = False,
+    near: Annotated[bool, typer.Option("--near", help="Experimental Python/Rust/TypeScript near-clone differences; supports PATH, --limit and --json")] = False,
     mode: Annotated[str, typer.Option("--mode", help="Detection mode: exact, sequence, or all")] = "all",
     file: Annotated[Optional[str], typer.Option("--file", help="Restrict to a specific file")] = None,
     check_file: Annotated[Optional[str], typer.Option("--check-file", help="Scan the full project and report only duplicates involving this file (for post-write hooks)")] = None,
@@ -1065,7 +1065,7 @@ def dupes_cmd(
 
     if near:
         from emend.inconsistency import find_inconsistencies
-        from emend.file_collection import collect_source_files_scandir
+        from emend.file_collection import collect_all_source_files
 
         if (mode != "all" or file or check_file or symbol or min_lines != 3
                 or min_score != 0.0 or cross_file is not None):
@@ -1075,7 +1075,7 @@ def dupes_cmd(
             raise typer.BadParameter(f"path does not exist: {path}")
         if limit < 0:
             raise typer.BadParameter("--limit must be nonnegative")
-        files = collect_source_files_scandir(path) if root.is_dir() else [path]
+        files = collect_all_source_files(path, ["python", "rust", "typescript"]) if root.is_dir() else [path]
         findings = find_inconsistencies(files)[:limit]
         if json_output:
             emit_json(findings)

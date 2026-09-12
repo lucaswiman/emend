@@ -199,6 +199,7 @@ def canonicalize_subtree(
     *,
     binding_scope: tuple[int, int] | None = None,
     bound_map: dict[str, str] | None = None,
+    config: dict | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Canonicalize a subtree with production rules.
 
@@ -214,10 +215,14 @@ def canonicalize_subtree(
 
     if bound_map is None:
         bound_map = {}
+    config = config or {}
+    comments = config.get("comment_nodes", ["comment"])
+    classes = config.get("class_nodes", ["class_definition"])
+    labels = config.get("label_fields", {"attribute": "attribute", "keyword_argument": "name"})
     class_scopes: set[str] = set()
 
     def record_class(n):
-        if n.kind == "class_definition":
+        if n.kind in classes:
             name = n.child_by_field_name("name")
             if name is not None and (qn := qn_at.get(name.start_point)):
                 class_scopes.add(qn)
@@ -237,7 +242,7 @@ def canonicalize_subtree(
     token_seq: list[str] = []
 
     def walk(n, preserve_name: bool = False):
-        if n.kind == "comment":
+        if n.kind in comments:
             return
 
         kind_seq.append(n.kind)
@@ -255,9 +260,7 @@ def canonicalize_subtree(
         else:
             # These names are labels, not variable references, even when the
             # resolver reports a same-spelled local at their position.
-            label = n.child_by_field_name(
-                "attribute" if n.kind == "attribute" else "name"
-            ) if n.kind in ("attribute", "keyword_argument") else None
+            label = n.child_by_field_name(labels[n.kind]) if n.kind in labels else None
             for child in n.children():
                 walk(child, label is not None and child.start_byte == label.start_byte)
 
@@ -572,6 +575,7 @@ _FileData = dict[str, tuple[str, Any, dict, dict, list[tuple[str, int, int]]]]
 def _preparse_files(
     py_files: list[str],
     symbol_scope: str | None,
+    *, extension: str = "py",
 ) -> tuple[Any, _FileData]:
     """Read, parse, and index all *py_files* once.
 
@@ -581,7 +585,7 @@ def _preparse_files(
     """
     project_root = str(Path(py_files[0]).parent) if py_files else "."
     try:
-        scope_resolver = emend_core.PyScopeResolver(project_root, "py")
+        scope_resolver = emend_core.PyScopeResolver(project_root, extension)
     except TypeError:
         scope_resolver = emend_core.PyScopeResolver(project_root)
 
@@ -599,7 +603,7 @@ def _preparse_files(
             scope_resolver.index_file(file_path, content)
         except Exception:
             logger.debug("index_file failed for %s", file_path, exc_info=True)
-        tree = emend_core.parse_source(content, "py")
+        tree = emend_core.parse_source(content, extension)
         if tree is None:
             continue
 

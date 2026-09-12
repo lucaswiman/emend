@@ -841,6 +841,8 @@ pub struct AssignmentRule {
 pub struct ParametersSection {
     pub param_nodes: Vec<String>,
     pub name_field: String,
+    #[serde(default)]
+    pub single_parameter_field: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1867,21 +1869,6 @@ impl ScopeResolver {
                     let name_field = self.config.symbols.name_field();
                     if node.child_by_field_name(name_field) == Some(child) {
                         current_scope
-                    } else if (child.kind() == "identifier"
-                        || self.config.pattern_matching.extra_identifiers.iter().any(|ei| ei.as_str() == child.kind()))
-                        && node_kind != "module" && node_kind != "program" {
-                        // Heuristic: if it's an identifier but not the 'name' field, it might be the name.
-                        // Let's check if it IS the name.
-                        let mut name_cursor = node.walk();
-                        let first_id = node.children(&mut name_cursor).find(|c|
-                            c.kind() == "identifier"
-                            || self.config.pattern_matching.extra_identifiers.iter().any(|ei| ei.as_str() == c.kind())
-                        );
-                        if first_id == Some(child) {
-                            current_scope
-                        } else {
-                            scope_for_children
-                        }
                     } else {
                         scope_for_children
                     }
@@ -1970,6 +1957,11 @@ impl ScopeResolver {
         
         while let Some(parent) = current.parent() {
             let pk = parent.kind();
+
+            if parent.child_by_field_name(&self.config.bindings.parameters.single_parameter_field) == Some(current) {
+                in_parameter = true;
+                break;
+            }
 
             // Check if we are inside a parameter container
             let params_field = self.config.symbols.parameters_field();
@@ -2392,9 +2384,9 @@ impl ScopeResolver {
                     if let Some(parent_id) = scope.parent {
                         if let Some(&pidx) = scope_index.get(&parent_id) {
                             let parent = &scopes[pidx];
-                            if let Some(bname) = find_scope_name(parent, scope, BindingKind::FunctionDef) {
-                                parts.push(bname.to_string());
-                            }
+                            parts.push(find_scope_name(parent, scope, BindingKind::FunctionDef)
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| format!("<anonymous@{}>", scope.start_byte)));
                         }
                     }
                 }
@@ -2469,13 +2461,7 @@ impl ScopeResolver {
                             scope.is_member_container && scope.owner_name.is_none())
                     {
                         let name_field = self.config.symbols.name_field();
-                        let mut name_node = node.child_by_field_name(name_field);
-                        
-                        // Fallback: search for identifier child if field not found (e.g. TS)
-                        if name_node.is_none() {
-                            let mut cursor = node.walk();
-                            name_node = node.children(&mut cursor).find(|c| c.kind() == "identifier");
-                        }
+                        let name_node = node.child_by_field_name(name_field);
 
                         if let Some(name_node) = name_node {
                             let name = ctx.text(name_node).to_string();
@@ -2564,6 +2550,10 @@ impl ScopeResolver {
 
                         if let Some(params) = params_node {
                             self.collect_parameters(ctx, &params, scope_id);
+                        } else if let Some(param) = node.child_by_field_name(
+                            &self.config.bindings.parameters.single_parameter_field,
+                        ) {
+                            self.collect_binding_targets(ctx, &param, scope_id, BindingKind::Parameter, None, None);
                         }
                     }
 
@@ -3642,9 +3632,9 @@ impl ScopeResolver {
                     if let Some(parent_id) = scope.parent {
                         if let Some(&pidx) = scope_index.get(&parent_id) {
                             let parent = &scopes[pidx];
-                            if let Some(bname) = find_scope_name(parent, scope, BindingKind::FunctionDef) {
-                                parts.push(bname.to_string());
-                            }
+                            parts.push(find_scope_name(parent, scope, BindingKind::FunctionDef)
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| format!("<anonymous@{}>", scope.start_byte)));
                         }
                     }
                 }
@@ -3917,6 +3907,7 @@ impl LanguageConfig {
                 context_manager: vec![AssignmentRule { node: "with_clause".to_string(), target: "alias".to_string() }],
                 exception: vec![AssignmentRule { node: "except_clause".to_string(), target: "name".to_string() }],
                 parameters: ParametersSection {
+                    single_parameter_field: String::new(),
                     param_nodes: vec![
                         "identifier".to_string(),
                         "default_parameter".to_string(),

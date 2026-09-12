@@ -7,6 +7,10 @@ file_extensions = ["rs"]
 comment_prefix = "//"
 keywords = ["let", "fn", "struct", "enum", "trait", "impl", "mod", "use", "pub", "crate", "self", "Self", "where", "type", "async", "await", "mut", "ref", "static", "const", "extern", "unsafe", "move"]
 
+[duplicates]
+comment_nodes = ["line_comment", "block_comment"]
+argument_nodes = ["arguments"]
+
 [comments]
 line_prefix = "//"
 
@@ -95,7 +99,7 @@ identifier = "identifier"
 [qualified_names]
 module_separator = "::"
 class_member_prefix = true
-nested_function_prefix = false
+nested_function_prefix = true
 locals_marker = ""
 
 [exports]
