@@ -144,6 +144,61 @@ def test_search_symbol_lookup(tmp_path):
     assert "def greet" in result
 
 
+@pytest.mark.parametrize("output", ["code", "code::dedent", "location", "selector", "count", "json"])
+def test_pattern_search_output(tmp_path, output, capsys):
+    p = tmp_path / "example.py"
+    p.write_text("def greet():\n    print('hello')\n")
+    result = search(query="print($X)", files=[str(p)], output=output)
+    assert capsys.readouterr().out == ""
+    if output.startswith("code"):
+        assert "print('hello')" in result
+    elif output == "selector":
+        assert result.strip() == f"{p}::greet"
+    elif output == "location":
+        assert result.strip() == f"{p}:2"
+    elif output == "count":
+        assert result == "1"
+    else:
+        assert json.loads(result)["count"] == 1
+
+
+@pytest.mark.parametrize("scope", ["file", "directory", "glob"])
+@pytest.mark.parametrize("mode", ["lint", "policy"])
+def test_check_discovers_all_languages(tmp_path, scope, mode):
+    files = []
+    for ext in ("py", "ts", "rs"):
+        p = tmp_path / f"example.{ext}"
+        p.write_text("fn greet() { bad(1); }" if ext == "rs" else "bad(1)\n")
+        files.append(str(p))
+    config = tmp_path / "rules.yaml"
+    config.write_text("rules:\n  no-bad:\n    find: bad($X)\n    message: bad call\n")
+    paths = files if scope == "file" else [str(tmp_path / "*.*") if scope == "glob" else str(tmp_path)]
+    assert {v["file"] for v in json.loads(check(paths=paths, config=str(config), mode=mode))} == set(files)
+    assert {v["file"] for v in json.loads(check(paths=[str(tmp_path)], config=str(config), mode=mode, language="rust"))} == {files[-1]}
+
+
+@pytest.mark.parametrize("mode", ["lint", "policy"])
+def test_check_mixed_language_flows(tmp_path, mode):
+    import yaml
+
+    sources = {
+        "py": ("python", "def run():\n    x = source()\n    sink(x)\n"),
+        "tsx": ("typescript", "function run() { const tag = <div/>; const x = source(); sink(x); }"),
+        "rs": ("rust", "fn run() { let x = source(); sink(x); }"),
+    }
+    for ext, (_, source) in sources.items():
+        (tmp_path / f"example.{ext}").write_text(source)
+    config = tmp_path / "rules.yaml"
+    config.write_text(yaml.safe_dump({"rules": {
+        language: {"language": language, "flows-from": "source()", "flows-to": "sink($X)"}
+        for language, _ in sources.values()
+    }}))
+    violations = json.loads(check(paths=[str(tmp_path)], config=str(config), mode=mode))
+    assert {(v["rule"], v["file"]) for v in violations} == {
+        (language, str(tmp_path / f"example.{ext}")) for ext, (language, _) in sources.items()
+    }
+
+
 @pytest.mark.parametrize("scope", ["directory", "glob"])
 def test_search_summary_preserves_project_hierarchy(tmp_path, scope):
     (tmp_path / "pyproject.toml").touch()

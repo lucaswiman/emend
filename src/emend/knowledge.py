@@ -295,10 +295,11 @@ def _to_snake_case(name: str) -> str:
 
 
 def _locked(method):
-    """Serialise access to ``MappingStore._data`` and saves under the store lock."""
+    """Read the latest YAML and serialise read-modify-write across store instances."""
     @wraps(method)
     def wrapper(self, *args, **kwargs):
         with self._lock:
+            self._data = _load_yaml(self._yaml_path)
             return method(self, *args, **kwargs)
     return wrapper
 
@@ -313,21 +314,21 @@ class MappingStore:
         results = store.list_module_mappings()
         store.close()
 
-    Thread-safe within a process: all reads and mutations of the in-memory
-    state (and the save that follows a mutation) hold an internal lock.
+    Thread-safe within a process: all instances share a lock and reload the
+    YAML before reading or mutating it.
     Concurrent access from multiple *processes* is not supported — the file
     is rewritten wholesale on save, so the last writer wins.
     """
 
+    _lock = threading.RLock()
+
     def __init__(self, project_root: str = ".") -> None:
-        self._lock = threading.RLock()
         self._yaml_path = _mappings_yaml_path(project_root)
 
         # Migrate from old SQLite knowledge.db if it exists and YAML doesn't.
-        if not self._yaml_path.is_file():
-            self._migrate_from_sqlite(project_root)
-
-        self._data = _load_yaml(self._yaml_path)
+        with self._lock:
+            if not self._yaml_path.is_file():
+                self._migrate_from_sqlite(project_root)
 
     def _migrate_from_sqlite(self, project_root: str) -> None:
         """One-time migration from knowledge.db to mappings.yaml."""

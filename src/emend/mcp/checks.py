@@ -20,6 +20,7 @@ def check(
     kind: Annotated[str | None, Field(description="Restrict to one rule kind: match, flow, deadcode, type.")] = None,
     mode: Annotated[str | None, Field(description="Engine mode: 'lint' (pattern/flow/deadcode), 'policy' (structural/type/datalog/custom/sequence), or None for all.")] = None,
     fix: Annotated[bool, Field(description="Apply auto-fixes for match rules when available.")] = False,
+    language: Annotated[str | None, Field(description="Restrict source language; omitted searches all supported languages.")] = None,
 ) -> str:
     """Run unified project rules from ``rules.yaml``.
 
@@ -30,7 +31,7 @@ def check(
     from emend.checks import run_checks
     from emend.cli_base import resolve_file_scopes
 
-    resolved, _ = resolve_file_scopes(paths or ["."], language="python")
+    resolved, _ = resolve_file_scopes(paths or ["."], language=language)
     file_paths = [str(f) for f in resolved]
     scopes = [Path(path).resolve() for path in (paths or ["."])]
     scope_roots = [path if path.is_dir() else path.parent for path in scopes]
@@ -43,7 +44,7 @@ def check(
             kind=kind,
             mode=mode,
             fix=fix,
-            language="python",
+            language=language,
             project_path=project_path,
         )
     except FileNotFoundError as e:

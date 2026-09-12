@@ -21,76 +21,8 @@ from emend.errors import BUG_EXCEPTIONS
 from emend.language_registry import is_source_file
 from emend.transform import cmd_lookup, find_pattern_in_project
 
-_ANSI_RESET = "\033[0m"
-_ANSI_BOLD = "\033[1m"
-_ANSI_MAGENTA = "\033[35m"
-_ANSI_GREEN = "\033[32m"
-_ANSI_CYAN = "\033[36m"
-_ANSI_RED_BOLD = "\033[1;31m"
+from emend.cli_output import print_pattern_matches
 
-
-def _print_pattern_match_code(
-    file_path_str: str,
-    match,
-    file_lines_cache: dict[str, list[str]],
-    *,
-    is_tty: bool = False,
-) -> None:
-    """Print a pattern match with a file:line header followed by matched source lines."""
-    if match.line is None:
-        if is_tty:
-            print(
-                f"{_ANSI_MAGENTA}{file_path_str}{_ANSI_CYAN}:{_ANSI_GREEN}?{_ANSI_RESET}",
-                flush=True,
-            )
-        else:
-            print(f"{file_path_str}:?", flush=True)
-        return
-
-    start_line = match.line
-    end_line = match.end_line or start_line
-
-    if file_path_str not in file_lines_cache:
-        try:
-            file_lines_cache[file_path_str] = Path(file_path_str).read_text().splitlines()
-        except (OSError, UnicodeDecodeError):
-            file_lines_cache[file_path_str] = []
-    lines = file_lines_cache[file_path_str]
-
-    line_range = str(start_line) if start_line == end_line else f"{start_line}-{end_line}"
-    if is_tty:
-        print(
-            f"{_ANSI_MAGENTA}{file_path_str}{_ANSI_CYAN}:{_ANSI_GREEN}{line_range}{_ANSI_RESET}",
-            flush=True,
-        )
-    else:
-        print(f"{file_path_str}:{line_range}", flush=True)
-
-    col = match.col
-    end_col_val = match.end_col
-    for i in range(start_line, min(end_line + 1, len(lines) + 1)):
-        line_text = lines[i - 1] if i <= len(lines) else ""
-        if is_tty and col is not None and end_col_val is not None:
-            if start_line == end_line:
-                hl_start = col
-                hl_end = end_col_val
-            elif i == start_line:
-                hl_start = col
-                hl_end = len(line_text)
-            elif i == end_line:
-                hl_start = 0
-                hl_end = end_col_val
-            else:
-                hl_start = 0
-                hl_end = len(line_text)
-            hl_start = max(0, min(hl_start, len(line_text)))
-            hl_end = max(hl_start, min(hl_end, len(line_text)))
-            before = line_text[:hl_start]
-            highlighted = line_text[hl_start:hl_end]
-            after = line_text[hl_end:]
-            print(f"{before}{_ANSI_RED_BOLD}{highlighted}{_ANSI_RESET}{after}", flush=True)
-        else:
-            print(line_text, flush=True)
 
 def search(
     query: Annotated[str, typer.Argument(help="Pattern with $X metavars, selector (file.py::sym), or file/dir path")],
@@ -623,43 +555,10 @@ def search(
                 print(json.dumps({"count": len(all_matches), "matches": serialized_matches}))
                 _logger.info("search total: %d matches in %.3fs", len(all_matches), _time.monotonic() - _t_search_start)
             else:
-                n_total = 0
-                if effective_output == "selector":
-                    from emend.ast_utils import find_nested_definitions, find_symbol_by_line
-                    _defs_cache: dict[str, list] = {}
-                    seen: set[str] = set()
-                    for file_path_str, match in _limited_matches():
-                        n_total += 1
-                        if file_path_str not in _defs_cache:
-                            _defs_cache[file_path_str] = find_nested_definitions(file_path_str)
-                        if match.line is not None:
-                            sym = find_symbol_by_line(_defs_cache[file_path_str], match.line)
-                            if sym:
-                                sel_path = f"{file_path_str}::{'.'.join(sym.path)}"
-                                if sel_path not in seen:
-                                    seen.add(sel_path)
-                                    print(sel_path, flush=True)
-                            else:
-                                print(f"{file_path_str}:{match.line}", flush=True)
-                        else:
-                            print(f"{file_path_str}:?", flush=True)
-                elif effective_output in ("location", "summary"):
-                    for file_path_str, match in _limited_matches():
-                        n_total += 1
-                        if match.line is not None:
-                            print(f"{file_path_str}:{match.line}", flush=True)
-                        else:
-                            print(f"{file_path_str}:?", flush=True)
-                else:
-                    # Default code display: header + matched source lines
-                    _file_lines_cache: dict[str, list[str]] = {}
-                    is_tty = sys.stdout.isatty()
-                    for file_path_str, match in _limited_matches():
-                        n_total += 1
-                        _print_pattern_match_code(
-                            file_path_str, match, _file_lines_cache,
-                            is_tty=is_tty,
-                        )
+                n_total = print_pattern_matches(
+                    _limited_matches(), effective_output,
+                    dedent=dedent_output, is_tty=sys.stdout.isatty(),
+                )
                 _logger.info("search total: %d matches in %.3fs", n_total, _time.monotonic() - _t_search_start)
 
             return
@@ -706,4 +605,3 @@ def search(
         )
         if result:
             print(result, end='')
-
