@@ -47,7 +47,7 @@ class PatternMatch:
     end_line: int | None = None
     col: int | None = None
     end_col: int | None = None
-    capture_positions: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
+    capture_spans: dict[str, list[tuple[int, int, int, int]]] = field(default_factory=dict)
 
 
 
@@ -140,12 +140,12 @@ def _filter_matches_by_type_oracle(
     parsed = {name: (kind, parse_type_string(typ)) for name, (kind, typ) in constraints.items()}
 
     def satisfies(match, name, kind, expected):
-        positions = match.capture_positions.get(name, [])
-        if not positions:
+        spans = match.capture_spans.get(name, [])
+        if not spans:
             return False
-        for line, col in positions:
+        for line, col, end_line, end_col in spans:
             binding = file_types.type_at(line, col)
-            if binding is None:
+            if binding is None or end_line != line or binding.col_end != end_col:
                 return False
             actual = binding.type_descriptor
             if kind == "returns":
@@ -258,8 +258,9 @@ def find_pattern(
             end_line=m["end_line"],
             end_col=m["end_column"],
             matched_text=m["matched_text"],
-            capture_positions={
-                name: [(r["start_line"], r["start_column"] + 1)
+            capture_spans={
+                name: [(r["start_line"], r["start_column"] + 1,
+                        r["end_line"], r["end_column"] + 1)
                        for r in capture["ranges"]]
                 for name, capture in m["captures"].items() if name != "_"
             },
