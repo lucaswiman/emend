@@ -14,13 +14,15 @@ runner = CliRunner()
 @pytest.mark.parametrize("fail", [False, True])
 def test_batch_composes_snapshot_before_publication(tmp_path, fail):
     source, consumer = tmp_path / "api.py", tmp_path / "consumer.py"
-    originals = {source: "def old():\n    return 1\n",
+    originals = {source: "def old():\n    def unused():\n        return 0\n    return 1\n",
                  consumer: "from api import old\nvalue = old()\n"}
     for path, content in originals.items():
         path.write_text(content)
     operations = [
         {"rename": {"selector": f"{source}::old", "to": "middle"}},
         {"edit": {"selector": f"{source}::middle[returns]", "value": "int"}},
+        {"rename": {"selector": f"{source}::middle.unused", "to": "discard"}},
+        {"remove": {"selector": f"{source}::middle.discard"}},
         {"add": {"selector": f"{source}::middle[params]", "value": "temporary: int"}},
         {"remove": {"selector": f"{source}::middle[params][temporary]"}},
         {"replace": {"path": str(source), "pattern": "return 1", "replacement": "return 2"}},
