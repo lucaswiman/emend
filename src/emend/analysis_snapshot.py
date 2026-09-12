@@ -3,8 +3,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 from pathlib import Path
 from typing import Literal, Union
+
+
+@dataclass(frozen=True)
+class LanguageConfigRevision:
+    """One immutable language configuration consumed by native analysis."""
+
+    language: str
+    payload: str
+    identity: str
+
+    @classmethod
+    def create(cls, language: str, payload: str) -> "LanguageConfigRevision":
+        return cls(
+            language=language,
+            payload=payload,
+            identity=hashlib.sha256(payload.encode()).hexdigest(),
+        )
 
 
 @dataclass(frozen=True)
@@ -16,6 +34,9 @@ class FileRevision:
     content_hash: str
     language: str
     module_name: str
+    analysis_config: LanguageConfigRevision | None = field(
+        default=None, compare=False, repr=False
+    )
     origin: Literal["disk", "overlay"] = "disk"
     version: int | None = None
 
@@ -28,6 +49,7 @@ class FileRevision:
         language: str,
         module_name: str,
         *,
+        analysis_config: LanguageConfigRevision | None = None,
         origin: Literal["disk", "overlay"] = "disk",
         version: int | None = None,
     ) -> "FileRevision":
@@ -37,6 +59,7 @@ class FileRevision:
             content_hash=content_hash,
             language=language,
             module_name=module_name,
+            analysis_config=analysis_config,
             origin=origin,
             version=version,
         )

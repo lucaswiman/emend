@@ -16,30 +16,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import posixpath
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from emend.errors import BUG_EXCEPTIONS
-from emend.analysis_extraction import (
-    _bfs_reachable_blocks,
-    _build_method_call_facts,
-    _build_symbol_line_index,
-    _enclosing_symbol,
-    _extract_file_facts,
-    _extract_imports,
-    _extract_imports_python,
-    _extract_imports_rust,
-    _extract_imports_typescript,
-    _find_containing_block,
-    _map_ref_kind,
-    _normalize_qn,
-    _resolve_cfg_func_qn,
-    _walk_symbols,
-    build_def_use_facts,
-)
+from emend.analysis_extraction import _extract_file_facts, _normalize_qn
 from emend.analysis_snapshot import (
     AnalysisSnapshot,
     CallFact,
@@ -71,6 +54,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 FACT_GRAPH_SCHEMA_VERSION = "10"
+_FACT_INSERT_BATCH_SIZE = 25_000
 
 
 @dataclass(frozen=True)
@@ -88,27 +72,10 @@ class DeadSymbolFact(SymbolFact):
 # ---------------------------------------------------------------------------
 
 def _create_cozo_client(db_path: str | None = None) -> Any:
-    """Create a CozoDB client with the SQLite backend.
+    """Use the required native backend, in memory unless a path is supplied."""
+    from emend.emend_core import PyCozoDb
 
-    Uses the Rust ``PyCozoDb`` exposed by ``emend_core`` (compiled
-    with the ``cozo`` crate).  Falls back to ``pycozo.Client`` if
-    available (for standalone testing outside the full build).
-
-    If *db_path* is ``None``, uses a temporary in-memory database.
-    """
-    try:
-        from emend import emend_core  # type: ignore[attr-defined]
-        if db_path is None:
-            return emend_core.PyCozoDb("mem", "")
-        return emend_core.PyCozoDb("sqlite", str(db_path))
-    except (ImportError, AttributeError):
-        pass
-
-    # Fallback: use pycozo Python package if available
-    from pycozo import Client  # type: ignore[import-untyped]
-    if db_path is None:
-        return Client("mem", "")
-    return Client("sqlite", str(db_path))
+    return PyCozoDb("mem", "") if db_path is None else PyCozoDb("sqlite", str(db_path))
 
 
 _SCHEMA_INIT = """\
@@ -722,27 +689,19 @@ class FactGraph:
 
         Caller is responsible for skipping empty inserts.
         """
-        operation = (
-            f"?[{cols}] <- $rows :put {relation} {{{schema}}}",
-            {"rows": rows},
-        )
-        if operations is None:
-            self._client.run(*operation)
-        else:
-            operations.append(operation)
+        query = f"?[{cols}] <- $rows :put {relation} {{{schema}}}"
+        for start in range(0, len(rows), _FACT_INSERT_BATCH_SIZE):
+            operation = (query, {"rows": rows[start : start + _FACT_INSERT_BATCH_SIZE]})
+            if operations is None:
+                self._client.run(*operation)
+            else:
+                operations.append(operation)
 
-    def _run_mutations(
-        self, operations: list[tuple[str, dict[str, Any]]]
-    ) -> None:
-        """Run generated mutations in Cozo's synchronous atomic script."""
-        queries, bindings = [], {}
-        for index, (query, params) in enumerate(operations):
-            # These internal statements contain only parameter uses of '$'.
-            prefix = f"mutation_{index}_"
-            queries.append("{" + query.replace("$", "$" + prefix) + "}")
-            bindings.update((prefix + key, value) for key, value in params.items())
-        if queries:
-            self._client.run("\n".join(queries), bindings)
+    def _run_mutations(self, operations: list[tuple[str, dict[str, Any]]]) -> None:
+        """Run generated mutations in one synchronous Cozo transaction."""
+        if operations:
+            self._client.run_transaction(operations)
+
 
     def add_symbols_batch(self, facts: list[SymbolFact]) -> None:
         """Bulk-insert symbol facts."""
@@ -943,101 +902,6 @@ class FactGraph:
             "file_path, qualified_name",
             rows,
         )
-
-    # -- Post-processing ---------------------------------------------------
-
-    def _resolve_builtin_refs(self) -> None:
-        """Resolve ``builtins.*`` references using import facts.
-
-        When a scope resolver can't resolve a cross-file import (typical
-        for TypeScript/Rust), it reports the callee as ``builtins.X``.
-        This method finds such references, matches them against import
-        facts, and adds corrected reference/call facts with the real
-        qualified name.
-        """
-        try:
-            builtin_calls = self._client.run(
-                "?[caller_qn, callee_qn, file_path, line, col, func_qn, block_id] := "
-                "*call[caller_qn, callee_qn, file_path, line, col, func_qn, block_id], "
-                "starts_with(callee_qn, 'builtins.')"
-            )["rows"]
-        except Exception:
-            logger.debug("builtins.* call query failed; skipping builtin ref resolution", exc_info=True)
-            return
-
-        if not builtin_calls:
-            return
-
-        try:
-            imports = self._client.run(
-                "?[importing_file, imported_name, imported_module] := "
-                "*import[importing_file, imported_module, imported_name, _, _], "
-                "imported_name != ''"
-            )["rows"]
-        except Exception:
-            logger.debug("import fact query failed; skipping builtin ref resolution", exc_info=True)
-            return
-
-        import_map: dict[tuple[str, str], str] = {}
-        for imp_file, imp_name, imp_module in imports:
-            import_map[(imp_file, imp_name)] = imp_module
-
-        new_calls: list[CallFact] = []
-        new_refs: list[ReferenceFact] = []
-
-        for caller_qn, callee_qn, file_path, line, col, func_qn, block_id in builtin_calls:
-            bare_name = callee_qn.split(".", 1)[-1] if "." in callee_qn else callee_qn
-            imp_module = import_map.get((file_path, bare_name))
-            if not imp_module:
-                continue
-
-            # Resolve import module path to a file module QN.
-            # Handle relative imports (./target, ../utils) by normalizing
-            # against the importing file's directory.
-            resolved_qn = self._resolve_import_to_qn(
-                imp_module, file_path, bare_name,
-            )
-            if not resolved_qn:
-                continue
-
-            new_calls.append(CallFact(
-                caller_qn=caller_qn, callee_qn=resolved_qn,
-                file_path=file_path, line=line, col=col,
-                func_qn=func_qn, block_id=block_id,
-            ))
-            new_refs.append(ReferenceFact(
-                symbol_qn=resolved_qn, file_path=file_path,
-                line=line, col=col, ref_kind="call",
-                func_qn=func_qn, block_id=block_id,
-            ))
-
-        if new_calls:
-            self.add_calls_batch(new_calls)
-        if new_refs:
-            self.add_references_batch(new_refs)
-
-    def _resolve_import_to_qn(
-        self,
-        import_source: str,
-        importing_file: str,
-        symbol_name: str,
-    ) -> str | None:
-        """Resolve an import source path to a symbol QN.
-
-        For relative imports like ``./target`` or ``../utils/helper``,
-        resolves relative to the importing file's directory.
-        """
-        # Strip leading ./ and resolve relative paths
-        source = import_source
-        if source.startswith("./") or source.startswith("../"):
-            # Resolve relative to the importing file's directory
-            imp_dir = posixpath.dirname(importing_file)
-            source = posixpath.normpath(posixpath.join(imp_dir, source))
-
-        # Normalize separators to dots
-        normalized = _normalize_qn(source)
-
-        return f"{normalized}.{symbol_name}"
 
     # -- Queries ----------------------------------------------------------
 
@@ -2348,123 +2212,120 @@ class FactGraph:
         # CozoDB `:rm` requires that the query variable names in `?[...]`
         # and `:rm relation { }` match the actual column names in the
         # stored relation schema.
-        for fp in file_paths:
-            for query in (
-                # decorator_on/func_summary join through symbol — remove first
-                "?[symbol_qn, decorator] := *decorator_on[symbol_qn, decorator], "
-                "*symbol[symbol_qn, file_path, _, _, _, _, _], "
-                "file_path == $fp  :rm decorator_on {symbol_qn, decorator}",
-                "?[func_qn, param_name] := *func_summary[func_qn, param_name, _, _, _], "
-                "*symbol[func_qn, file_path, _, _, _, _, _], "
-                "file_path == $fp  :rm func_summary {func_qn, param_name => }",
-                # symbol
-                "?[qualified_name] := *symbol[qualified_name, file_path, _, _, _, _, _], "
-                "file_path == $fp  :rm symbol {qualified_name => }",
-                # search_symbol
-                "?[file_path, module_qualified_name] := "
-                "*search_symbol[file_path, module_qualified_name, _, _, _, _, _, _, _, _, _, _], "
-                "file_path == $fp  :rm search_symbol {file_path, module_qualified_name => }",
-                # call
-                "?[caller_qn, callee_qn, file_path, line, col] := "
-                "*call[caller_qn, callee_qn, file_path, line, col, _, _], "
-                "file_path == $fp  :rm call {caller_qn, callee_qn, file_path, line, col => }",
-                # call_by_callee
-                "?[callee_qn, caller_qn, file_path, line, col] := "
-                "*call_by_callee[callee_qn, caller_qn, file_path, line, col, _, _], "
-                "file_path == $fp  :rm call_by_callee {callee_qn, caller_qn, file_path, line, col => }",
-                # call_by_file
-                "?[file_path, caller_qn, callee_qn, line, col] := "
-                "*call_by_file[file_path, caller_qn, callee_qn, line, col, _, _], "
-                "file_path == $fp  :rm call_by_file {file_path, caller_qn, callee_qn, line, col => }",
-                # reference
-                "?[symbol_qn, file_path, line, col] := "
-                "*reference[symbol_qn, file_path, line, col, _, _, _], "
-                "file_path == $fp  :rm reference {symbol_qn, file_path, line, col => }",
-                # trace_flow (all keys)
-                "?[source_var, sink_var, label, file_path, func_qn, source_line, sink_line] := "
-                "*trace_flow[source_var, sink_var, label, file_path, func_qn, source_line, sink_line], "
-                "file_path == $fp  :rm trace_flow "
-                "{source_var, sink_var, label, file_path, func_qn, source_line, sink_line}",
-                # type_binding
-                "?[symbol_qn, file_path, line, binding_kind] := "
-                "*type_binding[symbol_qn, file_path, line, binding_kind, _], "
-                "file_path == $fp  :rm type_binding {symbol_qn, file_path, line, binding_kind => }",
-                # cfg_edge (all keys)
-                "?[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line] := "
-                "*cfg_edge[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line], "
-                "file_path == $fp  :rm cfg_edge "
-                "{file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}",
-                # flow_event/flow_edge are file-owned occurrence relations.
-                "?[file_path, event_id] := "
-                "*flow_event[file_path, event_id, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _], "
-                "file_path == $fp  :rm flow_event {file_path, event_id => }",
-                "?[file_path, from_event, to_event, edge_kind] := "
-                "*flow_edge[file_path, from_event, to_event, edge_kind], "
-                "file_path == $fp  :rm flow_edge "
-                "{file_path, from_event, to_event, edge_kind}",
-                # def_use
-                "?[file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line] := "
-                "*def_use[file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line, _, _], "
-                "file_path == $fp  :rm def_use "
-                "{file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line => }",
-                # method_call (all keys)
-                "?[file_path, func_qn, receiver, method, block_id, line] := "
-                "*method_call[file_path, func_qn, receiver, method, block_id, line], "
-                "file_path == $fp  :rm method_call "
-                "{file_path, func_qn, receiver, method, block_id, line}",
-                # cfg_block
-                "?[file_path, func_qn, block_id] := "
-                "*cfg_block[file_path, func_qn, block_id, _, _], "
-                "file_path == $fp  :rm cfg_block {file_path, func_qn, block_id => }",
-                # source_loc
-                "?[file_path, loc_kind, loc_id] := "
-                "*source_loc[file_path, loc_kind, loc_id, _, _, _, _], "
-                "file_path == $fp  :rm source_loc {file_path, loc_kind, loc_id => }",
-                # ref_by_block (all keys)
-                "?[file_path, func_qn, block_id, symbol_qn] := "
-                "*ref_by_block[file_path, func_qn, block_id, symbol_qn], "
-                "file_path == $fp  :rm ref_by_block "
-                "{file_path, func_qn, block_id, symbol_qn}",
-                # noncall_private_member_ref (all keys)
-                "?[file_path, func_qn, block_id, member_name] := "
-                "*noncall_private_member_ref[file_path, func_qn, block_id, member_name], "
-                "file_path == $fp  :rm noncall_private_member_ref "
-                "{file_path, func_qn, block_id, member_name}",
-                # reachable_block (all keys)
-                "?[file_path, func_qn, block_id] := "
-                "*reachable_block[file_path, func_qn, block_id], "
-                "file_path == $fp  :rm reachable_block {file_path, func_qn, block_id}",
-                # module_level_ref
-                "?[symbol_qn, file_path, line] := "
-                "*module_level_ref[symbol_qn, file_path, line], "
-                "file_path == $fp  :rm module_level_ref {symbol_qn, file_path, line}",
-                # exported_symbol is keyed by its defining file.
-                "?[file_path, qualified_name] := "
-                "*exported_symbol[file_path, qualified_name], "
-                "file_path == $fp  :rm exported_symbol {file_path, qualified_name}",
-                # import (uses importing_file, not file_path)
-                "?[importing_file, imported_module, imported_name, line] := "
-                "*import[importing_file, imported_module, imported_name, line, _], "
-                "importing_file == $fp  :rm import "
-                "{importing_file, imported_module, imported_name, line => }",
-            ):
-                if operations is not None:
-                    operations.append((query, {"fp": fp}))
-                    continue
-                try:
-                    self._client.run(query, {"fp": fp})
-                except Exception:
-                    logger.debug("Fact removal query failed for %s", fp, exc_info=True)
+        for query in (
+            # decorator_on/func_summary join through symbol — remove first
+            "?[symbol_qn, decorator] := *decorator_on[symbol_qn, decorator], "
+            "*symbol[symbol_qn, file_path, _, _, _, _, _], "
+            "file_path in $fps  :rm decorator_on {symbol_qn, decorator}",
+            "?[func_qn, param_name] := *func_summary[func_qn, param_name, _, _, _], "
+            "*symbol[func_qn, file_path, _, _, _, _, _], "
+            "file_path in $fps  :rm func_summary {func_qn, param_name => }",
+            # symbol
+            "?[qualified_name] := *symbol[qualified_name, file_path, _, _, _, _, _], "
+            "file_path in $fps  :rm symbol {qualified_name => }",
+            # search_symbol
+            "?[file_path, module_qualified_name] := "
+            "*search_symbol[file_path, module_qualified_name, _, _, _, _, _, _, _, _, _, _], "
+            "file_path in $fps  :rm search_symbol {file_path, module_qualified_name => }",
+            # call
+            "?[caller_qn, callee_qn, file_path, line, col] := "
+            "*call[caller_qn, callee_qn, file_path, line, col, _, _], "
+            "file_path in $fps  :rm call {caller_qn, callee_qn, file_path, line, col => }",
+            # call_by_callee
+            "?[callee_qn, caller_qn, file_path, line, col] := "
+            "*call_by_callee[callee_qn, caller_qn, file_path, line, col, _, _], "
+            "file_path in $fps  :rm call_by_callee {callee_qn, caller_qn, file_path, line, col => }",
+            # call_by_file
+            "?[file_path, caller_qn, callee_qn, line, col] := "
+            "*call_by_file[file_path, caller_qn, callee_qn, line, col, _, _], "
+            "file_path in $fps  :rm call_by_file {file_path, caller_qn, callee_qn, line, col => }",
+            # reference
+            "?[symbol_qn, file_path, line, col] := "
+            "*reference[symbol_qn, file_path, line, col, _, _, _], "
+            "file_path in $fps  :rm reference {symbol_qn, file_path, line, col => }",
+            # trace_flow (all keys)
+            "?[source_var, sink_var, label, file_path, func_qn, source_line, sink_line] := "
+            "*trace_flow[source_var, sink_var, label, file_path, func_qn, source_line, sink_line], "
+            "file_path in $fps  :rm trace_flow "
+            "{source_var, sink_var, label, file_path, func_qn, source_line, sink_line}",
+            # type_binding
+            "?[symbol_qn, file_path, line, binding_kind] := "
+            "*type_binding[symbol_qn, file_path, line, binding_kind, _], "
+            "file_path in $fps  :rm type_binding {symbol_qn, file_path, line, binding_kind => }",
+            # cfg_edge (all keys)
+            "?[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line] := "
+            "*cfg_edge[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line], "
+            "file_path in $fps  :rm cfg_edge "
+            "{file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}",
+            # flow_event/flow_edge are file-owned occurrence relations.
+            "?[file_path, event_id] := "
+            "*flow_event[file_path, event_id, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _], "
+            "file_path in $fps  :rm flow_event {file_path, event_id => }",
+            "?[file_path, from_event, to_event, edge_kind] := "
+            "*flow_edge[file_path, from_event, to_event, edge_kind], "
+            "file_path in $fps  :rm flow_edge "
+            "{file_path, from_event, to_event, edge_kind}",
+            # def_use
+            "?[file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line] := "
+            "*def_use[file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line, _, _], "
+            "file_path in $fps  :rm def_use "
+            "{file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line => }",
+            # method_call (all keys)
+            "?[file_path, func_qn, receiver, method, block_id, line] := "
+            "*method_call[file_path, func_qn, receiver, method, block_id, line], "
+            "file_path in $fps  :rm method_call "
+            "{file_path, func_qn, receiver, method, block_id, line}",
+            # cfg_block
+            "?[file_path, func_qn, block_id] := "
+            "*cfg_block[file_path, func_qn, block_id, _, _], "
+            "file_path in $fps  :rm cfg_block {file_path, func_qn, block_id => }",
+            # source_loc
+            "?[file_path, loc_kind, loc_id] := "
+            "*source_loc[file_path, loc_kind, loc_id, _, _, _, _], "
+            "file_path in $fps  :rm source_loc {file_path, loc_kind, loc_id => }",
+            # ref_by_block (all keys)
+            "?[file_path, func_qn, block_id, symbol_qn] := "
+            "*ref_by_block[file_path, func_qn, block_id, symbol_qn], "
+            "file_path in $fps  :rm ref_by_block "
+            "{file_path, func_qn, block_id, symbol_qn}",
+            # noncall_private_member_ref (all keys)
+            "?[file_path, func_qn, block_id, member_name] := "
+            "*noncall_private_member_ref[file_path, func_qn, block_id, member_name], "
+            "file_path in $fps  :rm noncall_private_member_ref "
+            "{file_path, func_qn, block_id, member_name}",
+            # reachable_block (all keys)
+            "?[file_path, func_qn, block_id] := "
+            "*reachable_block[file_path, func_qn, block_id], "
+            "file_path in $fps  :rm reachable_block {file_path, func_qn, block_id}",
+            # module_level_ref
+            "?[symbol_qn, file_path, line] := "
+            "*module_level_ref[symbol_qn, file_path, line], "
+            "file_path in $fps  :rm module_level_ref {symbol_qn, file_path, line}",
+            # exported_symbol is keyed by its defining file.
+            "?[file_path, qualified_name] := "
+            "*exported_symbol[file_path, qualified_name], "
+            "file_path in $fps  :rm exported_symbol {file_path, qualified_name}",
+            # import (uses importing_file, not file_path)
+            "?[importing_file, imported_module, imported_name, line] := "
+            "*import[importing_file, imported_module, imported_name, line, _], "
+            "importing_file in $fps  :rm import "
+            "{importing_file, imported_module, imported_name, line => }",
+        ):
+            if operations is not None:
+                operations.append((query, {"fps": file_paths}))
+                continue
+            try:
+                self._client.run(query, {"fps": file_paths})
+            except Exception:
+                logger.debug("Fact removal query failed", exc_info=True)
 
-    def _insert_extracted_file_facts(
+    def _insert_extracted_facts(
         self,
-        extracted: ExtractedFile | dict[str, list[list[Any]]],
+        extracted_files: list[ExtractedFile],
         *,
         operations: list[tuple[str, dict[str, Any]]] | None = None,
     ) -> None:
         """Insert the language-neutral rows returned by the canonical extractor."""
-        # Dict support is retained only for injected legacy/test extractors.
-        rows = extracted.rows if isinstance(extracted, ExtractedFile) else extracted
         specs = {
             "fg_sym": ("symbol", "qualified_name, file_path, name, kind, line, end_line, parent", "qualified_name => file_path, name, kind, line, end_line, parent"),
             "search_sym": (
@@ -2501,27 +2362,26 @@ class FactGraph:
                 "exported_symbol", "file_path, qualified_name",
                 "file_path, qualified_name",
             ),
+            "reachable_blocks": (
+                "reachable_block", "file_path, func_qn, block_id",
+                "file_path, func_qn, block_id",
+            ),
         }
+        rows: dict[str, list[list[Any]]] = {key: [] for key in specs}
+        for extracted in extracted_files:
+            for key in specs:
+                rows[key].extend(extracted.rows.get(key, []))
+
+        # Unlike the other relations, symbol's key does not contain file_path.
+        # Preserve the former per-file :put behavior: a later file wins if two
+        # module mappings produce the same qualified name.
+        rows["fg_sym"] = list({row[0]: row for row in rows["fg_sym"]}.values())
         for key, (relation, cols, schema) in specs.items():
             relation_rows = rows.get(key, [])
             if relation_rows:
                 self._put_batch(
                     relation, cols, schema, relation_rows, operations
                 )
-
-        entries: dict[tuple[str, str], set[int]] = {}
-        adjacency: dict[tuple[str, str, int], list[int]] = {}
-        for fp, fq, bid, is_entry, _is_exit in rows["cfg_blocks"]:
-            if is_entry:
-                entries.setdefault((fp, fq), set()).add(bid)
-        for fp, fq, from_block, to_block, *_ in rows["cfg_edges"]:
-            adjacency.setdefault((fp, fq, from_block), []).append(to_block)
-        reachable = _bfs_reachable_blocks(entries, adjacency)
-        if reachable:
-            self._put_batch(
-                "reachable_block", "file_path, func_qn, block_id",
-                "file_path, func_qn, block_id", reachable, operations,
-            )
 
     def replace_extracted(
         self,
@@ -2532,8 +2392,7 @@ class FactGraph:
         """Replace path-owned rows using precomputed extraction artifacts."""
         operations: list[tuple[str, dict[str, Any]]] = []
         self.remove_files(stored_paths, operations=operations)
-        for extracted in extracted_files:
-            self._insert_extracted_file_facts(extracted, operations=operations)
+        self._insert_extracted_facts(extracted_files, operations=operations)
         self._run_mutations(operations)
 
     def update_files(
@@ -2554,7 +2413,6 @@ class FactGraph:
         persisted index builder; this method owns incremental deletion and
         insertion only.
         """
-        from emend import emend_core as _rust
         # 1. Delete existing facts for all files in the batch.
         resolved_project_root = Path(project_root).resolve() if project_root else None
 
@@ -2569,29 +2427,43 @@ class FactGraph:
 
         # 2. Extract and insert new facts per file.  The persisted index uses
         # this same extractor, so analysis semantics cannot drift by builder.
+        from emend.analysis_linking import ModuleCatalog, link_extracted_files
+        from emend.analysis_snapshot import FileRevision
+        from emend.language_registry import (
+            detect_language,
+            get_module_separator,
+            registry_and_config_snapshots,
+        )
+
         extracted_files = []
+        revisions = []
         for abs_file_path, content in file_list:
             rel_path = stored_path(abs_file_path)
-            if project_root:
-                from emend.project_config import module_name_for_file
+            from emend.project_config import module_name_for_file
 
-                module_name = module_name_for_file(abs_file_path, project_root)
-            else:
-                module_name = Path(abs_file_path).stem
-            ext = Path(abs_file_path).suffix.lstrip(".") or "py"
-            try:
-                effective_resolver_root = resolver_root or str(Path(abs_file_path).parent.resolve())
-                resolver = _rust.PyScopeResolver(effective_resolver_root, ext)
-                resolver.index_file(abs_file_path, content)
-            except Exception:
-                logger.debug("Could not build scope resolver for %s", abs_file_path, exc_info=True)
-                resolver = None
-
+            root = resolved_project_root or Path(abs_file_path).resolve().parent
+            registry, configs = registry_and_config_snapshots(root)
+            file_language = detect_language(abs_file_path, registry=registry) or language
+            config = configs[file_language]
+            module_name = (
+                module_name_for_file(
+                    abs_file_path, root, language=file_language,
+                    module_separator=get_module_separator(file_language, config),
+                )
+                if resolved_project_root is not None
+                else Path(abs_file_path).stem
+            )
+            revision = FileRevision.create(
+                root, abs_file_path, hashlib.sha256(content.encode()).hexdigest(),
+                file_language, module_name, analysis_config=config,
+            )
+            revisions.append(revision)
             extracted_files.append(_extract_file_facts(
-                abs_file_path, rel_path, ext, content,
-                project_root or str(Path(abs_file_path).parent),
-                module_name, scope_resolver=resolver,
+                revision, rel_path, content,
             ))
+        extracted_files = link_extracted_files(
+            extracted_files, ModuleCatalog.from_revisions(revisions)
+        )
         self.replace_extracted(
             extracted_files,
             stored_paths=[stored_path(fp) for fp, _ in file_list],

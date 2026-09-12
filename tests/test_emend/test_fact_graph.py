@@ -1,6 +1,7 @@
 """Tests for the CozoDB-backed relational fact graph."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -34,6 +35,29 @@ from emend.fact_graph import (
 )
 
 
+def _native_imports(file_path: str, source: str) -> list[ImportFact]:
+    """Read import rows from the canonical per-file fact batch."""
+    from emend.analysis_extraction import _extract_file_facts
+    from emend.analysis_snapshot import FileRevision
+    from emend.language_registry import detect_language, language_config_snapshot
+
+    language = detect_language(file_path) or "python"
+    revision = FileRevision.create(
+        Path.cwd(), Path(file_path).resolve(), "test", language,
+        Path(file_path).stem, analysis_config=language_config_snapshot(language),
+    )
+    extracted = _extract_file_facts(
+        revision, file_path, source,
+    )
+    return [
+        ImportFact(
+            importing_file=row[0], imported_module=row[1],
+            imported_name=row[2] or None, alias=row[4] or None, line=row[3],
+        )
+        for row in extracted.rows["imports"]
+    ]
+
+
 @pytest.mark.parametrize("persistent", [False, True])
 def test_batched_fact_mutations_abort_as_one_transaction(tmp_path, request, persistent):
     graph = FactGraph(db_path=str(tmp_path / "facts.db") if persistent else None)
@@ -45,12 +69,109 @@ def test_batched_fact_mutations_abort_as_one_transaction(tmp_path, request, pers
     )
 
     with pytest.raises(RuntimeError, match="CozoDB query error"):
-        graph._run_mutations([
-            (put, {"rows": [["a.after", "a.py", "after", "function", 2, 2, ""]]}),
-            ("?[x] := *missing_relation[x]", {}),
-        ])
+        graph._run_mutations(
+            [
+                (put, {"rows": [["a.after", "a.py", "after", "function", 2, 2, ""]]}),
+                ("?[x] := *missing_relation[x]", {}),
+            ]
+        )
 
     assert [symbol.name for symbol in graph.symbols()] == ["before"]
+
+
+def test_batched_fact_mutations_use_streaming_transaction():
+    class Client:
+        def __init__(self):
+            self.operations = None
+
+        def run_transaction(self, operations):
+            self.operations = operations
+
+    graph = FactGraph()
+    graph._client = client = Client()
+    operations = [("?[x] <- $rows", {"rows": [[1]]})]
+
+    graph._run_mutations(operations)
+
+    assert client.operations is operations
+
+
+def test_native_transaction_reports_commit_failure_and_releases_locks(tmp_path):
+    import subprocess
+    import sys
+    from emend.emend_core import PyCozoDb
+
+    path = str(tmp_path / "facts.db")
+    db = PyCozoDb("sqlite", path)
+    db.run(":create values {id: Int}")
+    # A separate process also avoids mixing Python's and Rust's SQLite builds.
+    with subprocess.Popen(
+        [sys.executable, "-c", "import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); "
+         "db.execute('BEGIN'); db.execute('SELECT * FROM cozo').fetchall(); "
+         "print('ready', flush=True); sys.stdin.read()", path],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    ) as reader:
+        try:
+            assert reader.stdout.readline() == "ready\n"
+            with pytest.raises(RuntimeError, match="locked"):
+                db.run_transaction([("?[id] <- [[1]] :put values {id}", {})])
+        finally:
+            reader.communicate(timeout=5)
+    assert db.run("?[id] := *values[id]")["rows"] == []
+    db.run_transaction([("?[id] <- [[2]] :put values {id}", {})])
+    assert db.run("?[id] := *values[id]")["rows"] == [[2]]
+
+
+@pytest.mark.parametrize("transaction", [False, True])
+def test_native_database_parameter_types(transaction):
+    from emend.emend_core import PyCozoDb
+
+    class IndexedString(str):
+        def __index__(self):
+            return 7
+
+    db = PyCozoDb()
+    db.run(":create values {id: Int => value}")
+    values = [None, True, False, 42, -3, 1.25, "λ", ["nested", [2]], 2**80, IndexedString("7")]
+    script = "?[id, value] <- $rows :put values {id => value}"
+    params = {"rows": [[i, value] for i, value in enumerate(values)]}
+    if transaction:
+        db.run_transaction([(script, params)])
+    else:
+        db.run(script, params)
+    actual = [row[1] for row in db.run("?[id, value] := *values[id, value]")["rows"]]
+    assert actual == [*values[:-2], float(2**80), 7]
+    assert [type(value) for value in actual] == [
+        type(None), bool, bool, int, int, float, str, list, float, int,
+    ]
+
+
+@pytest.mark.parametrize("transaction", [False, True])
+def test_native_database_wait_does_not_stall_python_gc(transaction):
+    import gc
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from emend.emend_core import PyCozoDb
+
+    db, started = PyCozoDb(), Event()
+    def query():
+        started.set()
+        script = "?[x] <- [[1]] :sleep 2"
+        if transaction:
+            db.run_transaction([(script, {})])
+        else:
+            db.run(script)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(query)
+        assert started.wait(5)
+        time.sleep(0.05)  # Let the worker enter the deliberately slow native call.
+        assert not pending.done()
+        before = time.monotonic()
+        gc.collect()
+        assert time.monotonic() - before < 1, "native query held Python's GC barrier"
+        pending.result()
 
 
 def _make_graph() -> FactGraph:
@@ -180,11 +301,7 @@ class TestRustImportExtraction:
     """Tests for Rust import extraction via tree-sitter (Phase 4 migration)."""
 
     def _extract(self, content: str) -> list[ImportFact]:
-        from emend.fact_graph import _extract_imports_rust
-        # Reset the cached resolver between tests to ensure isolation
-        if hasattr(_extract_imports_rust, "_resolver"):
-            del _extract_imports_rust._resolver
-        return _extract_imports_rust("test.rs", content)
+        return _native_imports("test.rs", content)
 
     @pytest.mark.parametrize(("source", "module", "name", "alias"), [
         pytest.param("use std::io;\n", "std", "io", None, id="simple-use"),
@@ -1178,14 +1295,12 @@ class TestMultiLineImportExtraction:
 
     The old hand-rolled regex matched only single-line imports and missed
     multi-line statements such as ``from foo import (\\n    bar,\\n    baz\\n)``.
-    statement. The tree-sitter based ``_extract_imports_python`` must handle
-    all such cases.
+    The canonical native batch must handle all such cases.
     """
 
     def _imports(self, source: str) -> list[str]:
         """Return a sorted list of (module, imported_name) string pairs."""
-        from emend.fact_graph import _extract_imports_python
-        facts = _extract_imports_python("test_module.py", source)
+        facts = _native_imports("test_module.py", source)
         return sorted(
             f"{f.imported_module}:{f.imported_name or ''}"
             for f in facts
@@ -1234,9 +1349,8 @@ class TestTypescriptImportExtraction:
     """
 
     def _imports(self, filename: str, source: str):
-        """Return ImportFact list from _extract_imports_typescript."""
-        from emend.fact_graph import _extract_imports_typescript
-        return _extract_imports_typescript(filename, source)
+        """Return ImportFact objects from the canonical native batch."""
+        return _native_imports(filename, source)
 
     def _modules(self, source: str) -> set[str]:
         """Return the set of imported module paths from a TypeScript snippet."""

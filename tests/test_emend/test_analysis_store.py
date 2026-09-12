@@ -36,6 +36,46 @@ def _names(facts):
     return [fact.name for fact in facts]
 
 
+@pytest.mark.parametrize("fail_save", [False, True])
+def test_cold_facts_build_in_memory_then_persist(tmp_path, monkeypatch, fail_save):
+    from emend import emend_core
+    from emend.fact_graph import FactGraph
+
+    source = tmp_path / "example.py"
+    source.write_text("def original():\n    return 1\n")
+    store = AnalysisStore(tmp_path)
+    builds, saves = [], []
+    mutate, backup = FactGraph._run_mutations, emend_core.PyCozoDb.backup
+
+    def tracked_mutate(graph, operations):
+        builds.append(graph._db_path)
+        return mutate(graph, operations)
+
+    def tracked_backup(client, path):
+        saves.append(path)
+        if fail_save:
+            raise RuntimeError("save failed")
+        return backup(client, path)
+
+    monkeypatch.setattr(FactGraph, "_run_mutations", tracked_mutate)
+    monkeypatch.setattr(emend_core.PyCozoDb, "backup", tracked_backup)
+    if fail_save:
+        with pytest.raises(RuntimeError, match="save failed"):
+            store.query_facts()
+        assert not store.facts_path.exists()
+        assert store._disk_graph is None
+    else:
+        first = store.query_facts()
+        assert builds and all(path is None for path in builds)
+        assert _names(AnalysisStore(tmp_path).query_facts().symbols()) == ["original"]
+        builds.clear()
+        source.write_text("def changed():\n    return 2\n")
+        assert _names(store.query_facts().symbols()) == ["changed"]
+        assert builds and all(path is not None for path in builds)
+        assert _names(first.symbols()) == ["original"]
+    assert len(saves) == 1
+
+
 @pytest.fixture
 def extracted_files(monkeypatch):
     import emend.analysis_extraction as extraction
@@ -442,9 +482,9 @@ def test_deadcode_computes_type_snapshot_context_once(tmp_path, monkeypatch):
         calls["scan"] += 1
         return original_scan()
 
-    def count_dependencies(graph):
+    def count_dependencies(*args, **kwargs):
         calls["dependencies"] += 1
-        return original_dependencies(graph)
+        return original_dependencies(*args, **kwargs)
 
     monkeypatch.setattr(type_oracle, "_type_shared_context", counted)
     monkeypatch.setattr(store, "_scan_disk", count_scan)
@@ -502,7 +542,6 @@ def test_query_facts_reuses_generation_and_incrementally_matches_full_build(tmp_
         [(str(first), first.read_text())],
         project_root=str(tmp_path), resolver_root=str(tmp_path),
     )
-    rebuilt._resolve_builtin_refs()
     try:
         assert {
             (fact.file_path, fact.qualified_name, fact.kind)
@@ -565,18 +604,30 @@ def test_extraction_artifacts_reuse_across_content_revert(tmp_path, extracted_fi
     assert len(extracted_files) == 2
 
 
-def test_language_config_identity_invalidates_published_and_shared_facts(
-    tmp_path, extracted_files, monkeypatch,
+def test_exact_project_language_config_invalidates_extracted_facts(
+    tmp_path, extracted_files,
 ):
+    from emend.language_registry import language_config_snapshot
+
     source = tmp_path / "app.py"
-    source.write_text("value = 1\n")
+    source.write_text("def visible():\n    return 1\n")
+    config_dir = tmp_path / "languages" / "python"
+    config_dir.mkdir(parents=True)
+    payload = language_config_snapshot("python").payload
+    config_path = config_dir / "config.toml"
+    config_path.write_text(payload)
     store = AnalysisStore.open(tmp_path)
-    context = ["first"]
-    monkeypatch.setattr(store, "_language_config_id", lambda _language: context[0])
     first = store.query_facts()
-    context[0] = "second"
+    assert _names(first.symbols()) == ["visible"]
+
+    config_path.write_text(payload.replace(
+        'function_node = "function_definition"',
+        'function_node = "not_a_function_definition"',
+        1,
+    ))
     second = store.query_facts()
     assert second.snapshot.snapshot_id != first.snapshot.snapshot_id
+    assert second.symbols() == []
     assert len(extracted_files) == 2
 
 
@@ -900,26 +951,33 @@ def test_type_batch_uses_one_snapshot_and_reuses_linked_worktree_payload(
     unrelated.write_text("other = 1\n")
 
     main_store = AnalysisStore.open(main)
-    query_calls = 0
-    original = main_store.query_facts
+    scan_calls = 0
+    original = main_store._scan_disk
 
     def counted():
-        nonlocal query_calls
-        query_calls += 1
+        nonlocal scan_calls
+        scan_calls += 1
         return original()
 
-    monkeypatch.setattr(main_store, "query_facts", counted)
+    monkeypatch.setattr(main_store, "_scan_disk", counted)
+    monkeypatch.setattr(AnalysisStore, "query_facts", lambda *a, **kw: pytest.fail(
+        "type cache inputs must not materialize a fact graph"
+    ))
     _FakeTypeOracle.calls = 0
     _FakeTypeOracle(main).infer_batch(
         [main / "one.py", main / "two.py"], project_root=main
     )
-    assert query_calls == 1 and _FakeTypeOracle.calls == 2
+    assert scan_calls == 1 and _FakeTypeOracle.calls == 2
     linked_paths = [linked / "one.py", linked / "two.py"]
     results = _FakeTypeOracle(linked).infer_batch(linked_paths, project_root=linked)
     assert _FakeTypeOracle.calls == 2
     assert results[str(linked_paths[0].resolve())].path == str(linked_paths[0].resolve())
     before = main_store.type_file_identity(target)
     unrelated.write_text("other = 2\n")
+    assert main_store.type_file_identity(target) == before
+    dependency.write_text("value = 'changed'\n")
+    assert main_store.type_file_identity(target) != before
+    dependency.write_text("value = 1\n")
     assert main_store.type_file_identity(target) == before
 
 

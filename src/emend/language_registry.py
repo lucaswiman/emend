@@ -26,6 +26,8 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
+from emend.analysis_snapshot import LanguageConfigRevision
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -101,8 +103,12 @@ def _discover_entry_point_languages() -> dict[str, Path]:
     return result
 
 
-def _config_path(language: str) -> Path | None:
+def _config_path(language: str, project_root: str | Path | None = None) -> Path | None:
     """Return the effective configuration path for one language."""
+    if project_root is not None:
+        candidate = Path(project_root) / "languages" / language / "config.toml"
+        if candidate.is_file():
+            return candidate
     lang_dir = _find_languages_dir()
     if lang_dir is not None:
         candidate = lang_dir / language / "config.toml"
@@ -116,9 +122,9 @@ def _config_path(language: str) -> Path | None:
     return None
 
 
-def config_identity(language: str) -> str:
+def config_identity(language: str, project_root: str | Path | None = None) -> str:
     """Hash the exact language configuration consumed by analysis."""
-    path = _config_path(language)
+    path = _config_path(language, project_root)
     try:
         payload = path.read_bytes() if path is not None else repr(
             _BUILTIN.get(language, ())
@@ -132,20 +138,7 @@ def _parse_toml_extensions(
     payload: bytes, label: str
 ) -> tuple[str, list[str]] | None:
     """Return (language_name, [extensions]) from a config.toml, or None on error."""
-    if sys.version_info >= (3, 11):
-        import tomllib
-    else:
-        try:
-            import tomli as tomllib  # type: ignore[no-redef]
-        except ImportError:
-            return None
-    try:
-        data = tomllib.loads(payload.decode())
-    except (UnicodeError, ValueError):
-        # TOMLDecodeError subclasses ValueError in both tomllib and tomli.
-        logger.debug("Could not parse %s", label, exc_info=True)
-        return None
-
+    data = _parse_config_payload(payload, label)
     lang = data.get("language", {})
     name = lang.get("name")
     exts = lang.get("file_extensions", [])
@@ -154,9 +147,17 @@ def _parse_toml_extensions(
     return None
 
 
-def _registry_inputs() -> tuple[tuple[str, str, bytes], ...]:
+def _registry_inputs(
+    project_root: str | Path | None = None,
+) -> tuple[tuple[str, str, bytes], ...]:
     """Capture the exact language configurations used by one registry view."""
     inputs: list[tuple[str, str, bytes]] = []
+    if project_root is not None:
+        for path in sorted((Path(project_root) / "languages").glob("*/config.toml")):
+            try:
+                inputs.append(("project", str(path), path.read_bytes()))
+            except OSError:
+                pass
     lang_dir = _find_languages_dir()
     if lang_dir:
         for path in sorted(lang_dir.glob("*/config.toml")):
@@ -194,7 +195,7 @@ def _build_registry(
         result = _parse_toml_extensions(payload, label)
         if result:
             name, exts = result
-            if source == "plugin" and name in lang_to_exts:
+            if name in lang_to_exts:
                 continue
             register(name, exts)
 
@@ -208,9 +209,57 @@ def _build_registry(
     return ext_to_lang, lang_to_exts
 
 
-def registry_snapshot() -> tuple[dict[str, str], dict[str, list[str]]]:
+def registry_snapshot(
+    project_root: str | Path | None = None,
+) -> tuple[dict[str, str], dict[str, list[str]]]:
     """Return one immutable-by-convention, exact registry revision."""
-    return _build_registry(_registry_inputs())
+    ext_to_lang, lang_to_exts = _build_registry(_registry_inputs(project_root))
+    return dict(ext_to_lang), {
+        language: list(extensions) for language, extensions in lang_to_exts.items()
+    }
+
+
+def registry_and_config_snapshots(
+    project_root: str | Path | None = None,
+) -> tuple[
+    tuple[dict[str, str], dict[str, list[str]]],
+    dict[str, LanguageConfigRevision],
+]:
+    """Build extension and config views from one immutable byte capture."""
+    inputs = _registry_inputs(project_root)
+    snapshots: dict[str, LanguageConfigRevision] = {}
+    for _source, label, payload in inputs:
+        parsed = _parse_toml_extensions(payload, label)
+        if parsed is None:
+            continue
+        language, _extensions = parsed
+        snapshots.setdefault(
+            language,
+            LanguageConfigRevision.create(language, payload.decode()),
+        )
+    ext_to_lang, lang_to_exts = _build_registry(inputs)
+    registry = dict(ext_to_lang), {
+        language: list(extensions) for language, extensions in lang_to_exts.items()
+    }
+    return registry, snapshots
+
+
+def language_config_snapshots(
+    project_root: str | Path | None = None,
+) -> dict[str, LanguageConfigRevision]:
+    """Capture the effective config bytes for every language in one registry view."""
+    return registry_and_config_snapshots(project_root)[1]
+
+
+def language_config_snapshot(
+    language: str,
+    project_root: str | Path | None = None,
+) -> LanguageConfigRevision:
+    """Return the exact immutable config revision used for *language*."""
+    snapshot = language_config_snapshots(project_root).get(language)
+    if snapshot is None:
+        raise ValueError(f"no language configuration registered for {language!r}")
+    return snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -268,10 +317,12 @@ def is_source_file(path: str | Path) -> bool:
     return detect_language(path) is not None
 
 
-def get_module_separator(language: str) -> str:
+def get_module_separator(
+    language: str, config: LanguageConfigRevision | None = None
+) -> str:
     """Return the qualified-name separator for *language* (e.g. ``"."`` or ``"::"``)."""
-    config = load_config(language)
-    return config.get("qualified_names", {}).get("module_separator", ".")
+    document = load_config(language, config=config)
+    return document.get("qualified_names", {}).get("module_separator", ".")
 
 
 def get_comment_prefix(language: str) -> str:
@@ -285,15 +336,34 @@ def get_comment_prefix(language: str) -> str:
     return config.get("language", {}).get("comment_prefix", "#")
 
 
-def load_config(language: str) -> dict:
+def load_config(
+    language: str, *, config: LanguageConfigRevision | None = None
+) -> dict:
     """Load the full TOML configuration for *language*.
 
     Returns an empty dict if the language or config file is not found.
     Checks built-in languages first, then entry-point plugins.
     """
+    if config is not None:
+        return _parse_config_payload(config.payload, language)
     config_path = _config_path(language)
 
     return _load_config(language, config_identity(language), config_path)
+
+
+def _parse_config_payload(payload: str | bytes, label: str) -> dict:
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError:
+            return {}
+    try:
+        return tomllib.loads(payload.decode() if isinstance(payload, bytes) else payload)
+    except (UnicodeError, ValueError):
+        logger.debug("Could not parse language config %s", label, exc_info=True)
+        return {}
 
 
 @lru_cache(maxsize=32)
@@ -303,20 +373,9 @@ def _load_config(language: str, _identity: str, config_path: Path | None) -> dic
         return {}
 
     try:
-        if sys.version_info >= (3, 11):
-            import tomllib
-            with open(config_path, "rb") as fh:
-                return tomllib.load(fh)
-        else:
-            # Fallback for Python < 3.11: use tomli if available, else empty
-            try:
-                import tomli
-                return tomli.loads(config_path.read_text())
-            except ImportError:
-                return {}
-    except (OSError, ValueError):
-        # TOMLDecodeError subclasses ValueError in both tomllib and tomli.
-        logger.debug("Could not parse %s", config_path, exc_info=True)
+        return _parse_config_payload(config_path.read_bytes(), str(config_path))
+    except OSError:
+        logger.debug("Could not read %s", config_path, exc_info=True)
         return {}
 
 
@@ -328,160 +387,22 @@ load_config.cache_clear = _load_config.cache_clear  # type: ignore[attr-defined]
 # Tree-sitter-based export detection
 # ---------------------------------------------------------------------------
 
-# TypeScript/JavaScript declaration keywords that follow 'export [default]'
-_TS_DECL_KEYWORDS: tuple[str, ...] = (
-    "async ",
-    "abstract ",
-    "declare ",
-)
-_TS_TYPE_KEYWORDS: tuple[str, ...] = (
-    "function* ",
-    "function ",
-    "class ",
-    "const ",
-    "let ",
-    "var ",
-    "interface ",
-    "type ",
-    "enum ",
-    "abstract class ",
-)
+def detect_exported_names(
+    content: str,
+    language: str,
+    *,
+    extension: str | None = None,
+    config: LanguageConfigRevision | None = None,
+) -> set[str]:
+    """Detect explicit module exports using the canonical native parser."""
+    if language not in ("python", "typescript", "javascript", "rust"):
+        return set()
 
-
-def _detect_exported_names_python(content: str) -> set[str]:
-    """Detect Python's explicit module API from a parsed ``__all__`` value."""
     from emend import emend_core
 
-    return set(emend_core.python_all_names(content))
-
-
-def _extract_name_after_keywords(rest: str) -> str:
-    """Strip leading declaration/type keywords and return the bare symbol name."""
-    for kw in _TS_DECL_KEYWORDS:
-        if rest.startswith(kw):
-            rest = rest[len(kw):].strip()
-    for kw in _TS_TYPE_KEYWORDS:
-        if rest.startswith(kw):
-            rest = rest[len(kw):]
-            break
-    # Extract identifier characters from the start
-    name = ""
-    for ch in rest:
-        if ch.isalnum() or ch == "_":
-            name += ch
-        else:
-            break
-    return name
-
-
-def _detect_exported_names_typescript(content: str) -> set[str]:
-    """Detect exported names from TypeScript/JavaScript source using tree-sitter.
-
-    Uses ``emend_core.get_statement_ranges()`` to obtain tree-sitter-parsed
-    declaration lines, then checks each line for the ``export`` keyword.
-    No regex patterns are required.
-    """
-    from emend import emend_core  # local import to avoid circular deps
-
-    lines = content.split("\n")
-    exported: set[str] = set()
-
-    # get_statement_ranges returns (start_line, end_line) 1-indexed pairs
-    # for all top-level simple statements in the file.
-    try:
-        ranges = emend_core.get_statement_ranges(content, "ts")
-    except Exception:
-        logger.debug("get_statement_ranges failed for TypeScript source", exc_info=True)
-        return exported
-
-    for start_line, _end_line in ranges:
-        if start_line < 1 or start_line > len(lines):
-            continue
-        line = lines[start_line - 1].strip()
-
-        if not (line.startswith("export ") or line.startswith("export{")):
-            continue
-
-        # Named export block: export { foo, bar as baz }
-        # The '{' must appear directly after 'export' (with optional whitespace).
-        # This distinguishes `export { foo }` from `export function foo() { ... }`.
-        # Also skip re-exports: export { X } from "module"
-        rest_for_brace = line[len("export"):].lstrip()
-        if rest_for_brace.startswith("{"):
-            if " from " not in line:
-                brace_start = line.find("{")
-                brace_end = line.rfind("}")
-                if brace_start != -1 and brace_end != -1:
-                    names_part = line[brace_start + 1 : brace_end]
-                    for item in names_part.split(","):
-                        item = item.strip()
-                        if not item:
-                            continue
-                        # Keep the original name (before any 'as' alias)
-                        original = item.split(" as ")[0].strip()
-                        if original and original.isidentifier():
-                            exported.add(original)
-            continue
-
-        # export [default] <keyword> <Name> ...
-        rest = line[len("export "):].strip()
-        if rest.startswith("default "):
-            rest = rest[len("default "):].strip()
-
-        # Skip re-exports that contain 'from'
-        if " from " in rest:
-            continue
-
-        name = _extract_name_after_keywords(rest)
-        if name:
-            exported.add(name)
-
-    return exported
-
-
-def _detect_exported_names_rust(content: str) -> set[str]:
-    """Detect public symbol names from Rust source using tree-sitter.
-
-    Uses ``emend_core.collect_symbols_from_str()`` to get the symbol list
-    (with line numbers), then checks whether the corresponding source line
-    starts with the ``pub`` visibility modifier.  No regex patterns required.
-    """
-    from emend import emend_core  # local import to avoid circular deps
-
-    exported: set[str] = set()
-    try:
-        symbols = emend_core.collect_symbols_from_str(content, ext="rs")
-    except Exception:
-        logger.debug("collect_symbols_from_str failed for Rust source", exc_info=True)
-        return exported
-
-    lines = content.split("\n")
-    for sym in symbols:
-        line_num = sym.get("line", 0)
-        if line_num < 1 or line_num > len(lines):
-            continue
-        # The symbol line may be the attribute line for decorated items;
-        # check the line where the symbol definition actually starts.
-        line_text = lines[line_num - 1].lstrip()
-        if line_text.startswith("pub ") or line_text.startswith("pub("):
-            exported.add(sym["name"])
-
-    return exported
-
-
-def detect_exported_names(content: str, language: str) -> set[str]:
-    """Detect exported/public symbol names using tree-sitter analysis.
-
-    For Python, reads ``__all__`` from a structurally matched assignment.  For
-    TypeScript/JavaScript, walks ``export_statement`` nodes via
-    ``emend_core.get_statement_ranges()``.  For Rust, uses
-    ``emend_core.collect_symbols_from_str()`` with ``pub`` visibility checks.
-    """
-    if language == "python":
-        return _detect_exported_names_python(content)
-    if language in ("typescript", "javascript"):
-        return _detect_exported_names_typescript(content)
-    if language == "rust":
-        return _detect_exported_names_rust(content)
-    # For other languages with no export concept, return empty set.
-    return set()
+    revision = config or language_config_snapshot(language)
+    extensions = get_extensions(language)
+    ext = extension or (extensions[0] if extensions else "py")
+    return set(emend_core.extract_exported_names(
+        content, ext, language, revision.payload,
+    ))

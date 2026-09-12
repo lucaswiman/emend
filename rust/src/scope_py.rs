@@ -274,7 +274,7 @@ impl PyScopeResolver {
         self.inner
             .collect_rust_imports(&tree, source)
             .into_iter()
-            .map(|(b, line)| (b.local_name, b.module_path, b.imported_name, b.is_star, line))
+            .map(|(b, line, _)| (b.local_name, b.module_path, b.imported_name, b.is_star, line))
             .collect()
     }
 

@@ -15,6 +15,7 @@ from emend.errors import BUG_EXCEPTIONS
 
 if TYPE_CHECKING:
     import sqlite3
+    from emend.type_oracle import TypeBatchInputs, TypeOracle
 
 logger = logging.getLogger(__name__)
 
@@ -78,47 +79,25 @@ def _extract_noqa_lines(source: str) -> set[int]:
 
 
 def _check_cache_hits(
-    db_path: str, file_revisions: list[tuple[str, bytes]]
+    conn: sqlite3.Connection, file_revisions: list[tuple[str, bytes]]
 ) -> set[tuple[str, bytes]]:
-    """Pre-check which exact file revisions have a QN cache entry.
-
-    Returns the set of ``(resolved path, hash)`` revisions in ``qn_index``.
-    The derived tables
-    (``symbol_index``, ``import_graph``, ``reference_index``) are written in
-    lockstep with ``qn_index``, so a QN-cache hit implies their rows are
-    current and a QN-cache miss means all of them must be re-derived — only
-    ``qn_index`` needs to be probed. On any error, returns an empty set so
-    the caller processes everything.
-    """
-    import sqlite3
-
+    """QN markers and derived rows are committed together; probe only markers."""
     cached_qn: set[tuple[str, bytes]] = set()
-    if not file_revisions:
-        return cached_qn
     try:
-        conn_check = sqlite3.connect(db_path, timeout=30)
-        conn_check.execute("PRAGMA journal_mode=WAL")
-        conn_check.execute("PRAGMA synchronous=NORMAL")
-        try:
-            for file_path, content_hash in file_revisions:
-                resolved = str(Path(file_path).resolve())
-                row = conn_check.execute(
-                    "SELECT 1 FROM qn_index WHERE file_path = ? AND hash = ?",
-                    (resolved, content_hash),
-                ).fetchone()
-                if row is not None:
-                    cached_qn.add((resolved, content_hash))
-        except sqlite3.Error:
-            logger.debug("qn_index cache pre-check query failed", exc_info=True)
-        conn_check.close()
+        for file_path, content_hash in file_revisions:
+            resolved = str(Path(file_path).resolve())
+            if conn.execute(
+                "SELECT 1 FROM qn_index WHERE file_path = ? AND hash = ?",
+                (resolved, content_hash),
+            ).fetchone() is not None:
+                cached_qn.add((resolved, content_hash))
     except sqlite3.Error:
-        # If pre-check fails, caller processes everything
-        logger.debug("qn_index cache pre-check failed", exc_info=True)
+        logger.debug("qn_index cache pre-check query failed", exc_info=True)
     return cached_qn
 
 
 def _write_index_rows(
-    db_path: str,
+    conn: sqlite3.Connection,
     qn_rows: list[tuple[str, bytes, bytes]],
     sym_rows: list[tuple],
     import_rows: list[tuple[bytes, str, str]],
@@ -132,16 +111,11 @@ def _write_index_rows(
     (and logged) — environmental failures must not crash the worker process.
     """
     import sqlite3
-    from .cache import _init_cache_schema
 
     has_data = qn_rows or sym_rows or import_rows or ref_rows or dsl_rows
     if not has_data:
         return
     try:
-        conn = sqlite3.connect(db_path, timeout=30)
-        # Ensure schema exists (idempotent; normally pre-created by
-        # warm_caches, but needed when _index_batch is called directly).
-        _init_cache_schema(conn)
         if qn_rows:
             revised_paths = list({row[0] for row in qn_rows})
             for table, column in (
@@ -191,17 +165,30 @@ def _write_index_rows(
                 dsl_rows,
             )
         conn.commit()
-        conn.close()
     except sqlite3.Error:
+        conn.rollback()
         logger.debug("bulk index write failed", exc_info=True)
 
 
 def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int, int]:
-    """Worker function for process-pool indexing.
+    """Own one connection per worker batch, with one transaction per file."""
+    import sqlite3
+    from .cache import _init_cache_schema
 
-    Runs in a subprocess.  Parses a batch of files, resolves qualified names,
+    if not args[3]:
+        return (0, 0, 0, 0, 0, 0, 0)
+    with closing(sqlite3.connect(args[0], timeout=30)) as conn:
+        _init_cache_schema(conn)
+        return _index_batch_rows(args, conn)
+
+
+def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, int, int, int, int]:
+    """Worker function for per-file indexing.
+
+    Parses a batch of files, resolves qualified names,
     collects symbol definitions, import relationships, reference entries,
-    and DSL symbols, then writes directly to the SQLite disk cache.
+    and DSL symbols. Each completed file is written atomically to SQLite
+    before deriving the next, overlapping writes with other workers' analysis.
 
     Files whose content hash is already present in all cache tables are
     skipped (cache-hit fast path).
@@ -223,15 +210,6 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
 
     from .deadcode import _is_likely_entry_point
     db_path, source_root, project_root, file_batch = args
-    qn_rows: list[tuple[str, bytes, bytes]] = []
-    sym_rows: list[tuple] = []
-    import_rows: list[tuple[bytes, str, str]] = []
-    ref_rows: list[tuple] = []
-    dsl_rows: list[tuple] = []
-
-    if not file_batch:
-        return (0, 0, 0, 0, 0, 0, 0)
-
     # Scope resolver for QN and reference collection (replaces MetadataWrapper).
     scope_resolver = _rust.PyScopeResolver(project_root)
 
@@ -241,36 +219,39 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         for py_file, content in file_batch
     ]
     cached_qn = _check_cache_hits(
-        db_path, [(path, digest) for digest, path, _ in file_hashes]
+        conn, [(path, digest) for digest, path, _ in file_hashes]
     )
 
     skipped = 0
     processed = 0
+    row_counts = [0] * 5
     for content_hash, py_file, content in file_hashes:
-        need_qn = (str(Path(py_file).resolve()), content_hash) not in cached_qn
         # The QN cache is the core index. The derived tables (symbol_index,
         # import_graph, reference_index) may legitimately have zero rows for a
         # given file (e.g. a file with only assignments has no symbols) and are
         # written in lockstep with the QN cache, so we re-derive all of them
         # exactly when the QN cache entry is missing.
-        if not need_qn:
+        if (str(Path(py_file).resolve()), content_hash) in cached_qn:
             skipped += 1
             continue
-        need_sym = need_import = need_ref = True
 
         processed += 1
+        qn_rows: list[tuple[str, bytes, bytes]] = []
+        sym_rows: list[tuple] = []
+        import_rows: list[tuple[bytes, str, str]] = []
+        ref_rows: list[tuple] = []
+        dsl_rows: list[tuple] = []
 
         # Use Rust scope resolver for QN and reference collection
         # (replaces expensive MetadataWrapper + _QNCollector + _RefIndexCollector).
         scope_indexed = False
-        if need_qn or need_ref:
-            try:
-                scope_resolver.index_file(py_file, content)
-                scope_indexed = True
-            except Exception:
-                logger.debug("scope indexing failed for %s", py_file, exc_info=True)
+        try:
+            scope_resolver.index_file(py_file, content)
+            scope_indexed = True
+        except Exception:
+            logger.debug("scope indexing failed for %s", py_file, exc_info=True)
 
-        if need_qn and scope_indexed:
+        if scope_indexed:
             try:
                 all_qnames = set(scope_resolver.all_qnames_in_file(py_file))
             except Exception:
@@ -282,69 +263,68 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                 )
                 qn_rows.append((str(Path(py_file).resolve()), content_hash, qn_blob))
 
-        if need_sym:
-            try:
-                syms_for_file = _collect_symbols_ts(Path(py_file), content)
-            except BUG_EXCEPTIONS:
-                raise
-            except Exception:
-                logger.debug("symbol collection failed for %s", py_file, exc_info=True)
-                syms_for_file = []
+        try:
+            syms_for_file = _collect_symbols_ts(Path(py_file), content)
+        except BUG_EXCEPTIONS:
+            raise
+        except Exception:
+            logger.debug("symbol collection failed for %s", py_file, exc_info=True)
+            syms_for_file = []
 
-            # Compute module_qn prefix for this file.
-            _src = Path(source_root)
-            _proj = Path(project_root)
-            _abs = Path(py_file).resolve()
+        # Compute module_qn prefix for this file.
+        _src = Path(source_root)
+        _proj = Path(project_root)
+        _abs = Path(py_file).resolve()
+        try:
+            _rel = _abs.relative_to(_src)
+        except ValueError:
             try:
-                _rel = _abs.relative_to(_src)
+                _rel = _abs.relative_to(_proj)
             except ValueError:
-                try:
-                    _rel = _abs.relative_to(_proj)
-                except ValueError:
-                    _rel = None
+                _rel = None
 
-            if _rel is not None:
-                _module_prefix = ".".join(
-                    list(_rel.parts[:-1]) + [_rel.stem]
-                )
+        if _rel is not None:
+            _module_prefix = ".".join(
+                list(_rel.parts[:-1]) + [_rel.stem]
+            )
 
-                # __all__ membership and noqa for dead-code pre-filtering.
-                exported_names = _extract_all_exports_text(content)
-                noqa_lines = _extract_noqa_lines(content)
+            # __all__ membership and noqa for dead-code pre-filtering.
+            exported_names = _extract_all_exports_text(content)
+            noqa_lines = _extract_noqa_lines(content)
 
-                for sym in syms_for_file:
-                    # Build qualified_name from file module path + symbol path
-                    # For index batch, use the dotted symbol path from the selector
-                    parts = sym.path.split("::", 1)
-                    dotted = parts[1] if len(parts) > 1 else sym.name
-                    m_qn = f"{_module_prefix}.{dotted}"
-                    sig = None
-                    if sym.parameters:
-                        ret_str = f" -> {sym.returns}" if sym.returns else ""
-                        sig = f"def {sym.name}({', '.join(sym.parameters)}){ret_str}"
-                    sym_rows.append((
-                        content_hash,
-                        py_file,
-                        sym.name,
-                        dotted,
-                        m_qn,
-                        sym.kind,
-                        sym.line,
-                        sym.end_line,
-                        sym.depth,
-                        sym.parent,
-                        ",".join(sym.bases) if getattr(sym, "bases", None) else None,
-                        sig,
-                        sym.returns,
-                        ",".join(sym.decorators) if sym.decorators else None,
-                        int(_is_likely_entry_point(
-                            sym.name, sym.kind, sym.decorators, sym.depth,
-                        )),
-                        int(sym.name in exported_names),
-                        int(sym.line in noqa_lines),
-                    ))
+            for sym in syms_for_file:
+                # Build qualified_name from file module path + symbol path
+                # For index batch, use the dotted symbol path from the selector
+                parts = sym.path.split("::", 1)
+                dotted = parts[1] if len(parts) > 1 else sym.name
+                m_qn = f"{_module_prefix}.{dotted}"
+                sig = None
+                if sym.parameters:
+                    ret_str = f" -> {sym.returns}" if sym.returns else ""
+                    sig = f"def {sym.name}({', '.join(sym.parameters)}){ret_str}"
+                sym_rows.append((
+                    content_hash,
+                    py_file,
+                    sym.name,
+                    dotted,
+                    m_qn,
+                    sym.kind,
+                    sym.line,
+                    sym.end_line,
+                    sym.depth,
+                    sym.parent,
+                    ",".join(sym.bases) if getattr(sym, "bases", None) else None,
+                    sig,
+                    sym.returns,
+                    ",".join(sym.decorators) if sym.decorators else None,
+                    int(_is_likely_entry_point(
+                        sym.name, sym.kind, sym.decorators, sym.depth,
+                    )),
+                    int(sym.name in exported_names),
+                    int(sym.line in noqa_lines),
+                ))
 
-        if need_import and scope_indexed:
+        if scope_indexed:
             try:
                 file_imports = scope_resolver.imports_in_file(py_file)
             except Exception:
@@ -354,7 +334,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
                 if _mod:
                     import_rows.append((content_hash, py_file, _mod))
 
-        if need_ref and scope_indexed:
+        if scope_indexed:
             try:
                 file_refs = scope_resolver.references_in_file(py_file)
             except Exception:
@@ -391,14 +371,13 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         except Exception:
             logger.debug("DSL extraction failed for %s", py_file, exc_info=True)
 
-    # Bulk-write to SQLite from this worker process.
-    # WAL mode allows concurrent readers/writers across processes.
-    _write_index_rows(db_path, qn_rows, sym_rows, import_rows, ref_rows, dsl_rows)
+        # Keep a file's freshness marker and derived rows in one transaction.
+        # Do not retain a worker's entire batch before starting disk writes.
+        rows = (qn_rows, sym_rows, import_rows, ref_rows, dsl_rows)
+        _write_index_rows(conn, *rows)
+        row_counts = [count + len(batch) for count, batch in zip(row_counts, rows)]
 
-    # Cozo facts are materialized separately by AnalysisStore.query_facts().
-
-    return (processed, len(qn_rows), skipped,
-            len(sym_rows), len(import_rows), len(ref_rows), len(dsl_rows))
+    return (processed, row_counts[0], skipped, *row_counts[1:])
 
 
 # ---------------------------------------------------------------------------
@@ -1071,7 +1050,7 @@ def get_index_status(project_path: str) -> dict | None:
         return None
 
 
-def _warm_caches_impl(
+def warm_caches(
     project_path: str = ".",
     *,
     jobs: int | None = None,
@@ -1079,21 +1058,16 @@ def _warm_caches_impl(
     type_engine: str | None = "pyrefly",
     language: str = "python",
     build_fts: bool = True,
-    build_duplicates: bool = True,
+    build_duplicates: bool = False,
 ) -> dict[str, int | str]:
     """Pre-populate the parse, QN-index, and type caches for all project files.
 
     Designed to be called from the ``emend index`` CLI command or lazily by
-    an analysis operation. Each file is parsed, then QualifiedNameProvider is
-    resolved to build the QN index, and finally type inference results are
-    stored in the shared analysis-artifact ``type_cache`` table.
-
-    Uses a ``ProcessPoolExecutor`` so that file parsing (CPU-bound)
-    runs across multiple cores without GIL contention.  Files are split
-    into batches; each worker process parses its batch and writes results
-    directly to the SQLite disk cache (WAL mode allows concurrent writers),
-    avoiding the overhead of serialising parse results back to the main
-    process.
+    an analysis operation. Workers populate each file's search index and
+    native facts together. The owner caches native results once and streams
+    those same objects into a private graph while preparing type inputs.
+    Native parsing releases Python; threads avoid serializing fact batches
+    across process boundaries. The graph is published only after success.
 
     Args:
         project_path: Root directory of the project.
@@ -1106,8 +1080,8 @@ def _warm_caches_impl(
             Explicit values: ``"pyrefly"``, ``"pyright"``, ``"ty"``.
         build_fts: Rebuild the editor full-text index. Fact-only consumers can
             disable this to return as soon as their analysis data is ready.
-        build_duplicates: Populate duplicate-code caches. Fact-only consumers
-            can disable this independent analysis phase.
+        build_duplicates: Explicitly prewarm duplicate-code caches. Disabled
+            by default; duplicate queries compute their payloads on demand.
             Use this after detecting that the persisted fact graph is empty or
             invalid while parse/reference caches are still current.
 
@@ -1117,7 +1091,7 @@ def _warm_caches_impl(
     """
     import multiprocessing
     import time
-    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor
     from emend import emend_core as _rust
     from .cache import (
         _SCHEMA_VERSION,
@@ -1152,8 +1126,7 @@ def _warm_caches_impl(
         if callback:
             callback("phase", label)
 
-    # Phase 2: parse + QN index in subprocesses.
-    # Resolve the DB path and ensure the directory exists before spawning workers.
+    # Initialize the search cache before starting file workers.
     cache_dir = _cache_db_dir(project_root)
     cache_dir.mkdir(parents=True, exist_ok=True)
     _ensure_cache_ignore_files(project_root)
@@ -1170,194 +1143,154 @@ def _warm_caches_impl(
     # Resolve source root once so _index_batch workers can compute module_qn.
     source_root = _find_source_root(project_root, language=language)
 
-    # Split files into batches — one batch per worker.
-    batch_size = max(1, len(file_contents) // max_workers)
-    batches: list[tuple[str, str, str, list[tuple[str, str]]]] = []
-    for i in range(0, len(file_contents), batch_size):
-        chunk = file_contents[i : i + batch_size]
-        batches.append((db_path, source_root, project_root, chunk))
+    indexed_paths = {str(Path(path).resolve()) for path, _ in file_contents}
 
-    def _fold_batch_results(results) -> None:
-        """Fold worker results into ``stats`` and report progress."""
-        for batch_idx, (parse_n, qn_n, skip_n, sym_n, import_n, ref_n, dsl_n) in enumerate(results):
-            stats["indexed"] += parse_n
-            stats["qn_cached"] += qn_n
-            stats["skipped"] += skip_n
-            stats["sym_cached"] += sym_n
-            stats["import_cached"] += import_n
-            stats["ref_cached"] += ref_n
-            stats["dsl_cached"] += dsl_n
-            if callback:
-                _db_path, _src, _proj, chunk = batches[batch_idx]
-                for py_file, _content in chunk:
-                    callback("index", py_file)
+    def prepare_file(revision, content):
+        if revision.file_path in indexed_paths:
+            return _index_batch((db_path, source_root, project_root,
+                                 [(revision.file_path, content)]))
+        return None
 
-    t0 = time.monotonic()
-    process_pool = None
-    try:
-        process_pool = ProcessPoolExecutor(max_workers=max_workers)
-        batch_results = process_pool.map(_index_batch, batches)
-    except PermissionError as exc:
-        # Some sandboxes and embedded runtimes disallow the Unix socket used
-        # by multiprocessing's forkserver during task submission. Indexing is
-        # still safe with threads because each worker opens its own SQLite
-        # connection.
-        if process_pool is not None:
-            process_pool.shutdown(cancel_futures=True)
-        logger.debug("warm_caches: process pool unavailable; retrying with threads: %s", exc)
-        with ThreadPoolExecutor(max_workers=max_workers) as thread_pool:
-            _fold_batch_results(thread_pool.map(_index_batch, batches))
-    except BaseException:
-        if process_pool is not None:
-            process_pool.shutdown(cancel_futures=True)
-        raise
-    else:
+    def prepared_file(revision, result):
+        if result is None:
+            return
+        for key, count in zip(
+            ("indexed", "qn_cached", "skipped", "sym_cached",
+             "import_cached", "ref_cached", "dsl_cached"), result,
+        ):
+            stats[key] += count
+        if callback:
+            callback("index", revision.file_path)
+
+    def finish_search_index():
+        # Phase 2.5: Update file_manifest and index_meta with freshness data.
+        worktree_id = _get_worktree_id(project_root)
+        import os as _os
         try:
-            # Worker, result-consumption, and callback errors propagate rather
-            # than being mistaken for process-pool startup failures.
-            _fold_batch_results(batch_results)
-        finally:
-            process_pool.shutdown()
-
-    logger.info(
-        "warm_caches: indexed %d files in %.3fs (parse=%d, qn=%d, sym=%d, import=%d, ref=%d, dsl=%d)",
-        stats["files"], time.monotonic() - t0,
-        stats["indexed"], stats["qn_cached"],
-        stats["sym_cached"], stats["import_cached"], stats["ref_cached"],
-        stats["dsl_cached"],
-    )
-
-    # Phase 2.5: Update file_manifest and index_meta with freshness data.
-    worktree_id = _get_worktree_id(project_root)
-    import os as _os
-    try:
-        _mf_conn = _sqlite3.connect(db_path, timeout=30)
-        _mf_conn.execute("PRAGMA journal_mode=WAL")
-        _mf_conn.execute("PRAGMA synchronous=NORMAL")
-        now = time.time()
-        manifest_rows = []
-        for py_file, content in file_contents:
-            content_hash = hashlib.sha256(content.encode()).digest()
-            try:
-                st = _os.stat(py_file)
-                manifest_rows.append((
-                    worktree_id,
-                    str(Path(py_file).resolve()),
-                    st.st_mtime_ns,
-                    st.st_size,
-                    content_hash,
-                    now,
-                ))
-            except OSError:
-                pass
-        if manifest_rows:
-            _mf_conn.executemany(
-                "INSERT OR REPLACE INTO file_manifest "
-                "(worktree_id, path, mtime_ns, size, content_hash, indexed_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                manifest_rows,
-            )
-        # Update git HEAD (scoped to this worktree)
-        git_head_key = f"git_head:{worktree_id}"
-        import subprocess as _sp
-        try:
-            result = _sp.run(
-                ["git", "rev-parse", "HEAD"],
-                capture_output=True, timeout=5,
-                cwd=project_root,
-            )
-            if result.returncode == 0:
-                head_sha = result.stdout.decode().strip()
-                _mf_conn.execute(
-                    "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
-                    (git_head_key, head_sha),
+            _mf_conn = _sqlite3.connect(db_path, timeout=30)
+            _mf_conn.execute("PRAGMA journal_mode=WAL")
+            _mf_conn.execute("PRAGMA synchronous=NORMAL")
+            now = time.time()
+            manifest_rows = []
+            for py_file, content in file_contents:
+                content_hash = hashlib.sha256(content.encode()).digest()
+                try:
+                    st = _os.stat(py_file)
+                    manifest_rows.append((
+                        worktree_id,
+                        str(Path(py_file).resolve()),
+                        st.st_mtime_ns,
+                        st.st_size,
+                        content_hash,
+                        now,
+                    ))
+                except OSError:
+                    pass
+            if manifest_rows:
+                _mf_conn.executemany(
+                    "INSERT OR REPLACE INTO file_manifest "
+                    "(worktree_id, path, mtime_ns, size, content_hash, indexed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    manifest_rows,
                 )
-        except (OSError, _sp.SubprocessError, _sqlite3.Error):
-            logger.debug("git HEAD update failed", exc_info=True)
-        _mf_conn.execute(
-            "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
-            (f"indexed_at:{worktree_id}", str(now)),
-        )
-        _mf_conn.execute(
-            "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
-            ("schema_version", _SCHEMA_VERSION),
-        )
-        _mf_conn.commit()
-        _mf_conn.close()
-    except BUG_EXCEPTIONS:
-        raise
-    except Exception:
-        logger.debug("warm_caches: file_manifest update failed", exc_info=True)
+            # Update git HEAD (scoped to this worktree)
+            git_head_key = f"git_head:{worktree_id}"
+            import subprocess as _sp
+            try:
+                result = _sp.run(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True, timeout=5,
+                    cwd=project_root,
+                )
+                if result.returncode == 0:
+                    head_sha = result.stdout.decode().strip()
+                    _mf_conn.execute(
+                        "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+                        (git_head_key, head_sha),
+                    )
+            except (OSError, _sp.SubprocessError, _sqlite3.Error):
+                logger.debug("git HEAD update failed", exc_info=True)
+            _mf_conn.execute(
+                "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+                (f"indexed_at:{worktree_id}", str(now)),
+            )
+            _mf_conn.execute(
+                "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
+                ("schema_version", _SCHEMA_VERSION),
+            )
+            _mf_conn.commit()
+            _mf_conn.close()
+        except BUG_EXCEPTIONS:
+            raise
+        except Exception:
+            logger.debug("warm_caches: file_manifest update failed", exc_info=True)
 
-    # Phase 3: type indexing — populate the shared type_cache table.
-    # Runs in the main process.  Pyrefly handles its own parallelism
-    # internally; LSP adapters (pyright, ty) are inherently sequential.
-    if type_engine and type_engine.lower() != "none":
-        from emend.type_oracle import (
-            create_type_oracle,
-            TypeEngineUnavailableError,
-        )
+        # Rebuild FTS5 after all search-index rows have been written.
+        if build_fts:
+            announce_phase("Full-text search index")
+            try:
+                from emend.editor_search import rebuild_fts as _rebuild_fts
 
-        oracle = create_type_oracle(
-            engine=type_engine, project_root=Path(project_root)
-        )
+                t_fts = time.monotonic()
+                with closing(_sqlite3.connect(db_path, timeout=30)) as _fts_conn:
+                    _fts_conn.execute("PRAGMA journal_mode=WAL")
+                    _fts_conn.execute("PRAGMA synchronous=NORMAL")
+                    fts_count = _rebuild_fts(_fts_conn)
+                stats["fts_indexed"] = fts_count
+                logger.info(
+                    "warm_caches: FTS index rebuilt (%d rows) in %.3fs",
+                    fts_count, time.monotonic() - t_fts,
+                )
+            except BUG_EXCEPTIONS:
+                raise
+            except Exception as exc:
+                logger.debug("warm_caches: FTS rebuild skipped: %s", exc, exc_info=True)
+                stats["fts_indexed"] = 0
+
+    # Stream native extraction into type inputs and the unpublished fact graph.
+    # Progress callbacks stay on the calling thread.
+    # The executor joins even on failure, so no cache writer outlives this call.
+    from emend.analysis_store import AnalysisStore
+    store = AnalysisStore.open(project_root)
+    types_enabled = type_engine and type_engine.lower() != "none"
+    if types_enabled:
+        from emend.type_oracle import create_type_oracle, TypeEngineUnavailableError
+
+        oracle = create_type_oracle(engine=type_engine, project_root=Path(project_root))
         engine_name = type(oracle).__name__.replace("Adapter", "").lower()
-
         if not oracle.is_available():
             raise TypeEngineUnavailableError(
                 f"Type inference engine '{engine_name}' is not installed or not on PATH. "
                 f"Install it (pyrefly, ty, or pyright) and re-run, or pass "
                 f"--type-engine=none to skip type indexing."
             )
-
-        stats["type_engine"] = engine_name
-        all_paths = [Path(f) for f, _ in file_contents]
-        project_root_path = Path(project_root)
-
-        announce_phase(f"Type analysis ({engine_name})")
-        t_type = time.monotonic()
-        results = oracle.infer_batch(all_paths, project_root=project_root_path)
-        stats["type_cached"] = len(results)
-        if callback:
-            for p in all_paths:
-                callback("types", str(p))
-
+        paths = [Path(f) for f, _ in file_contents]
+        announce_phase("Analysis inputs")
+    t_facts = time.monotonic()
+    with store.prepare_index_facts(
+        paths if types_enabled else None,
+        include_overlays=bool(types_enabled and oracle.supports_source_overrides),
+        prepare=prepare_file, prepared=prepared_file, jobs=max_workers,
+    ) as inputs, ThreadPoolExecutor(max_workers=1) as pool:
+        if types_enabled:
+            announce_phase(f"Type analysis ({engine_name}) + facts database")
+            types = pool.submit(_warm_type_cache, oracle, project_root, paths, inputs)
+        else:
+            announce_phase("Facts database")
+        stats["snapshot_id"] = store.query_facts().snapshot.snapshot_id
         logger.info(
-            "warm_caches: type-indexed %d files via %s in %.3fs",
-            stats["type_cached"], engine_name, time.monotonic() - t_type,
+            "warm_caches: source indexes and facts database populated in %.3fs",
+            time.monotonic() - t_facts,
         )
+        finish_search_index()
+        if types_enabled:
+            stats.update(types.result())
+            if callback:
+                for file_path, _ in file_contents:
+                    callback("types", file_path)
 
-    # Phase 4: rebuild FTS5 trigram index for fast symbol search.
-    if build_fts:
-        announce_phase("Full-text search index")
-        try:
-            from emend.editor_search import rebuild_fts as _rebuild_fts
-
-            t_fts = time.monotonic()
-            with closing(_sqlite3.connect(db_path, timeout=30)) as _fts_conn:
-                _fts_conn.execute("PRAGMA journal_mode=WAL")
-                _fts_conn.execute("PRAGMA synchronous=NORMAL")
-                fts_count = _rebuild_fts(_fts_conn)
-            stats["fts_indexed"] = fts_count
-            logger.info(
-                "warm_caches: FTS index rebuilt (%d rows) in %.3fs",
-                fts_count, time.monotonic() - t_fts,
-            )
-        except BUG_EXCEPTIONS:
-            raise
-        except Exception as exc:
-            logger.debug("warm_caches: FTS rebuild skipped: %s", exc, exc_info=True)
-            stats["fts_indexed"] = 0
-
-    # Phase 5: the analysis owner is the sole facts refresh path.
-    announce_phase("Facts database")
-    from emend.analysis_store import AnalysisStore
-    stats["snapshot_id"] = (
-        AnalysisStore.open(project_root).query_facts().snapshot.snapshot_id
-    )
-
-    # Phase 6: duplicate analysis — compute and cache per-file duplicate payloads,
-    # then materialize queryable facts into facts.db.
+    # Optional duplicate prewarming. Ordinary indexing leaves this analysis
+    # to its consumers, which can compute payloads in memory on demand.
     if build_duplicates:
         announce_phase("Duplicate analysis")
         try:
@@ -1379,27 +1312,19 @@ def _warm_caches_impl(
     return stats
 
 
-def warm_caches(
-    project_path: str = ".",
-    *,
-    jobs: int | None = None,
-    callback: Callable[[str, str], None] | None = None,
-    type_engine: str | None = "pyrefly",
-    language: str = "python",
-    build_fts: bool = True,
-    build_duplicates: bool = True,
+def _warm_type_cache(
+    oracle: TypeOracle, project_root: str, paths: list[Path], inputs: TypeBatchInputs,
 ) -> dict[str, int | str]:
-    """Compatibility entry point for eager derived-cache warming."""
-    stats = _warm_caches_impl(
-        project_path,
-        jobs=jobs,
-        callback=callback,
-        type_engine=type_engine,
-        language=language,
-        build_fts=build_fts,
-        build_duplicates=build_duplicates,
+    """Run one oracle and persist its results, without touching CLI state."""
+    import time
+    engine_name = type(oracle).__name__.replace("Adapter", "").lower()
+    t_type = time.monotonic()
+    results = oracle.infer_batch(paths, project_root=Path(project_root), inputs=inputs)
+    logger.info(
+        "warm_caches: type-indexed %d files via %s in %.3fs",
+        len(results), engine_name, time.monotonic() - t_type,
     )
-    return stats
+    return {"type_cached": len(results), "type_engine": engine_name}
 
 
 def _ensure_cache_ignore_files(project_root: str) -> None:
@@ -1474,15 +1399,15 @@ def _compute_duplicate_payloads(
         except Exception:
             logger.debug("scope indexing failed for %s", file_path, exc_info=True)
 
-    from emend.duplicate import canonicalize_file_for_cache, build_statement_seqs_for_cache
+    from emend.duplicate import _build_duplicate_payload_for_cache
 
     for file_path, content, content_hash in py_files:
         if content_hash in cached_hashes:
             continue
         try:
-            subtrees = canonicalize_file_for_cache(file_path, content, scope_resolver)
-            sequences = build_statement_seqs_for_cache(file_path, content, scope_resolver)
-            payload = {"subtrees": subtrees, "sequences": sequences}
+            payload = _build_duplicate_payload_for_cache(
+                file_path, content, scope_resolver
+            )
             data = zlib.compress(pickle.dumps(payload))
             conn.execute(
                 "INSERT OR REPLACE INTO dup_cache (hash, version, data) VALUES (?, ?, ?)",

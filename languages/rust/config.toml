@@ -101,6 +101,7 @@ locals_marker = ""
 [exports]
 public_by_default = false
 private_prefix = ""
+visibility_node = "visibility_modifier"
 
 [symbols]
 function_node = "function_item"

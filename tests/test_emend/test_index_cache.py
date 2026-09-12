@@ -16,6 +16,113 @@ import pytest
 SOURCE = "def hello():\n    return 42\n"
 
 
+@pytest.mark.parametrize("failure", [None, "extraction", "writer"])
+def test_native_facts_stream_from_initial_index_without_reloading(tmp_path, monkeypatch, failure):
+    from contextlib import closing
+    from threading import Event
+    from emend import analysis_extraction, analysis_linking
+    from emend.analysis_store import AnalysisStore
+    from emend.fact_graph import FactGraph
+    from emend.transform import warm_caches
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'pipeline-test'\n")
+    store = AnalysisStore.open(tmp_path)
+    previous = store.query_facts()
+    (tmp_path / "a.py").write_text("def target():\n    return 1\n")
+    (tmp_path / "b.py").write_text("from a import target\ndef caller():\n    return target()\n")
+    if failure == "writer":
+        for index in range(20):
+            (tmp_path / f"c{index}.py").write_text(SOURCE)
+    persisted, fresh = Event(), {}
+    extract = analysis_extraction._extract_file_facts
+    link = analysis_linking.link_extracted_files
+    replace = FactGraph.replace_extracted
+
+    def checked_extract(revision, *args):
+        if Path(revision.file_path).name == "b.py":
+            assert persisted.wait(10), "facts waited for all extraction to finish"
+            if failure == "extraction":
+                raise ValueError("extraction failed")
+        fresh[revision.file_path] = file = extract(revision, *args)
+        return file
+
+    def checked_link(files, catalog):
+        files = list(files)
+        assert all(file is fresh[file.revision.file_path] for file in files)
+        return link(files, catalog)
+
+    def checked_replace(graph, files, **kwargs):
+        replace(graph, files, **kwargs)
+        if files:
+            persisted.set()
+            if failure == "writer":
+                raise ValueError("writer failed")
+
+    monkeypatch.setattr(analysis_extraction, "_extract_file_facts", checked_extract)
+    monkeypatch.setattr(analysis_linking, "link_extracted_files", checked_link)
+    monkeypatch.setattr(FactGraph, "replace_extracted", checked_replace)
+    if failure:
+        with pytest.raises(ValueError, match=f"{failure} failed"):
+            warm_caches(str(tmp_path), jobs=2, type_engine="none")
+        assert store._disk_graph is previous
+        with closing(FactGraph(db_path=str(store.facts_path))) as published:
+            assert published.published_snapshot(tmp_path).snapshot_id == previous.snapshot.snapshot_id
+    else:
+        assert warm_caches(str(tmp_path), jobs=2, type_engine="none")["indexed"] == 2
+        assert store.query_facts().refs_datalog("a.target")
+
+
+def test_index_leaves_duplicates_for_on_demand_analysis(tmp_path, monkeypatch):
+    from emend.duplicate import query_duplicates
+    from emend.transform import _cache_db_dir, warm_caches
+
+    body = "    total = 0\n    for item in items:\n        total += item * item\n    return total\n"
+    (tmp_path / "a.py").write_text("def first(items):\n" + body)
+    (tmp_path / "b.py").write_text("def second(items):\n" + body)
+    warmed = []
+    monkeypatch.setattr("emend.transform.index._compute_duplicate_payloads",
+                        lambda *args, **kwargs: warmed.append(True))
+
+    warm_caches(str(tmp_path), jobs=1, type_engine="none")
+    assert not warmed, "Index must not compute duplicate payloads"
+    assert query_duplicates(str(tmp_path), mode="exact", min_lines=3)
+    with sqlite3.connect(_cache_db_dir(str(tmp_path)) / "parse.db") as conn:
+        assert conn.execute("SELECT count(*) FROM dup_cache").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_index_writes_completed_file_before_deriving_next(tmp_path, monkeypatch, fail_first):
+    from emend import analysis_store
+    from emend.transform import _index_batch
+    from emend.transform import index
+
+    db_path = tmp_path / "parse.db"
+    files = [(str(tmp_path / name), SOURCE) for name in ("a.py", "b.py")]
+    connections = []
+    write = index._write_index_rows
+    def checked_write(conn, *rows):
+        connections.append(conn)
+        if fail_first and len(connections) == 1:
+            rows = (rows[0], [()], *rows[2:])  # Fail after writing the QN marker.
+        return write(conn, *rows)
+    monkeypatch.setattr(index, "_write_index_rows", checked_write)
+    collect = analysis_store.collect_symbol_info
+    def checked_collect(path, source):
+        if path.name == "b.py":
+            with sqlite3.connect(db_path) as conn:
+                assert conn.execute("SELECT file_path FROM qn_index").fetchall() == ([] if fail_first else [(files[0][0],)])
+                assert conn.execute("SELECT name FROM symbol_index").fetchall() == ([] if fail_first else [("hello",)])
+        return collect(path, source)
+    monkeypatch.setattr(analysis_store, "collect_symbol_info", checked_collect)
+    counts = _index_batch((str(db_path), str(tmp_path), str(tmp_path), files))
+    assert counts[:4] == (2, 2, 0, 2)
+    assert len(connections) == 2 and connections[0] is connections[1]
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT file_path FROM qn_index ORDER BY file_path").fetchall() == [
+            (path,) for path, _ in (files[1:] if fail_first else files)
+        ]
+
+
 def make_project_dir(tmp_path: Path) -> Path:
     project = tmp_path / "proj"
     project.mkdir()
@@ -35,7 +142,6 @@ def test_index_cli_reports_long_running_phases(monkeypatch, tmp_path):
         callback("phase", "Type analysis (pyrefly)")
         callback("phase", "Full-text search index")
         callback("phase", "Facts database")
-        callback("phase", "Duplicate analysis")
         return {"files": 1, "indexed": 1, "qn_cached": 1}
 
     monkeypatch.setattr("emend.cli_tooling.warm_caches", fake_warm_caches)
@@ -48,7 +154,6 @@ def test_index_cli_reports_long_running_phases(monkeypatch, tmp_path):
         "Type analysis (pyrefly)",
         "Full-text search index",
         "Facts database",
-        "Duplicate analysis",
     ):
         assert label in result.output
 
@@ -86,76 +191,20 @@ def _db_row_count(db_path: Path, table: str) -> int:
 class TestIndexBatchCacheHit:
     """Unit tests for _index_batch cache-hit fast path."""
 
-    def test_cold_cache_indexes_file(self, tmp_path):
-        """First run writes parse, qn, symbol, import, and ref entries."""
+    @pytest.mark.parametrize("legacy_schema", [False, True])
+    def test_cold_then_warm_cache_preserves_rows(self, tmp_path, legacy_schema):
         from emend.transform import _index_batch
 
         db_path = tmp_path / "parse.db"
-        batch = [(str(tmp_path / "a.py"), SOURCE)]
-        processed_n, qn_n, skipped, sym_n, import_n, ref_n, dsl_n = _index_batch(
-            (str(db_path), str(tmp_path), str(tmp_path), batch)
-        )
-
-        assert processed_n == 1
-        assert qn_n == 1
-        assert skipped == 0
-        # SOURCE has one function "hello" — should have at least 1 symbol
-        assert sym_n >= 1
-
-    def test_warm_cache_skips_file(self, tmp_path):
-        """Second run with same content skips the file entirely."""
-        from emend.transform import _index_batch
-
-        db_path = tmp_path / "parse.db"
-        batch = [(str(tmp_path / "a.py"), SOURCE)]
-
-        # Cold run
-        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
-
-        # Warm run — must skip
-        processed_n, qn_n, skipped, sym_n, import_n, ref_n, dsl_n = _index_batch(
-            (str(db_path), str(tmp_path), str(tmp_path), batch)
-        )
-        assert processed_n == 0
-        assert qn_n == 0
-        assert sym_n == 0
-        assert skipped == 1
-
-    def test_warm_cache_no_extra_db_rows(self, tmp_path):
-        """Warm run must not increase the row count in the DB."""
-        from emend.transform import _index_batch
-
-        db_path = tmp_path / "parse.db"
-        batch = [(str(tmp_path / "a.py"), SOURCE)]
-
-        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
-        rows_after_cold = _db_row_count(db_path, "qn_index")
-
-        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
-        rows_after_warm = _db_row_count(db_path, "qn_index")
-
-        assert rows_after_cold == rows_after_warm == 1
-
-    def test_partial_cache_only_missing_part_indexed(self, tmp_path):
-        """If qn_index is missing for a file, it is indexed on next run."""
-        from emend.transform import _index_batch
-
-        db_path = tmp_path / "parse.db"
-
-        # Create DB with schema but no qn_index entries for this file
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("CREATE TABLE IF NOT EXISTS qn_index (hash BLOB PRIMARY KEY, qnames BLOB)")
-        conn.commit()
-        conn.close()
-
-        batch = [(str(tmp_path / "a.py"), SOURCE)]
-        processed_n, qn_n, skipped, sym_n, import_n, ref_n, dsl_n = _index_batch(
-            (str(db_path), str(tmp_path), str(tmp_path), batch)
-        )
-
-        assert processed_n == 1  # file processed
-        assert qn_n == 1    # was missing, now added
-        assert skipped == 0  # not fully cached, so not counted as skipped
+        if legacy_schema:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("CREATE TABLE qn_index (hash BLOB PRIMARY KEY, qnames BLOB)")
+        args = (str(db_path), str(tmp_path), str(tmp_path),
+                [(str(tmp_path / "a.py"), SOURCE)])
+        assert _index_batch(args)[:4] == (1, 1, 0, 1)
+        assert _db_row_count(db_path, "qn_index") == 1
+        assert _index_batch(args) == (0, 0, 1, 0, 0, 0, 0)
+        assert _db_row_count(db_path, "qn_index") == 1
 
 
 class TestWarmCachesSkipped:
@@ -167,97 +216,23 @@ class TestWarmCachesSkipped:
         (proj / "b.py").write_text("x = 1\n")
         return proj
 
-    def test_cold_run_no_skips(self, tmp_path):
-        """Cold run reports zero skipped files."""
-        from emend.transform import warm_caches
-
-        proj = self._make_project(tmp_path)
-        stats = warm_caches(str(proj), type_engine=None)
-
-        assert stats["skipped"] == 0
-        assert stats["indexed"] == 2
-        assert stats["qn_cached"] == 2
-
-    def test_process_pool_permission_error_falls_back_to_threads(
-        self, tmp_path, monkeypatch
-    ):
-        """Indexing still works where multiprocessing is unavailable."""
-        import concurrent.futures
-
-        from emend.transform import warm_caches
-
-        project = self._make_project(tmp_path)
-        attempts = []
-        real_thread_pool = concurrent.futures.ThreadPoolExecutor
-
-        class ForbiddenProcessPool:
-            def __init__(self, *args, **kwargs):
-                attempts.append("process")
-
-            def map(self, *args, **kwargs):
-                raise PermissionError("multiprocessing is unavailable")
-
-            def shutdown(self, **kwargs):
-                pass
-
-        class TrackingThreadPool(real_thread_pool):
-            def __init__(self, *args, **kwargs):
-                attempts.append("thread")
-                super().__init__(*args, **kwargs)
-
-        monkeypatch.setattr(
-            concurrent.futures, "ProcessPoolExecutor", ForbiddenProcessPool
-        )
-        monkeypatch.setattr(
-            concurrent.futures, "ThreadPoolExecutor", TrackingThreadPool
-        )
-
-        stats = warm_caches(str(project), type_engine=None)
-
-        assert attempts[:2] == ["process", "thread"]
-        assert stats["indexed"] == 2
-        assert stats["qn_cached"] == 2
-
-    def test_warm_run_all_skipped(self, tmp_path):
-        """Second run on unchanged project skips every file."""
-        from emend.transform import warm_caches
-
-        proj = self._make_project(tmp_path)
-        warm_caches(str(proj), type_engine=None)  # cold
-
-        stats = warm_caches(str(proj), type_engine=None)  # warm
-        assert stats["skipped"] == 2
-        assert stats["indexed"] == 0
-        assert stats["qn_cached"] == 0
-
-    def test_warm_run_is_fast(self, tmp_path):
-        """Warm run completes much faster than cold run (basic sanity check)."""
-        import time
-        from emend.transform import warm_caches
-
-        proj = self._make_project(tmp_path)
-        warm_caches(str(proj), type_engine=None)  # cold
-
-        t0 = time.monotonic()
-        warm_caches(str(proj), type_engine=None)  # warm
-        warm_elapsed = time.monotonic() - t0
-
-        # Even for 2 files, warm run should be well under 5 seconds.
-        assert warm_elapsed < 5.0
-
-    def test_warm_run_does_not_rebuild_facts(self, tmp_path):
-        """An unchanged parse index implies the persisted facts are current."""
+    def test_cold_then_warm_index_reuses_facts_without_processes(self, tmp_path, monkeypatch):
         from emend.analysis_store import AnalysisStore
         from emend.transform import warm_caches
 
-        proj = self._make_project(tmp_path)
-        store = AnalysisStore.open(proj)
-        warm_caches(str(proj), type_engine=None)
-        first = store.query_facts()
-
-        warm_caches(str(proj), type_engine=None)
-        second = store.query_facts()
-        assert second is first
+        def forbidden(*args, **kwargs):
+            pytest.fail("unexpected process-pool startup or warm-cache extraction")
+        monkeypatch.setattr("concurrent.futures.ProcessPoolExecutor", forbidden)
+        project = self._make_project(tmp_path)
+        store = AnalysisStore.open(project)
+        for expected in ((0, 2, 2), (2, 0, 0)):
+            stats = warm_caches(str(project), type_engine=None)
+            assert tuple(stats[key] for key in ("skipped", "indexed", "qn_cached")) == expected
+            if expected[0] == 0:
+                first = store.query_facts()
+                monkeypatch.setattr("emend.analysis_extraction._extract_file_facts", forbidden)
+            else:
+                assert store.query_facts() is first
 
 
 def test_duplicate_cache_hit_does_not_build_scope_resolver(tmp_path, monkeypatch):
@@ -301,6 +276,90 @@ class TestTypeCacheWarming:
         (proj / "a.py").write_text("def hello(x: int) -> str:\n    return str(x)\n")
         (proj / "b.py").write_text("y: float = 3.14\n")
         return proj
+
+    @pytest.mark.parametrize("failure", [None, "types", "facts"])
+    @pytest.mark.parametrize("overlay", [False, True])
+    def test_types_overlap_fact_materialization(self, tmp_path, monkeypatch, failure, overlay):
+        from threading import Event, get_ident
+        from emend import analysis_extraction, type_oracle
+        from emend.fact_graph import FactGraph
+        from emend.analysis_store import AnalysisStore
+        from emend.transform import warm_caches
+
+        proj = self._make_project(tmp_path)
+        materializing, written = Event(), Event()
+        materialize = FactGraph.replace_extracted
+        extract = analysis_extraction._extract_file_facts
+        extracted = []
+
+        def checked_extract(*args):
+            with sqlite3.connect(AnalysisStore.open(proj).artifact_path, timeout=1) as conn:
+                conn.execute("CREATE TABLE IF NOT EXISTS extraction_probe (value INTEGER)")
+            extracted.append(args[0].file_path)
+            return extract(*args)
+
+        def checked_materialize(*args, **kwargs):
+            materializing.set()
+            assert written.wait(10), "type cache write blocked by fact indexing"
+            if failure == "facts":
+                raise RuntimeError("facts failed")
+            return materialize(*args, **kwargs)
+
+        class Oracle(type_oracle.TypeOracle):
+            def is_available(self):
+                return True
+
+            def infer_file(self, path, project_root=None):
+                raise AssertionError("expected batch inference")
+
+            def clear_cache(self):
+                pass
+
+            def infer_batch(self, paths, project_root, *, inputs=None):
+                assert len(self._prepare_file_keys(paths, project_root, inputs)) == 2
+                assert materializing.wait(10), "types and facts did not overlap"
+                # Real adapters revalidate before caching. This must finish
+                # while fact materialization is paused, including fresh edits.
+                store = AnalysisStore.open(proj)
+                if overlay:
+                    store.update_overlay(proj / "b.py", "y: str = 'edited'\n", 1)
+                else:
+                    (proj / "b.py").write_text("y: str = 'edited'\n")
+                current = store.type_file_identities(paths, include_overlays=overlay)
+                assert current[str(proj / "a.py")] == inputs[0][str(proj / "a.py")]
+                assert current[str(proj / "b.py")] != inputs[0][str(proj / "b.py")]
+                captured = store.type_file_inputs(paths, include_overlays=overlay)
+                assert captured[0] == current
+                assert captured[1][str(proj / "b.py")] == "y: str = 'edited'\n"
+                if overlay:
+                    assert store.remove_overlay(proj / "b.py", version=1).accepted
+                    assert store.type_file_identities(paths, include_overlays=True) == inputs[0]
+                # Independent cache writes must succeed during fact indexing.
+                with sqlite3.connect(AnalysisStore.open(proj).artifact_path, timeout=1) as conn:
+                    conn.execute("CREATE TABLE overlap_probe (value INTEGER)")
+                written.set()
+                if failure == "types":
+                    raise RuntimeError("types failed")
+                return dict.fromkeys(paths)
+
+        monkeypatch.setattr(type_oracle, "create_type_oracle", lambda **kw: Oracle())
+        monkeypatch.setattr(analysis_extraction, "_extract_file_facts", checked_extract)
+        monkeypatch.setattr(FactGraph, "replace_extracted", checked_materialize)
+        callback_threads = set()
+        def run():
+            return warm_caches(
+                str(proj), jobs=1, type_engine="auto", build_duplicates=False,
+                callback=lambda *args: callback_threads.add(get_ident()),
+            )
+
+        if failure:
+            with pytest.raises(RuntimeError, match=f"{failure} failed"):
+                run()
+        else:
+            assert run()["type_cached"] == 2
+        assert callback_threads == {get_ident()}
+        assert written.is_set()
+        assert sorted(extracted) == sorted(str(proj / name) for name in ("a.py", "b.py", "b.py"))
 
     @pytest.mark.skipif(not _HAS_TYPE_ENGINE, reason="no type engine on PATH")
     def test_type_cache_populated(self, tmp_path):

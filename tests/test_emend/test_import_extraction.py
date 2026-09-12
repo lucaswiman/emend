@@ -1,13 +1,14 @@
-"""Tests for `_extract_imports()` — Phase 1 of the TS/Rust parity roadmap.
+"""Import-row tests for the canonical native fact batch.
 
-Verifies that `_extract_imports` correctly produces `ImportFact` objects for
+Verifies that fact extraction correctly produces `ImportFact` objects for
 Python, TypeScript/JavaScript, and Rust source files.
 """
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
-from emend.fact_graph import ImportFact, _extract_imports
+from emend.fact_graph import ImportFact
 
 
 # ---------------------------------------------------------------------------
@@ -15,7 +16,25 @@ from emend.fact_graph import ImportFact, _extract_imports
 # ---------------------------------------------------------------------------
 
 def _facts(path: str, src: str) -> list[ImportFact]:
-    return _extract_imports(path, src)
+    from emend.analysis_extraction import _extract_file_facts
+    from emend.analysis_snapshot import FileRevision
+    from emend.language_registry import detect_language, language_config_snapshot
+
+    language = detect_language(path) or "python"
+    revision = FileRevision.create(
+        Path.cwd(), Path(path).resolve(), "test", language, Path(path).stem,
+        analysis_config=language_config_snapshot(language),
+    )
+    extracted = _extract_file_facts(
+        revision, path, src,
+    )
+    return [
+        ImportFact(
+            importing_file=row[0], imported_module=row[1],
+            imported_name=row[2] or None, alias=row[4] or None, line=row[3],
+        )
+        for row in extracted.rows["imports"]
+    ]
 
 
 def _modules(facts: list[ImportFact]) -> set[str]:

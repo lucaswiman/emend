@@ -8,6 +8,7 @@ import textwrap
 
 import pytest
 
+import emend.fact_graph as fact_graph_module
 from emend.fact_graph import (
     CallFact,
     CfgBlockFact,
@@ -20,6 +21,7 @@ from emend.fact_graph import (
     SourceLocFact,
     SymbolFact,
 )
+from emend.analysis_snapshot import ExtractedFile, FileRevision
 
 
 @pytest.mark.parametrize("caller,statement", [
@@ -350,11 +352,91 @@ class TestRemoveFiles:
         b_syms_after = [s for s in graph.symbols() if s.file_path == b_path]
         assert len(b_syms_after) == len(b_syms_before), "b.py symbols should be unchanged"
 
+    def test_remove_files_deletes_multiple_files_together(self, tmp_path):
+        paths = [str((tmp_path / name).resolve()) for name in ("a.py", "b.py", "c.py")]
+        graph = FactGraph()
+        graph.add_symbols_batch([
+            SymbolFact(path, name, name, "function", 1, 1)
+            for path, name in zip(paths, ("a", "b", "c"), strict=True)
+        ])
+
+        graph.remove_files(paths[:2])
+
+        assert graph.symbols() == [SymbolFact(paths[2], "c", "c", "function", 1, 1)]
+
     def test_remove_nonexistent_file_is_noop(self, tmp_path):
         """Removing a file that has no facts should not error."""
         graph = FactGraph()
         # Should not raise
         graph.remove_files(["/nonexistent/file.py"])
+
+
+def _empty_extracted(path, symbols):
+    revision = FileRevision.create("/project", path, "hash", "py", path.removesuffix(".py"))
+    return ExtractedFile(
+        revision=revision,
+        rows={"fg_sym": symbols, "cfg_blocks": [], "cfg_edges": []},
+    )
+
+
+def test_replace_extracted_coalesces_relation_mutations(monkeypatch):
+    graph = FactGraph()
+    captured = []
+    monkeypatch.setattr(graph, "_run_mutations", captured.extend)
+    extracted = [
+        _empty_extracted("a.py", [["a.f", "a.py", "f", "function", 1, 1, ""]]),
+        _empty_extracted("b.py", [["b.f", "b.py", "f", "function", 1, 1, ""]]),
+    ]
+
+    graph.replace_extracted(extracted, stored_paths=["a.py", "b.py"])
+
+    removals = [(query, params) for query, params in captured if ":rm symbol" in query]
+    inserts = [(query, params) for query, params in captured if ":put symbol" in query]
+    assert len(removals) == 1
+    assert removals[0][1] == {"fps": ["a.py", "b.py"]}
+    assert len(inserts) == 1
+    assert inserts[0][1]["rows"] == [
+        ["a.f", "a.py", "f", "function", 1, 1, ""],
+        ["b.f", "b.py", "f", "function", 1, 1, ""],
+    ]
+
+
+def test_replace_extracted_chunks_large_relations(monkeypatch):
+    graph = FactGraph()
+    captured = []
+    monkeypatch.setattr(graph, "_run_mutations", captured.extend)
+    monkeypatch.setattr(fact_graph_module, "_FACT_INSERT_BATCH_SIZE", 1)
+    graph.replace_extracted(
+        [
+            _empty_extracted(
+                "a.py",
+                [
+                    ["a.f", "a.py", "f", "function", 1, 1, ""],
+                    ["a.g", "a.py", "g", "function", 2, 2, ""],
+                ],
+            ),
+        ],
+        stored_paths=["a.py"],
+    )
+
+    inserts = [params for query, params in captured if ":put symbol" in query]
+    assert [params["rows"] for params in inserts] == [
+        [["a.f", "a.py", "f", "function", 1, 1, ""]],
+        [["a.g", "a.py", "g", "function", 2, 2, ""]],
+    ]
+
+
+def test_replace_extracted_preserves_last_symbol_for_duplicate_qn():
+    graph = FactGraph()
+    graph.replace_extracted(
+        [
+            _empty_extracted("a.py", [["shared.f", "a.py", "f", "function", 1, 1, ""]]),
+            _empty_extracted("b.py", [["shared.f", "b.py", "f", "function", 2, 2, ""]]),
+        ],
+        stored_paths=["a.py", "b.py"],
+    )
+
+    assert graph.symbols() == [SymbolFact("b.py", "f", "shared.f", "function", 2, 2)]
 
 
 class TestUpdateFilesMatchesBuildFromFiles:

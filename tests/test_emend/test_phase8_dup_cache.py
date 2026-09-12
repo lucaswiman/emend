@@ -1,11 +1,11 @@
 """Phase 8 production tests: duplicate cache + facts integration.
 
 Tests that verify:
-1. ``emend index`` populates dup_cache and dup_subtree/dup_run facts on a small
+1. Explicit duplicate prewarming populates dup_cache on a small
    synthetic repo.
 2. Re-indexing after editing one file updates only that file's duplicate facts.
 3. Deleting a file removes its duplicate facts.
-4. Re-running ``emend index`` with no changes reuses cached dup_cache rows
+4. Re-running explicit prewarming with no changes reuses cached dup_cache rows
    instead of recomputing all files.
 """
 
@@ -83,40 +83,21 @@ def _make_project(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_warm_caches_populates_dup_cache(tmp_path):
-    """warm_caches should write dup_cache rows for Python files."""
-    _make_project(tmp_path)
-    stats = warm_caches(str(tmp_path), type_engine="none")
-
-    # The stats should indicate at least some files were dup-analyzed.
-    assert stats.get("dup_cached", 0) >= 0  # may be 0 if no py files matched
-
-    db_path = _cache_db_dir(str(tmp_path)) / "parse.db"
-    assert db_path.exists(), "parse.db should be created by warm_caches"
-
-    conn = sqlite3.connect(str(db_path))
-    rows = conn.execute("SELECT hash, version FROM dup_cache").fetchall()
-    conn.close()
-
-    # We have 2 Python files; each should produce a dup_cache entry.
-    assert len(rows) >= 1, "Expected at least one dup_cache row"
-    for _hash, version in rows:
-        assert version == "4"
-
-
-def test_warm_caches_dup_cache_data_valid(tmp_path):
+def test_warm_caches_populates_valid_duplicate_payloads(tmp_path):
     """dup_cache data should be deserializable and contain subtrees/sequences."""
     _make_project(tmp_path)
-    warm_caches(str(tmp_path), type_engine="none")
+    stats = warm_caches(str(tmp_path), type_engine="none", build_duplicates=True)
+    assert stats["dup_cached"] == 2
 
     db_path = _cache_db_dir(str(tmp_path)) / "parse.db"
     conn = sqlite3.connect(str(db_path))
     rows = conn.execute("SELECT hash, version, data FROM dup_cache").fetchall()
     conn.close()
 
-    assert rows, "Should have dup_cache rows"
+    assert len(rows) == 2
 
     for content_hash, version, data in rows:
+        assert version == "4"
         payload = pickle.loads(zlib.decompress(data))
         assert isinstance(payload, dict), "Payload should be a dict"
         assert "subtrees" in payload, "Payload should have 'subtrees' key"
@@ -142,7 +123,7 @@ def test_warm_caches_dup_cache_data_valid(tmp_path):
 def test_incremental_refresh_on_edit(tmp_path):
     """Editing a file should update its dup_cache row, not the unchanged file."""
     _make_project(tmp_path)
-    warm_caches(str(tmp_path), type_engine="none")
+    warm_caches(str(tmp_path), type_engine="none", build_duplicates=True)
 
     db_path = _cache_db_dir(str(tmp_path)) / "parse.db"
 
@@ -161,7 +142,7 @@ def test_incremental_refresh_on_edit(tmp_path):
     utils_file.write_text(new_content)
 
     # Re-run warm_caches.
-    warm_caches(str(tmp_path), type_engine="none")
+    warm_caches(str(tmp_path), type_engine="none", build_duplicates=True)
 
     conn = sqlite3.connect(str(db_path))
     new_hashes = set(
@@ -186,7 +167,7 @@ def test_incremental_refresh_on_edit(tmp_path):
 def test_no_recomputation_on_unchanged_files(tmp_path):
     """Re-running warm_caches with unchanged files should reuse dup_cache."""
     _make_project(tmp_path)
-    warm_caches(str(tmp_path), type_engine="none")
+    warm_caches(str(tmp_path), type_engine="none", build_duplicates=True)
 
     db_path = _cache_db_dir(str(tmp_path)) / "parse.db"
 
@@ -198,7 +179,7 @@ def test_no_recomputation_on_unchanged_files(tmp_path):
     conn.close()
 
     # Run again without any changes.
-    warm_caches(str(tmp_path), type_engine="none")
+    warm_caches(str(tmp_path), type_engine="none", build_duplicates=True)
 
     conn = sqlite3.connect(str(db_path))
     second_hashes = set(
@@ -313,61 +294,59 @@ def test_compute_duplicate_payloads_idempotent(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_duplicate_module_canonicalize_file_for_cache(tmp_path):
-    """canonicalize_file_for_cache should return subtree dicts for a Python file."""
-    from emend.duplicate import canonicalize_file_for_cache
+@pytest.fixture
+def duplicate_sample(tmp_path):
     from emend import emend_core
 
     file_path = str(tmp_path / "sample.py")
-    (tmp_path / "sample.py").write_text(_SIMPLE_FUNC)
-
-    scope_resolver = emend_core.PyScopeResolver(str(tmp_path))
-    scope_resolver.index_file(file_path, _SIMPLE_FUNC)
-
-    subtrees = canonicalize_file_for_cache(file_path, _SIMPLE_FUNC, scope_resolver)
-
-    assert isinstance(subtrees, list)
-    # The two near-duplicate functions should produce some subtree candidates.
-    # (May be 0 if triviality filters reject all; ensure no crash at minimum.)
-    for s in subtrees:
-        assert "start_line" in s
-        assert "end_line" in s
-        assert "canonical_hash" in s
-        assert "root_kind" in s
-        assert "node_count" in s
-        assert "total_lines" in s
-        assert "score" in s
-        assert isinstance(s["canonical_hash"], str)
-        assert len(s["canonical_hash"]) == 32  # 16-byte blake2b as hex
+    Path(file_path).write_text(_SIMPLE_FUNC)
+    resolver = emend_core.PyScopeResolver(str(tmp_path))
+    resolver.index_file(file_path, _SIMPLE_FUNC)
+    return file_path, resolver
 
 
-def test_duplicate_module_build_statement_seqs_for_cache(tmp_path):
-    """build_statement_seqs_for_cache should return sequence dicts for a Python file."""
-    from emend.duplicate import build_statement_seqs_for_cache
-    from emend import emend_core
+def test_duplicate_cache_public_payloads(duplicate_sample):
+    from emend.duplicate import canonicalize_file_for_cache, build_statement_seqs_for_cache
 
-    file_path = str(tmp_path / "sample.py")
-    (tmp_path / "sample.py").write_text(_SIMPLE_FUNC)
+    file_path, resolver = duplicate_sample
+    subtrees = canonicalize_file_for_cache(file_path, _SIMPLE_FUNC, resolver)
+    sequences = build_statement_seqs_for_cache(file_path, _SIMPLE_FUNC, resolver)
+    assert isinstance(subtrees, list) and subtrees
+    assert isinstance(sequences, list) and sequences
+    for subtree in subtrees:
+        assert {"start_line", "end_line", "canonical_hash", "root_kind",
+                "node_count", "total_lines", "score"} <= subtree.keys()
+        assert isinstance(subtree["canonical_hash"], str)
+        assert len(subtree["canonical_hash"]) == 32
+    for sequence in sequences:
+        assert {"function_qn", "start_line", "end_line", "hashes",
+                "line_ranges", "kinds"} <= sequence.keys()
+        assert len(sequence["hashes"]) == len(sequence["line_ranges"]) == len(sequence["kinds"]) >= 2
+        assert all(isinstance(value, str) and len(value) == 32 for value in sequence["hashes"])
 
-    scope_resolver = emend_core.PyScopeResolver(str(tmp_path))
-    scope_resolver.index_file(file_path, _SIMPLE_FUNC)
 
-    seqs = build_statement_seqs_for_cache(file_path, _SIMPLE_FUNC, scope_resolver)
+def test_duplicate_payload_prepares_file_once(duplicate_sample, monkeypatch):
+    """The combined cache path must not parse and project the file twice."""
+    from unittest.mock import Mock
+    import emend.duplicate as duplicate
 
-    assert isinstance(seqs, list)
-    for seq in seqs:
-        assert "function_qn" in seq
-        assert "start_line" in seq
-        assert "end_line" in seq
-        assert "hashes" in seq
-        assert "line_ranges" in seq
-        assert "kinds" in seq
-        assert len(seq["hashes"]) >= 2
-        assert len(seq["hashes"]) == len(seq["line_ranges"])
-        assert len(seq["hashes"]) == len(seq["kinds"])
-        for h in seq["hashes"]:
-            assert isinstance(h, str)
-            assert len(h) == 32  # 16-byte blake2b as hex
+    file_path, resolver = duplicate_sample
+    watched = []
+    for owner, name in (
+        (duplicate.emend_core, "parse_source"),
+        (duplicate.emend_core, "collect_symbols_from_str"),
+        (duplicate, "_build_qn_at"),
+    ):
+        wrapped = Mock(wraps=getattr(owner, name))
+        monkeypatch.setattr(owner, name, wrapped)
+        watched.append(wrapped)
+
+    payload = duplicate._build_duplicate_payload_for_cache(
+        file_path, _SIMPLE_FUNC, resolver
+    )
+
+    assert set(payload) == {"subtrees", "sequences"}
+    assert [call.call_count for call in watched] == [1, 1, 1]
 
 
 def test_duplicate_module_near_duplicate_detection(tmp_path):
@@ -409,9 +388,5 @@ def test_duplicate_module_near_duplicate_detection(tmp_path):
     # Both functions should be candidates and have the same canonical_hash
     # because variable names are alpha-renamed.
     func_subtrees = [s for s in subtrees if s["root_kind"] == "function_definition"]
-    if len(func_subtrees) >= 2:
-        hashes = [s["canonical_hash"] for s in func_subtrees]
-        assert hashes[0] == hashes[1], (
-            "Structurally identical functions with renamed variables should "
-            "produce the same canonical hash"
-        )
+    assert len(func_subtrees) == 2
+    assert func_subtrees[0]["canonical_hash"] == func_subtrees[1]["canonical_hash"]

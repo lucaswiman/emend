@@ -1027,6 +1027,17 @@ fn collect_symbols_from_source(
     };
 
     let cfg = crate::scope::config_for_ext(ext);
+    collect_symbols_from_tree(source, &tree, max_depth, selector, cfg)
+}
+
+/// Collect symbols from a caller-owned parse tree and language configuration.
+pub(crate) fn collect_symbols_from_tree(
+    source: &str,
+    tree: &tree_sitter::Tree,
+    max_depth: usize,
+    selector: &Option<Vec<String>>,
+    cfg: &crate::scope::LanguageConfig,
+) -> Vec<RustSymbol> {
     let source_bytes = source.as_bytes();
     let root = tree.root_node();
     let mut defined_names_stack: Vec<std::collections::HashSet<String>> =

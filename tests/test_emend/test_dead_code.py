@@ -1937,18 +1937,8 @@ class TestDeadCodeUnreachableBlocks:
         unreachable = [d for d in data if d.get("kind") == "unreachable_block"]
         assert len(unreachable) >= 1
 
-    @pytest.mark.xfail(reason=(
-        "References in unreachable code may not be attributed to the unreachable "
-        "block if the Rust CFG builder's block line ranges don't cover all post-return "
-        "statements. This is a known limitation of the current CFG range computation."
-    ))
     def test_deadcode_ref_from_unreachable_not_counted(self, tmp_path):
         """A reference from unreachable code should not keep a symbol alive.
-
-        Known limitation: the Rust CFG builder may assign end_line to the
-        unreachable block such that lines after a return statement aren't
-        covered by any block's line range. In that case the reference falls
-        through to the module-level live_ref rule and keeps the symbol alive.
         """
         import textwrap
         from emend.transform import find_dead_code, DeadSymbol
