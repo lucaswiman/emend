@@ -699,6 +699,60 @@ class TestPatternPrefilter:
             assert result.items == []
 
 
+@pytest.mark.parametrize("extension,source,pattern", [
+    ("py", "emit(1)\n", "emit($X)"),
+    ("rs", "fn main() { emit(1); }\n", "fn $F() { $...BODY }"),
+    ("tsx", "const view = <div>{emit(1)}</div>;\n", "<div>{$X}</div>"),
+])
+def test_editor_patterns_preserve_language_and_dialect(tmp_path, extension, source, pattern):
+    target = tmp_path / f"target.{extension}"
+    target.write_text(source)
+    (tmp_path / "unrelated.py").write_text("other(2)\n")
+    with _engine(tmp_path) as engine:
+        for scope in (str(target), str(tmp_path)):
+            result = engine.search_pattern(pattern, file_scope=scope)
+            assert [item["file_path"] for item in result.items] == [str(target)]
+
+
+def test_editor_pattern_mixed_languages_share_limit(tmp_path):
+    for extension, source in [("py", "emit(1)"), ("rs", "fn f() { emit(1); }"),
+                              ("tsx", "const f = <div>{emit(1)}</div>;")]:
+        (tmp_path / f"target.{extension}").write_text(source)
+    with _engine(tmp_path) as engine:
+        result = engine.search_pattern("emit($X)")
+        assert {Path(item["file_path"]).suffix for item in result.items} == {".py", ".rs", ".tsx"}
+        limited = engine.search_pattern("emit($X)", limit=2)
+        assert len(limited.items) == 2 and limited.truncated
+
+
+@pytest.mark.parametrize("background", [False, True])
+@pytest.mark.parametrize("extension,template", [("py", "def {}():\n    pass\n"), ("rs", "fn {}() {{}}\n")])
+def test_editor_reindex_builds_cold_and_large_updates(tmp_path, background, monkeypatch, extension, template):
+    (tmp_path / f"first.{extension}").write_text(template.format("initial"))
+    with _engine(tmp_path) as engine:
+        if background:
+            def unavailable(_):
+                raise OSError("temporarily unavailable")
+            with monkeypatch.context() as patch:
+                patch.setattr("emend.transform.index.ensure_search_index", unavailable)
+                assert engine.start_background_reindex()
+                engine._index_thread.join(timeout=10)
+                assert not engine.is_indexing and not engine.check_index_complete()
+        for name, expected in [("initial", 1), ("added", 11)]:
+            if name == "added":
+                for index in range(expected):
+                    (tmp_path / f"new_{index}.{extension}").write_text(template.format("added"))
+            if background:
+                assert engine.start_background_reindex()
+                engine._index_thread.join(timeout=10)
+                assert not engine.is_indexing
+                assert engine.check_index_complete()
+                engine.finalize_reindex()
+            else:
+                assert engine.reindex().items[0]["fresh"]
+            assert len(engine.search_symbols(name).items) == expected
+
+
 class TestGrepSearch:
     """Regex (``/pattern/``) grep search via rg / grep."""
 

@@ -708,6 +708,13 @@ def _ensure_index_fresh(
     )
 
 
+def ensure_search_index(project_path: str) -> bool:
+    """Finish a requested index refresh, including cold and large updates."""
+    if not _ensure_index_fresh(project_path):
+        warm_caches(project_path, type_engine=None, build_fts=False, language=None)
+    return True
+
+
 def query_symbol_index(
     project_path: str,
     *,
@@ -1100,7 +1107,7 @@ def warm_caches(
     jobs: int | None = None,
     callback: Callable[[str, str], None] | None = None,
     type_engine: str | None = "pyrefly",
-    language: str = "python",
+    language: str | None = "python",
     build_fts: bool = True,
     build_duplicates: bool = False,
 ) -> dict[str, int | str]:
@@ -1116,6 +1123,7 @@ def warm_caches(
     Args:
         project_path: Root directory of the project.
         jobs: Max parallelism (defaults to CPU count).
+        language: Restrict indexed files to this language; ``None`` indexes all languages.
         callback: Called with ``(phase, file_path)`` for progress reporting.
         type_engine: Type inference engine for the type-cache phase.
             Defaults to ``"pyrefly"``. ``"auto"`` detects from project config
@@ -1142,13 +1150,14 @@ def warm_caches(
         _cache_db_dir,
         _get_worktree_id,
     )
-    from .project_iter import _find_project_root, _find_source_root, _collect_source_files_scandir
+    from .project_iter import _find_project_root, _find_source_root
+    from emend.file_collection import collect_all_source_files
 
     project_root = _find_project_root(project_path)
     # Collect files from the user-specified path (not the project root)
     # so that `emend index src/` only indexes src/, not the entire repo.
     scan_root = str(Path(project_path).resolve())
-    source_files = _collect_source_files_scandir(scan_root)
+    source_files = collect_all_source_files(scan_root, [language] if language else None)
     logger.info("warm_caches: %d source files in %s", len(source_files), scan_root)
 
     max_workers = jobs or multiprocessing.cpu_count() or 4
@@ -1185,7 +1194,7 @@ def warm_caches(
         logger.debug("cache schema pre-creation failed", exc_info=True)
 
     # Resolve source root once so _index_batch workers can compute module_qn.
-    source_root = _find_source_root(project_root, language=language)
+    source_root = _find_source_root(project_root, language=language or "python")
 
     indexed_paths = {str(Path(path).resolve()) for path, _ in file_contents}
 

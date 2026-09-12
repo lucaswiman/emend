@@ -68,7 +68,7 @@ def find_pattern_in_project(
     type_oracle: TypeOracle | None = None,
     index_conn: sqlite3.Connection | None = None,
     limit: int | None = None,
-    language: str = "python",
+    language: str | None = "python",
 ) -> list[ProjectPatternMatch]:
     """Search for a pattern across multiple files.
 
@@ -86,6 +86,7 @@ def find_pattern_in_project(
        in parallel via ``ThreadPoolExecutor``.
 
     Returns a list of ``ProjectPatternMatch`` (file_path + match).
+    ``language=None`` detects each file's language, retaining same-dialect batching.
     """
     from .patterns import find_pattern, PatternMatch
     from emend.pattern import parse_pattern
@@ -148,8 +149,9 @@ def find_pattern_in_project(
         or scope_local
         or type_oracle is not None
     )
-    from emend.language_registry import get_extensions
-    extensions = get_extensions(language)
+    from emend.language_registry import detect_language, get_extensions
+    matcher_language = language or detect_language(file_contents[0][0]) or "python"
+    extensions = get_extensions(matcher_language)
     dialects = {Path(fp).suffix.lstrip('.') for fp, _ in file_contents}
     extension = next(iter(dialects)) if len(dialects) == 1 else None
     if extension not in extensions:
@@ -161,13 +163,13 @@ def find_pattern_in_project(
             compile_constraint_to_rust_ir,
         )
 
-        pattern_ir = compile_pattern_to_rust_ir(pattern_str, language=language, extension=extension)
+        pattern_ir = compile_pattern_to_rust_ir(pattern_str, language=matcher_language, extension=extension)
         if pattern_ir is not None:
             inside_ir = (
-                compile_constraint_to_rust_ir(inside, language=language, extension=extension) if inside else None
+                compile_constraint_to_rust_ir(inside, language=matcher_language, extension=extension) if inside else None
             )
             not_inside_ir = (
-                compile_constraint_to_rust_ir(not_inside, language=language, extension=extension)
+                compile_constraint_to_rust_ir(not_inside, language=matcher_language, extension=extension)
                 if not_inside
                 else None
             )

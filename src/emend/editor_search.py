@@ -588,15 +588,12 @@ class EditorSearchEngine:
         return True
 
     def _background_reindex_worker(self) -> None:
-        """Worker that runs in a background thread.
-
-        Uses ``_ensure_index_fresh`` which opens its own SQLite connection,
-        so there is no contention with the main-thread connection.
-        """
+        """Complete the shared index refresh before announcing readiness."""
+        complete = False
         try:
-            from emend.transform import _ensure_index_fresh
+            from emend.transform.index import ensure_search_index
 
-            _ensure_index_fresh(self.project_root)
+            complete = ensure_search_index(self.project_root)
         except BUG_EXCEPTIONS:
             raise
         except Exception:
@@ -604,7 +601,7 @@ class EditorSearchEngine:
         finally:
             with self._index_lock:
                 self._indexing = False
-                self._index_complete_pending = True
+                self._index_complete_pending = complete
 
     def check_index_complete(self) -> bool:
         """Check if a background reindex just completed.
@@ -1017,10 +1014,8 @@ class EditorSearchEngine:
         The SQLite index connection is passed through so the shared
         backend can do the index prefilter without opening a second DB.
         """
-        from emend.transform import (
-            find_pattern_in_project,
-            _collect_source_files_scandir,
-        )
+        from emend.transform import find_pattern_in_project
+        from emend.file_collection import collect_all_source_files
 
         scope_path = file_scope or self.project_root
         scope_resolved = Path(scope_path).resolve()
@@ -1028,12 +1023,13 @@ class EditorSearchEngine:
         if scope_resolved.is_file():
             file_paths = [str(scope_resolved)]
         else:
-            file_paths = _collect_source_files_scandir(str(scope_resolved))
+            file_paths = collect_all_source_files(str(scope_resolved))
 
         project_matches = find_pattern_in_project(
             pattern, file_paths,
             index_conn=self._get_conn(),
             limit=limit,
+            language=None,
         )
 
         items: list[dict] = []
@@ -1822,9 +1818,9 @@ class EditorSearchEngine:
         """Re-index stale files and rebuild FTS."""
         t0 = time.monotonic()
 
-        from emend.transform import _ensure_index_fresh
+        from emend.transform.index import ensure_search_index
 
-        fresh = _ensure_index_fresh(self.project_root)
+        fresh = ensure_search_index(self.project_root)
         # Rebuild FTS after any re-indexing
         fts_count = self._store.write(rebuild_fts)
         self._fts_ready = True
