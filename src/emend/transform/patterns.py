@@ -275,7 +275,8 @@ def find_pattern(
     if explicit_language:
         from emend.language_registry import get_extensions
         extensions = get_extensions(language)
-        ext = extensions[0] if extensions else ext
+        if extensions and ext not in extensions:
+            ext = extensions[0]
     raw_matches = _rust.find_pattern_in_files(
         [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir,
         extension=ext
@@ -792,11 +793,12 @@ def copy_symbol(
     return diff
 
 
-def _is_valid_replacement(code: str, language: str = "python") -> bool:
-    """Verify if the given code string parses as valid syntax.
+def _is_valid_replacement(code: str, language: str = "python", extension: str | None = None, *, fragment: bool = True) -> bool:
+    """Check structural validity with tree-sitter, not a language compiler.
 
     Uses tree-sitter via ``emend_core.validate_syntax``; accepts the
-    replacement if no tree-sitter grammar is available for the language.
+    fragment if no grammar is available; whole-file checks fail closed.
+    Passing does not guarantee valid indentation or contextual semantics.
     """
     from emend import emend_core as _rust
     from emend.language_registry import get_extensions
@@ -807,12 +809,14 @@ def _is_valid_replacement(code: str, language: str = "python") -> bool:
     except Exception:
         logger.debug("get_extensions failed for %s", language, exc_info=True)
         exts = []
-    ext = exts[0] if exts else ("py" if language == "python" else None)
+    ext = extension if extension in exts else exts[0] if exts else None
     if ext is None:
-        return True
+        return fragment
     try:
-        return _rust.validate_syntax(code, ext)
+        return _rust.validate_syntax(code, ext, fragment=fragment)
     except Exception:
+        if not fragment:
+            raise
         logger.debug("validate_syntax failed for %s", language, exc_info=True)
         return True
 
@@ -866,6 +870,34 @@ def _substitute_metavars(
         _clean_separator, replacement_code
     )
     return replacement_code.replace(_EMPTY_ELLIPSIS, "")
+
+
+def _indent_template(template: str, indent: str, language: str, extension: str) -> str:
+    """Indent template lines, not string contents or later opaque captures."""
+    if not indent or "\n" not in template:
+        return template
+    from emend.language_registry import get_extensions, load_config
+
+    extensions = get_extensions(language)
+    tree = _rust.parse_source(template, extension if extension in extensions else extensions[0])
+    config = load_config(language)
+    string_kinds = config.get("cfg", {}).get("string_nodes", [config["pattern_matching"]["string"]])
+    protected = []
+    nodes = [tree.root] if tree is not None else []
+    while nodes:
+        node = nodes.pop()
+        if node.kind in string_kinds:
+            protected.append((node.start_byte, node.end_byte))
+        else:
+            nodes.extend(node.children())
+    data = template.encode()
+    transform = _rust.PyFileTransform(template)
+    for offset, byte in enumerate(data):
+        if byte == 10 and offset + 1 < len(data) and not any(
+            start <= offset < end for start, end in protected
+        ):
+            transform.replace_range(offset + 1, offset + 1, indent)
+    return transform.apply()
 
 
 def replace_pattern(
@@ -976,12 +1008,15 @@ def replace_pattern(
             continue
 
         # Build replacement by substituting metavars
-        replacement_code = _substitute_metavars(replacement_str, match.captures)
+        line = source_bytes[line_starts[match.line - 1]:start_offset].decode()
+        indent = line[:len(line) - len(line.lstrip())]
+        template = _indent_template(replacement_str, indent, language, file.suffix.lstrip("."))
+        replacement_code = _substitute_metavars(template, match.captures)
         if replacement_code is None:
             continue
 
         # Verify replacement parses as valid syntax
-        if not _is_valid_replacement(replacement_code, language=language):
+        if not _is_valid_replacement(replacement_code, language=language, extension=file.suffix.lstrip(".")):
             continue
 
         # Apply replacement to the transform
@@ -998,6 +1033,9 @@ def replace_pattern(
         # This should not happen due to the is_contained filter above
         logger.error("Overlapping edits detected in replace_pattern")
         return "", 0
+
+    if not _is_valid_replacement(new_code, language=language, extension=file.suffix.lstrip("."), fragment=False):
+        raise ValueError("Replacement produces invalid syntax in the enclosing file")
 
     # Generate diff
     from .components import _generate_diff

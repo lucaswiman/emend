@@ -36,6 +36,10 @@ def test_duplicate_language_contract(tmp_path, monkeypatch, extension, source, m
     assert clusters
     assert all({m.file.rsplit("/", 1)[-1] for m in c.members} ==
                {f"one.{extension}", f"two.{extension}"} for c in clusters)
+    if extension not in {"js", "jsx"}:
+        scoped = query_duplicates(str(tmp_path), mode=mode, symbol_scope="compute")
+        assert scoped and all(c in clusters for c in scoped)
+    assert query_duplicates(str(tmp_path), mode=mode, symbol_scope="one") == []
     db = _cache_db_dir(str(tmp_path)) / "parse.db"
     db.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db) as conn:

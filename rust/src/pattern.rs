@@ -59,8 +59,8 @@ pub(crate) fn parse_python(source: &str) -> Option<Tree> {
 /// Parse source based on file extension.
 pub(crate) fn parse_by_extension(source: &str, ext: &str) -> Option<Tree> {
     let language = match ext {
-        "ts" | "js" | "jsx" => "typescript", // JS uses TS grammar
-        "tsx" => "tsx",
+        "ts" | "js" => "typescript", // JS uses TS grammar
+        "tsx" | "jsx" => "tsx",
         "rs" => "rust",
         "html" | "htm" => "html",
         "css" => "css",
