@@ -823,6 +823,53 @@ class TestFileTypeCache:
         assert [lsp.calls for lsp in FakeLsp.instances] == [1, 1, 1]
         assert [lsp.stopped for lsp in FakeLsp.instances] == [True, True, False]
 
+    @pytest.mark.parametrize("outcome", ["startup", "hover", "empty"])
+    def test_lsp_caches_only_successful_inference(self, tmp_path, outcome):
+        source = tmp_path / "app.py"
+        source.write_text("value = 1\n")
+
+        class FakeLsp:
+            hover_calls = 0
+
+            def did_open(self, *_args, **_kwargs):
+                pass
+
+            def hover(self, *_args):
+                self.hover_calls += 1
+                if outcome == "hover" and self.hover_calls == 1:
+                    raise RuntimeError("temporary LSP failure")
+                return None if outcome == "empty" else "int"
+
+        class Oracle(_LSPTypeOracle):
+            _tool_name = "fake"
+
+            def __init__(self):
+                super().__init__("fake", db_path=None)
+                self.starts = 0
+
+            def _get_lsp(self, _project_root):
+                self.starts += 1
+                return None if outcome == "startup" and self.starts == 1 else lsp
+
+            def _parse_hover_type(self, hover_text):
+                return hover_text
+
+            def _lsp_command(self):
+                return []
+
+        lsp = FakeLsp()
+        oracle = Oracle()
+
+        first = oracle.infer_file(source, tmp_path)
+        second = oracle.infer_file(source, tmp_path)
+        assert first.bindings == []
+        if outcome == "empty":
+            assert second is first
+            assert lsp.hover_calls == 1
+        else:
+            assert second.bindings[0].raw_type == "int"
+            assert oracle.starts == 2
+
 
 # ---------------------------------------------------------------------------
 # create_type_oracle factory
@@ -973,7 +1020,10 @@ class TestAdapterCommon:
         test_file.write_text(source)
         ft1 = adapter.infer_file(test_file, project_root=tmp_path)
         ft2 = adapter.infer_file(test_file, project_root=tmp_path)
-        assert ft1 is ft2  # same object from cache
+        if isinstance(adapter, _LSPTypeOracle):
+            assert ft1 is not ft2  # unavailable LSP results are retryable
+        else:
+            assert ft1 is ft2
         assert adapter.type_at(test_file, 1, 1, tmp_path) is ft1.type_at(1, 1)
         other_file = tmp_path / ("other" + ext)
         other_file.write_text(source)
