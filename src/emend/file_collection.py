@@ -9,7 +9,29 @@ from __future__ import annotations
 
 import logging
 import time
+import stat as stat_module
 from pathlib import Path
+
+
+def file_stat_identity(stat):
+    return (
+        stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
+        getattr(stat, "st_ctime_ns", int(stat.st_ctime * 1_000_000_000)),
+    )
+
+
+def source_file_identities(paths):
+    """Inventory source metadata without reading or parsing unchanged files."""
+    result = {}
+    for path in paths:
+        try:
+            stat = Path(path).stat()
+        except OSError:
+            continue
+        if not stat_module.S_ISREG(stat.st_mode):
+            continue
+        result[str(path)] = file_stat_identity(stat)
+    return result
 
 logger = logging.getLogger(__name__)
 

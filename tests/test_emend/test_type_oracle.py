@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import hashlib
 import shutil
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -569,12 +570,95 @@ class TestFileTypes:
 
 class TestFileTypeCache:
 
+    @pytest.mark.parametrize("engine,suffix", [("pyrefly", "py"), ("typescript", "ts"), ("pyright", "py")])
+    @pytest.mark.parametrize("batch", [False, True])
+    @pytest.mark.parametrize("empty", [False, True])
+    def test_failed_analysis_retries_but_success_is_cached(
+        self, tmp_path, monkeypatch, engine, suffix, batch, empty
+    ):
+        target = tmp_path / f"target.{suffix}"
+        target.write_text("value = 1\n" if suffix == "py" else "const value = 1;\n")
+        adapter = create_type_oracle(engine, tmp_path)
+        calls = []
+
+        def run(cmd, **kwargs):
+            if "--version" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "test", "")
+            calls.append(cmd)
+            if len(calls) == 1:
+                raise subprocess.TimeoutExpired(cmd, 60)
+            if engine == "pyright":
+                result = None if empty else {"contents": {"value": "```python\nvalue: int\n```"}}
+                return subprocess.CompletedProcess(cmd, 0, json.dumps({"result": result}), "")
+            if engine == "pyrefly":
+                bindings = [] if empty else [{"key": "Key::Definition(value 1:1-6)", "result": "int"}]
+                Path(cmd[cmd.index("--debug-info") + 1]).write_text(json.dumps(
+                    {"modules": {"__unknown__": {"bindings": bindings}}}
+                ))
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            bindings = [] if empty else [{"name": "value", "line": 1, "col_start": 7, "type": "number"}]
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(bindings), "")
+
+        monkeypatch.setattr("emend.type_oracle.subprocess.run", run)
+        if engine == "pyright":
+            from emend.type_oracle import LSPClient
+            clients = []
+            def request(*args, **kwargs):
+                try:
+                    return json.loads(run(["hover"]).stdout)
+                except subprocess.TimeoutExpired:
+                    return None
+            def client_factory(*args):
+                lsp = LSPClient([], tmp_path)
+                clients.append(lsp)
+                monkeypatch.setattr(lsp, "start", lambda: True)
+                monkeypatch.setattr(lsp, "send_request", request)
+                return lsp
+            monkeypatch.setattr("emend.type_oracle.LSPClient", client_factory)
+        def infer():
+            return (adapter.infer_batch([target], tmp_path)[str(target)] if batch
+                    else adapter.infer_file(target, tmp_path))
+        failure = infer()
+        assert not failure.complete and failure.bindings == []
+        for _ in range(2):
+            result = infer()
+            assert result.complete and bool(result.bindings) is not empty
+        assert len(calls) == 2
+        if engine == "pyright":
+            assert len(clients) == 2  # Failed transport is replaced before retry.
+
+    def test_failed_lsp_startup_closes_each_client(self, tmp_path, monkeypatch):
+        from unittest.mock import Mock
+
+        client = Mock()
+        client.start.return_value = False
+        monkeypatch.setattr("emend.type_oracle.LSPClient", lambda *args: client)
+        adapter = PyrightAdapter()
+        for _ in range(2):
+            assert adapter._get_lsp(tmp_path) is None
+        assert client.stop.call_count == 2
+
+    def test_result_contract_upgrade_drops_legacy_empty_cache(self, tmp_path, monkeypatch):
+        target = tmp_path / "target.py"
+        target.write_text("value = 1\n")
+        monkeypatch.setattr("emend.type_oracle._TYPE_RESULT_VERSION", 1)
+        old = create_type_oracle("pyrefly", tmp_path)
+        key = old._file_key(target, tmp_path)
+        old._cache.put(key, FileTypes(path=str(target)))
+        monkeypatch.setattr("emend.type_oracle._TYPE_RESULT_VERSION", 2)
+        current = create_type_oracle("pyrefly", tmp_path)
+        assert current._cache.get(key, target) is None
+        current._cache.put(key, FileTypes(path=str(target)))
+        assert create_type_oracle("pyrefly", tmp_path)._cache.get(key, target).complete
+
     def test_get_miss(self):
         cache = _FileTypeCache(max_entries=10)
         assert cache.get("nonexistent") is None
 
     def test_put_and_get(self):
         cache = _FileTypeCache(max_entries=10)
+        cache.put("abc123", FileTypes(path="test.py", complete=False))
+        assert cache.get("abc123") is None
         ft = FileTypes(path="test.py")
         cache.put("abc123", ft)
         assert cache.get("abc123") is ft
@@ -1018,12 +1102,10 @@ class TestAdapterCommon:
         adapter = adapter_cls(**construct_kwargs)
         test_file = tmp_path / ("test" + ext)
         test_file.write_text(source)
+        adapter._cache.put(adapter._file_key(test_file, tmp_path), FileTypes(path=str(test_file)))
         ft1 = adapter.infer_file(test_file, project_root=tmp_path)
         ft2 = adapter.infer_file(test_file, project_root=tmp_path)
-        if isinstance(adapter, _LSPTypeOracle):
-            assert ft1 is not ft2  # unavailable LSP results are retryable
-        else:
-            assert ft1 is ft2
+        assert ft1 is ft2
         assert adapter.type_at(test_file, 1, 1, tmp_path) is ft1.type_at(1, 1)
         other_file = tmp_path / ("other" + ext)
         other_file.write_text(source)

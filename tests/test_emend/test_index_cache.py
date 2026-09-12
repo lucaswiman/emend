@@ -483,44 +483,16 @@ class TestErrorFileCaching:
         assert isinstance(results[key], FileTypes)
         assert results[key].bindings == []
 
-    def test_pyright_infer_file_caches_on_error(self, tmp_path):
-        """PyrightAdapter.infer_file caches an empty result when a file errors."""
-        import hashlib
-        from emend.type_oracle import PyrightAdapter, _file_cache_key
-
-        db_path = str(tmp_path / "parse.db")
-        adapter = PyrightAdapter(db_path=db_path)
-
-        py = tmp_path / "bad.py"
-        # Write non-UTF-8 bytes to trigger UnicodeDecodeError in read_text()
-        py.write_bytes(b"x = 1\n\xff\xfe invalid utf8\n")
-
-        content_hash = _file_cache_key(py)
-        # First call — should catch the error and cache an empty result
-        ft = adapter.infer_file(py)
-        assert ft.bindings == []
-
-        # Verify the empty result was cached
-        cached = adapter._cache.get(content_hash)
-        assert cached is not None
-        assert cached.bindings == []
-
-    def test_ty_infer_file_caches_on_error(self, tmp_path):
-        """TyAdapter.infer_file caches an empty result when a file errors."""
-        from emend.type_oracle import TyAdapter, _file_cache_key
-
-        db_path = str(tmp_path / "parse.db")
-        adapter = TyAdapter(db_path=db_path)
-
+    @pytest.mark.parametrize("engine", ["pyright", "ty"])
+    def test_lsp_decoding_errors_are_not_cached(self, tmp_path, engine):
+        from emend.type_oracle import create_type_oracle, _file_cache_key
+        adapter = create_type_oracle(engine, tmp_path)
         py = tmp_path / "bad.py"
         py.write_bytes(b"x = 1\n\xff\xfe invalid utf8\n")
-
         content_hash = _file_cache_key(py)
         ft = adapter.infer_file(py)
-        assert ft.bindings == []
-
-        cached = adapter._cache.get(content_hash)
-        assert cached is not None
+        assert not ft.complete and ft.bindings == []
+        assert adapter._cache.get(content_hash) is None
 
 
 # ---------------------------------------------------------------------------
