@@ -39,11 +39,11 @@ Language support is divided into three layers:
 1. **Rust core** (``emend_core``): Tree-sitter parsing, scope resolution, pattern
    matching.  Driven entirely by TOML config files embedded at compile time.
 
-2. **Language config** (``languages/<lang>/config.toml``): Declarative rules for
+2. **Language config** (``src/emend/languages/<lang>/config.toml``): Declarative rules for
    scoping, bindings, imports, qualified names, symbols, pattern matching, and
    environment lookup.
 
-3. **Python plugin** (``languages/<lang>/plugin.py``): Composable handlers for
+3. **Python plugin** (``src/emend/languages/<lang>/plugin.py``): Composable handlers for
    import manipulation, comment/docstring handling, and pattern compilation.
 
 Adding a New Built-in Language
@@ -55,11 +55,11 @@ repository.
 Step 1: Create language directory
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Create ``languages/<lang>/`` with three files:
+Create ``src/emend/languages/<lang>/`` with three files:
 
 .. code-block:: text
 
-   languages/
+   src/emend/languages/
      <lang>/
        config.toml    # Required: language configuration
        plugin.py      # Required: plugin handler composition
@@ -208,7 +208,7 @@ And the config dispatch in ``rust/src/scope.rs``:
 
 .. code-block:: rust
 
-   const GO_CONFIG_TOML: &str = include_str!("../../languages/go/config.toml");
+   const GO_CONFIG_TOML: &str = include_str!("../../src/emend/languages/go/config.toml");
 
    // In config_for_ext():
    "go" => GO_CONFIG.get_or_init(|| {
@@ -458,7 +458,7 @@ Discovery order
 
 emend discovers languages in this order:
 
-1. **Built-in languages** from ``languages/*/config.toml`` (highest priority)
+1. **Built-in languages** from ``src/emend/languages/*/config.toml`` (highest priority)
 2. **Entry-point plugins** from installed packages (cannot override built-ins)
 3. **Hardcoded fallbacks** for Python, TypeScript, and Rust
 

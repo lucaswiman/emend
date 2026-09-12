@@ -24,14 +24,14 @@ use std::sync::OnceLock;
 
 type MethodTargets = HashMap<(String, String), Option<String>>;
 
-const PYTHON_CONFIG_TOML: &str = include_str!("../../languages/python/config.toml");
-const TS_CONFIG_TOML: &str = include_str!("../../languages/typescript/config.toml");
-const RUST_CONFIG_TOML: &str = include_str!("../../languages/rust/config.toml");
-const HTML_CONFIG_TOML: &str = include_str!("../../languages/html/config.toml");
-const CSS_CONFIG_TOML: &str = include_str!("../../languages/css/config.toml");
-const SQL_CONFIG_TOML: &str = include_str!("../../languages/sql/config.toml");
-const JINJA2_CONFIG_TOML: &str = include_str!("../../languages/jinja2/config.toml");
-const DATALOG_CONFIG_TOML: &str = include_str!("../../languages/datalog/config.toml");
+const PYTHON_CONFIG_TOML: &str = include_str!("../../src/emend/languages/python/config.toml");
+const TS_CONFIG_TOML: &str = include_str!("../../src/emend/languages/typescript/config.toml");
+const RUST_CONFIG_TOML: &str = include_str!("../../src/emend/languages/rust/config.toml");
+const HTML_CONFIG_TOML: &str = include_str!("../../src/emend/languages/html/config.toml");
+const CSS_CONFIG_TOML: &str = include_str!("../../src/emend/languages/css/config.toml");
+const SQL_CONFIG_TOML: &str = include_str!("../../src/emend/languages/sql/config.toml");
+const JINJA2_CONFIG_TOML: &str = include_str!("../../src/emend/languages/jinja2/config.toml");
+const DATALOG_CONFIG_TOML: &str = include_str!("../../src/emend/languages/datalog/config.toml");
 
 /// Return a cached `&'static LanguageConfig` for the given file extension.
 /// Defaults to Python config for unknown extensions.

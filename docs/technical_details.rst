@@ -34,7 +34,7 @@ It handles all performance-critical AST analysis and manipulation:
 - **File discovery** — parallel directory walk via ``rayon``.
 - **Unified Scope Resolver** — a multi-language-capable engine that builds
   scope trees and resolves qualified names.  Scoping and binding rules are
-  driven by a language configuration file (e.g., ``languages/python.toml``).
+  driven by a language configuration file (e.g., ``src/emend/languages/python/config.toml``).
 - **Structural Matcher** — a generic matcher that executes structural queries
   and captures metavariables directly on the Tree-sitter AST.
 - **Mutation Engine** — ``PyFileTransform`` manages a set of non-overlapping
@@ -76,12 +76,12 @@ supported language is defined by a TOML configuration file that specifies:
 Adding a new language
 ---------------------
 
-To add support for a new language, create a directory under ``languages/`` with
+To add support for a new language, create a directory under ``src/emend/languages/`` with
 two files:
 
 .. code-block:: text
 
-   languages/<lang_name>/
+   src/emend/languages/<lang_name>/
    ├── config.toml       # scope resolver configuration
    └── symbols.scm       # tree-sitter query for symbol extraction
 
@@ -89,7 +89,7 @@ config.toml
 ~~~~~~~~~~~
 
 The configuration file drives the scope resolver and qualified-name builder.
-Use ``languages/python/config.toml`` as a reference.  The file contains the
+Use ``src/emend/languages/python/config.toml`` as a reference.  The file contains the
 following sections:
 
 ``[language]``
