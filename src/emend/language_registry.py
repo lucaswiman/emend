@@ -49,17 +49,9 @@ _BUILTIN: dict[str, list[str]] = {
 
 def _find_languages_dir() -> Path | None:
     """Return the ``languages/`` config directory shipped with emend, or None."""
-    # Installed layout: languages/ may be bundled inside the package
     candidate = Path(__file__).parent / "languages"
     if candidate.is_dir():
         return candidate
-
-    # Dev layout: languages/ sits at the repo root, three levels above
-    # src/emend/language_registry.py → src/emend → src → repo_root
-    candidate = Path(__file__).parent.parent.parent / "languages"
-    if candidate.is_dir():
-        return candidate
-
     return None
 
 
