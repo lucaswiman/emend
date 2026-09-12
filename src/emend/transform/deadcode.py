@@ -1163,6 +1163,43 @@ def _typed_decorator_entry_points(
     return resolved_entry_points
 
 
+def _has_deadcode_noqa(fp: str, line: int, cache: dict) -> bool:
+    """Use the same rule-specific suppression for reporting and safe deletion."""
+    if fp not in cache:
+        from emend.language_plugins import load_plugin
+        from emend.language_registry import detect_language
+        try:
+            source = Path(fp).read_text(errors="replace")
+            handler = load_plugin(detect_language(fp) or "python").comment_handler
+            cache[fp] = handler.find_noqa_comments(source)
+        except OSError:
+            cache[fp] = {}
+    return line in cache[fp] and (cache[fp][line] is None or "deadcode" in cache[fp][line])
+
+
+def _project_entry_point_options(graph, project_root, decorators=None, names=None) -> dict:
+    """Shared configured and discovered entry points for reporting and deletion."""
+    from emend.file_collection import detect_project_languages
+    all_decorators = list(decorators or [])
+    all_decorators.extend(d.rsplit(".", 1)[-1] for d in decorators or [])
+    all_names = list(names or [])
+    prefixes = []
+    type_methods = {}
+    for language in detect_project_languages(project_root) or ["python"]:
+        ep = _get_entry_point_config(language)
+        all_decorators.extend(ep["decorators"])
+        all_decorators.extend(ep["decorator_basenames"])
+        all_names.extend(ep["names"])
+        prefixes.extend(ep["name_prefixes"])
+        for receiver, methods in ep["decorator_type_methods"].items():
+            type_methods.setdefault(receiver, set()).update(methods)
+    exact = _python_metadata_entry_points(project_root) | _typed_decorator_entry_points(
+        graph, project_root, type_methods,
+    )
+    return dict(entry_point_decorators=all_decorators, entry_point_names=all_names,
+                entry_point_prefixes=prefixes, entry_point_qualified_names=sorted(exact))
+
+
 def find_dead_code(
     project_path: str,
     kind: str | None = None,
@@ -1223,7 +1260,7 @@ def find_dead_code(
     if kind not in {None, "function", "class"}:
         raise ValueError("kind must be 'function', 'class', or None")
 
-    from .project_iter import _find_project_root, _file_to_module, _collect_source_files, detect_project_languages
+    from .project_iter import _find_project_root, _file_to_module, _collect_source_files
     from .refs import _get_or_build_fact_graph
     from .impact import _is_test_file
     t0 = time.monotonic()
@@ -1231,30 +1268,6 @@ def find_dead_code(
 
     # Build the FactGraph and run the unified Datalog dead code query.
     graph = _get_or_build_fact_graph(project_path)
-
-    # Detect project languages and merge entry-point configs from all.
-    detected_langs = detect_project_languages(scan_root)
-    all_ep_decorators: list[str] = []
-    all_ep_basenames: list[str] = []
-    all_ep_names: list[str] = []
-    all_ep_prefixes: list[str] = []
-    all_ep_type_methods: dict[str, set[str]] = {}
-    for lang in (detected_langs or ["python"]):
-        ep = _get_entry_point_config(lang)
-        all_ep_decorators.extend(ep["decorators"])
-        all_ep_basenames.extend(ep["decorator_basenames"])
-        all_ep_names.extend(ep["names"])
-        all_ep_prefixes.extend(ep["name_prefixes"])
-        for type_name, methods in ep["decorator_type_methods"].items():
-            all_ep_type_methods.setdefault(type_name, set()).update(methods)
-    # Add user-supplied overrides
-    if entry_point_decorators:
-        all_ep_decorators.extend(entry_point_decorators)
-        all_ep_basenames.extend(
-            d.rsplit(".", 1)[-1] for d in entry_point_decorators
-        )
-    if entry_point_names:
-        all_ep_names.extend(entry_point_names)
 
     project_root_resolved = str(Path(_find_project_root(project_path)).resolve())
 
@@ -1300,19 +1313,16 @@ def find_dead_code(
         except Exception:
             logger.debug("Could not enumerate test reference files", exc_info=True)
 
-    exact_entry_points = _python_metadata_entry_points(project_root_resolved)
-    exact_entry_points.update(_typed_decorator_entry_points(
-        graph, project_root_resolved, all_ep_type_methods,
-    ))
+    entry_options = _project_entry_point_options(
+        graph, project_root_resolved, entry_point_decorators, entry_point_names,
+    )
+    exact_entry_points = set(entry_options["entry_point_qualified_names"])
 
     query_options = dict(
-        entry_point_decorators=all_ep_decorators + all_ep_basenames,
-        entry_point_names=all_ep_names,
-        entry_point_prefixes=all_ep_prefixes,
+        **entry_options,
         exclude_reference_paths=excl_ref_paths if excl_ref_paths else None,
         exclude_reference_segments=excl_ref_segments if excl_ref_segments else None,
         exclude_reference_files=excluded_test_files or None,
-        entry_point_qualified_names=sorted(exact_entry_points) or None,
         include_transitive=True,
     )
     raw_dead, raw_unreachable = graph.dead_code_unified(**query_options)
@@ -1321,24 +1331,6 @@ def find_dead_code(
     # dead-code suppression aligned with lint and avoids treating arbitrary
     # substrings (for example ``E501`` or ``notdeadcode``) as this rule.
     _file_noqa_cache: dict[str, dict[int, set[str] | None]] = {}
-
-    def _has_noqa(fp: str, line: int) -> bool:
-        if fp not in _file_noqa_cache:
-            try:
-                from emend.language_plugins import load_plugin
-                from emend.language_registry import detect_language
-
-                source = Path(fp).read_text(errors="replace")
-                language = detect_language(fp) or "python"
-                _file_noqa_cache[fp] = (
-                    load_plugin(language).comment_handler.find_noqa_comments(source)
-                )
-            except OSError:
-                _file_noqa_cache[fp] = {}
-        if line not in _file_noqa_cache[fp]:
-            return False
-        tags = _file_noqa_cache[fp][line]
-        return tags is None or "deadcode" in tags
 
     # Convert SymbolFact results to DeadSymbol, applying Python post-filters.
     dead_symbols: list[DeadSymbol] = []
@@ -1366,7 +1358,7 @@ def find_dead_code(
             continue
 
         # noqa suppression
-        if _has_noqa(abs_fp, sym.line):
+        if _has_deadcode_noqa(abs_fp, sym.line, _file_noqa_cache):
             continue
 
         # Skip symbols in test files — they are entry points by convention
@@ -1626,7 +1618,8 @@ def safe_delete(
         A ``DeletePlan`` with the list of deletions and per-file diffs.
     """
     from emend.ast_utils import find_nested_definitions, find_symbol_by_path
-    from .project_iter import _find_project_root, _file_to_module, _normalize_module_qn
+    from .project_iter import _find_project_root
+    from .impact import _is_test_file
     from emend.analysis_store import AnalysisStore
     from .components import _generate_diff
 
@@ -1645,10 +1638,7 @@ def safe_delete(
             f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}"
         )
 
-    module_root = _find_project_root(selector.file_path)
-    target_module = _normalize_module_qn(_file_to_module(selector.file_path, module_root))
     target_name = selector.symbol_path[-1]
-    target_qn = f"{target_module}.{target_name}" if target_module else target_name
     selector_str = f"{selector.file_path}::{'.'.join(selector.symbol_path)}"
 
     delete_set.append({
@@ -1659,15 +1649,41 @@ def safe_delete(
         "line": target_sym.line_start,
         "reason": "target of delete",
     })
-    delete_qns.add(target_qn)
-
     if cascade:
         # Compute cascade via CozoDB queries on the persisted facts.db.
         # Iteratively finds callees of deleted symbols, then checks
         # whether each callee has references outside the delete set.
-        graph = AnalysisStore.open(scan_root).query_facts()
+        store = AnalysisStore.open(scan_root)
+        graph = store.query_facts()
         fdb = graph.client
         if fdb is not None:
+            # Resolve the selected symbol through the graph's canonical projection;
+            # leaf names are not identities (methods can shadow module functions).
+            rows = fdb.run(
+                "?[mqn] := *search_symbol[fp, mqn, _, local_qn, _, _, _, _, _, _, _, _], "
+                "fp == $fp, local_qn == $qn",
+                {"fp": str(Path(file_path).relative_to(store.project_root)),
+                 "qn": ".".join(selector.symbol_path)},
+            )["rows"]
+            if len(rows) != 1:
+                raise ValueError(f"Cannot resolve unique cascade identity for {selector_str}")
+            delete_qns.add(rows[0][0])
+            entry_points = graph.entry_point_qualified_names(
+                **_project_entry_point_options(graph, str(store.project_root))
+            )
+            candidates = [
+                DeadSymbol(s.file_path, s.name, s.kind, s.line, s.qualified_name, "")
+                for s in graph.symbols() if not s.parent
+            ]
+            # Scan strings once, not once per cascade step; deletion counts all
+            # references, including tests and untracked project sources.
+            unreferenced = _string_literal_filter(
+                candidates, str(store.project_root), True, None, False,
+            )
+            entry_points.update(
+                {s.selector for s in candidates} - {s.selector for s in unreferenced}
+            )
+            noqa_cache: dict = {}
             changed = True
             while changed:
                 changed = False
@@ -1698,27 +1714,17 @@ def safe_delete(
                         '?[mqn, name, kind, fp, line] := '
                         '  callee_of_deleted[mqn], not has_ext_ref[mqn], '
                         '  *symbol[mqn, fp, name, kind, line, _, parent], '
-                        '  parent == "", not *exported_symbol[fp, mqn], '
-                        '  not starts_with(name, "test_"), not starts_with(name, "Test"), '
-                        '  not (starts_with(name, "__"), ends_with(name, "__"))\n'
+                        '  parent == ""\n'
                     )
                 except Exception:
                     logger.debug("CozoDB cascade query failed", exc_info=True)
                     break
                 for row in result["rows"]:
                     mqn, name, sym_kind, fp, line = row
-                    if mqn not in delete_qns:
+                    if mqn not in delete_qns and mqn not in entry_points:
                         # Convert relative path back to absolute.
-                        abs_fp = str(Path(scan_root) / fp) if not Path(fp).is_absolute() else fp
-                        from emend.language_registry import detect_language
-
-                        decorators = [
-                            fact.decorator for fact in graph.decorators_on(mqn)
-                        ]
-                        if _is_likely_entry_point(
-                            name, sym_kind, decorators, 1,
-                            detect_language(abs_fp) or "python",
-                        ):
+                        abs_fp = str(store.project_root / fp)
+                        if _is_test_file(abs_fp) or _has_deadcode_noqa(abs_fp, line, noqa_cache):
                             continue
                         sym_selector = f"{abs_fp}::{name}"
                         delete_set.append({
@@ -1740,6 +1746,7 @@ def safe_delete(
         by_file[d["file_path"]].append(d)
 
     all_diffs: dict[str, str] = {}
+    pending: dict[Path, str] = {}
 
     for fpath, entries in by_file.items():
         fp = Path(fpath)
@@ -1769,11 +1776,17 @@ def safe_delete(
             lines = lines[:start_idx] + lines[end_idx:]
 
         new_code = "".join(lines)
+        from emend import emend_core
+        if not emend_core.validate_syntax(new_code, fp.suffix.lstrip("."), fragment=False):
+            raise ValueError(f"Deletion would leave invalid syntax in {fpath}")
         diff = _generate_diff(fpath, source_code, new_code)
         if diff:
             all_diffs[fpath] = diff
-            if apply:
-                fp.write_text(new_code)
+            pending[fp] = new_code
+
+    if apply:
+        for fp, new_code in pending.items():
+            fp.write_text(new_code)
 
     return DeletePlan(
         target=selector_str,
