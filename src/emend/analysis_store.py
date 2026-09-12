@@ -29,6 +29,7 @@ from emend.sqlite_writer import SQLiteWriter
 
 EXTRACTION_ARTIFACT_VERSION = "12"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
+TYPE_RESULT_VERSION = 3  # Language-correct UTF-16 LSP queries, including cached reads.
 logger = logging.getLogger(__name__)
 
 def collect_symbol_info(filepath: Path, source: str) -> list[SymbolInfo]:
@@ -1202,6 +1203,7 @@ class AnalysisStore:
     def type_context_id(self) -> str:
         """Return configuration, lockfile, and environment identity."""
         digest = hashlib.sha256()
+        digest.update(f"type-results:{TYPE_RESULT_VERSION}\0".encode())
         for relative in (
             ".emend/config.toml", "pyproject.toml", "pyrefly.toml",
             "pyrightconfig.json", "ty.toml", "tsconfig.json", "Cargo.toml",

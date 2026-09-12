@@ -469,53 +469,36 @@ where
     }
 }
 
-/// Python keywords that look like identifiers in tree-sitter but aren't.
-const PYTHON_KEYWORDS: &[&str] = &["True", "False", "None"];
-
-/// Collect all identifier and attribute positions from Python source.
+/// Collect configured identifier and attribute positions from source.
 ///
 /// Returns a list of (name, line, start_col, end_col) tuples, all 0-indexed
 /// (tree-sitter native rows and byte columns).  Used by type_oracle to collect
 /// symbol positions from the parse tree.
-pub fn collect_identifier_positions(source: &str) -> Vec<(String, usize, usize, usize)> {
-    let tree = match parse_python(source) {
+pub fn collect_identifier_positions(source: &str, ext: &str, config: &crate::scope::LanguageConfig) -> Result<Vec<(String, usize, usize, usize)>, String> {
+    let tree = match parse_for_config(source, ext, config)? {
         Some(t) => t,
-        None => return vec![],
+        None => return Ok(vec![]),
     };
 
     let source_bytes = source.as_bytes();
     let root = tree.root_node();
     let mut results: Vec<(String, usize, usize, usize)> = Vec::new();
 
-    fn collect(node: Node, source: &[u8], results: &mut Vec<(String, usize, usize, usize)>) {
-        match node.kind() {
-            "identifier" => {
-                let text = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
-                    .unwrap_or("");
-                if !PYTHON_KEYWORDS.contains(&text) {
-                    let line = node.start_position().row;
-                    let start_col = node.start_position().column;
-                    let end_col = node.end_position().column;
-                    results.push((text.to_string(), line, start_col, end_col));
-                }
-            }
-            "attribute" => {
-                // For `obj.attr`, emit the full dotted name
-                let text = std::str::from_utf8(&source[node.start_byte()..node.end_byte()])
-                    .unwrap_or("");
-                let line = node.start_position().row;
-                let start_col = node.start_position().column;
-                let end_col = node.end_position().column;
-                results.push((text.to_string(), line, start_col, end_col));
-                // Don't recurse into children — we've captured the whole attribute
-                return;
-            }
-            _ => {}
+    fn collect(node: Node, source: &[u8], config: &crate::scope::PatternMatchingSection, results: &mut Vec<(String, usize, usize, usize)>) {
+        let attribute = node.kind() == config.attribute;
+        if attribute || node.kind() == config.identifier
+            || config.extra_identifiers.iter().any(|kind| kind == node.kind())
+        {
+            let text = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).unwrap_or("");
+            results.push((text.to_string(), node.start_position().row,
+                          node.start_position().column, node.end_position().column));
+            // Preserve the full member name rather than overlapping children.
+            if attribute { return; }
         }
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
-                collect(cursor.node(), source, results);
+                collect(cursor.node(), source, config, results);
                 if !cursor.goto_next_sibling() {
                     break;
                 }
@@ -523,8 +506,8 @@ pub fn collect_identifier_positions(source: &str) -> Vec<(String, usize, usize, 
         }
     }
 
-    collect(root, source_bytes, &mut results);
-    results
+    collect(root, source_bytes, &config.pattern_matching, &mut results);
+    Ok(results)
 }
 
 

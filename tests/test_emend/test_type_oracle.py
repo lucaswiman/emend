@@ -639,15 +639,19 @@ class TestFileTypeCache:
         assert client.stop.call_count == 2
 
     def test_result_contract_upgrade_drops_legacy_empty_cache(self, tmp_path, monkeypatch):
+        from emend.type_oracle import load_cached_file_types
+
         target = tmp_path / "target.py"
         target.write_text("value = 1\n")
-        monkeypatch.setattr("emend.type_oracle._TYPE_RESULT_VERSION", 1)
+        monkeypatch.setattr("emend.analysis_store.TYPE_RESULT_VERSION", 2)
         old = create_type_oracle("pyrefly", tmp_path)
         key = old._file_key(target, tmp_path)
         old._cache.put(key, FileTypes(path=str(target)))
-        monkeypatch.setattr("emend.type_oracle._TYPE_RESULT_VERSION", 2)
+        assert load_cached_file_types(target, project_root=tmp_path).complete
+        monkeypatch.setattr("emend.analysis_store.TYPE_RESULT_VERSION", 3)
         current = create_type_oracle("pyrefly", tmp_path)
         assert current._cache.get(key, target) is None
+        assert load_cached_file_types(target, project_root=tmp_path) is None
         current._cache.put(key, FileTypes(path=str(target)))
         assert create_type_oracle("pyrefly", tmp_path)._cache.get(key, target).complete
 
@@ -780,11 +784,14 @@ class TestFileTypeCache:
         assert adapter.infer_file(target, tmp_path).bindings[0].raw_type == "number"
         assert calls == 2
 
-    def test_lsp_batch_opens_one_exact_snapshot_before_hover(self, tmp_path):
+    @pytest.mark.parametrize("external", [False, True])
+    def test_lsp_batch_opens_one_exact_snapshot_before_hover(self, tmp_path, external):
         from emend.analysis_store import AnalysisStore
 
         dependency = tmp_path / "dependency.py"
-        leaf = tmp_path / "leaf.py"
+        leaf_root = tmp_path / ".venv/lib/python3.14/site-packages" if external else tmp_path
+        leaf_root.mkdir(parents=True, exist_ok=True)
+        leaf = leaf_root / "leaf.py"
         other = tmp_path / "other.py"
         target = tmp_path / "target.py"
         unsaved = tmp_path / "unsaved.py"
@@ -793,7 +800,10 @@ class TestFileTypeCache:
         dependency.write_text("from leaf import value\n")
         target.write_text("from dependency import value\nresult = value\n")
         store = AnalysisStore.open(tmp_path)
-        store.update_overlay(leaf, "value = str\n", 1)
+        if external:
+            leaf.write_text("value = str\n")
+        else:
+            store.update_overlay(leaf, "value = str\n", 1)
         store.update_overlay(unsaved, "new_value = str\n", 1)
 
         class FakeLsp:
@@ -846,7 +856,10 @@ class TestFileTypeCache:
         assert lsp.project_changes[-1] == ({str(leaf)}, set())
         oracle.infer_file(other, tmp_path)
         assert lsp.closed == [str(leaf)]
-        store.update_overlay(leaf, "value = float\n", 2)
+        if external:
+            leaf.write_text("value = float\n")
+        else:
+            store.update_overlay(leaf, "value = float\n", 2)
         oracle.infer_file(target, tmp_path)
         assert lsp.opened[str(leaf)] == "value = float\n"
         results = oracle.infer_batch(
@@ -861,6 +874,37 @@ class TestFileTypeCache:
         oracle.infer_batch([target, dependency, unsaved], project_root=tmp_path)
         assert lsp.opened[str(dependency)] == "value = bytes\n"
         assert lsp.changed == {str(dependency): 2, str(leaf): 2}
+
+    @pytest.mark.parametrize("prefix", ['"ascii"', '"é"', '"😀😀😀"'])
+    @pytest.mark.parametrize("suffix,source", [
+        ("py", "value = PREFIX; target = value\n"),
+        ("rs", "fn main() { let from = PREFIX; let target = from; }\n"),
+    ])
+    def test_lsp_hover_uses_language_and_utf16_positions(self, tmp_path, prefix, suffix, source):
+        from unittest.mock import MagicMock
+        from emend.type_oracle import PyrightAdapter, RustAnalyzerAdapter
+
+        source = source.replace("PREFIX", prefix)
+        path = tmp_path / f"sample.{suffix}"
+        path.write_text(source)
+        calls = []
+        lsp = MagicMock()
+        language = "rust" if suffix == "rs" else "python"
+        lsp.hover.side_effect = lambda path, line, col: (
+            calls.append((line, col)) or f"```{language}\nvalue: int\n```"
+        )
+        oracle = RustAnalyzerAdapter() if suffix == "rs" else PyrightAdapter()
+        oracle._get_lsp = lambda root: lsp
+        result = oracle.infer_file(path, tmp_path)
+        names = ["main", "from", "target", "from"] if suffix == "rs" else ["value", "target", "value"]
+        expected, start = [], 0
+        for name in names:
+            offset = source.index(name, start)
+            expected.append((1, len(source[:offset].encode("utf-16-le")) // 2 + 1))
+            start = offset + len(name)
+        assert calls == expected
+        target = next(binding for binding in result.bindings if binding.name == "target")
+        assert target.col_start == len(source[:source.index("target")].encode()) + 1
 
     def test_long_lived_lsp_refreshes_config_and_engine_namespace(
         self, tmp_path, monkeypatch

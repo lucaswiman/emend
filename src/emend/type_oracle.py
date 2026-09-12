@@ -27,7 +27,6 @@ from typing import Literal, Any
 from emend.errors import BUG_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
-_TYPE_RESULT_VERSION = 2  # Earlier caches could contain failed-empty analyses.
 
 TypeBatchInputs = tuple[dict[str, str], dict[str, str], set[str]]
 
@@ -224,7 +223,7 @@ class LSPClient:
         })
 
     def hover(self, path: Path, line: int, col: int) -> str | None:
-        """Send textDocument/hover and return the type string."""
+        """Query a 1-based line/UTF-16 column and return the type string."""
         res = self.send_request("textDocument/hover", {
             "textDocument": {"uri": path.as_uri()},
             "position": {"line": line - 1, "character": col - 1},
@@ -253,7 +252,7 @@ class LSPClient:
 # AST traversal for symbol collection
 # ---------------------------------------------------------------------------
 
-def _collect_symbols(source: str) -> list[tuple[str, int, int, int]]:
+def _collect_symbols(source: str, ext: str = "py", project_root: str = ".") -> list[tuple[str, int, int, int]]:
     """Collect all identifiers and their positions in the source.
 
     Uses the Rust tree-sitter extension for fast parsing.
@@ -261,7 +260,7 @@ def _collect_symbols(source: str) -> list[tuple[str, int, int, int]]:
     (tree-sitter native rows and byte columns).
     """
     from emend import emend_core
-    return emend_core.collect_identifier_positions(source)
+    return emend_core.collect_identifier_positions(source, ext, project_root)
 
 
 # ---------------------------------------------------------------------------
@@ -1249,7 +1248,7 @@ def _type_engine_context(engine: str, options: dict[str, Any]) -> str:
         for key, value in sorted(options.items())
         if key != "db_path"
     }
-    payload = (_TYPE_RESULT_VERSION, engine, executable_identity, executable_version, stable_options)
+    payload = (engine, executable_identity, executable_version, stable_options)
     return hashlib.sha256(repr(payload).encode()).hexdigest()
 
 
@@ -1572,7 +1571,7 @@ class _LSPTypeOracle(TypeOracle):
         self._lsp: LSPClient | None = None
         self._lsp_lock = threading.Lock()
         self._open_documents: dict[str, tuple[str, int]] = {}
-        self._known_project_paths: set[str] | None = None
+        self._known_source_paths: set[str] | None = None
 
     def is_available(self) -> bool:
         return shutil.which(self._tool) is not None
@@ -1597,21 +1596,27 @@ class _LSPTypeOracle(TypeOracle):
                 self._lsp.stop()
             self._lsp = None
             self._open_documents.clear()
-            self._known_project_paths = None
+            self._known_source_paths = None
 
     def _sync_documents(
         self, lsp: LSPClient, sources: dict[str, str], project_paths: set[str]
     ) -> None:
         """Bring the persistent LSP to one exact source snapshot."""
-        if self._known_project_paths is not None:
-            created = project_paths - self._known_project_paths
-            deleted = self._known_project_paths - project_paths
+        # Single-file queries omit unrelated open documents, not necessarily
+        # deleted ones. Stat only those absent from the current owner inventory.
+        known_paths = project_paths | sources.keys() | {
+            path for path in self._open_documents
+            if path not in project_paths and path not in sources and Path(path).is_file()
+        }
+        if self._known_source_paths is not None:
+            created = known_paths - self._known_source_paths
+            deleted = self._known_source_paths - known_paths
             for path in self._open_documents.keys() & deleted:
                 lsp.did_close(Path(path))
                 del self._open_documents[path]
             if created or deleted:
                 lsp.did_change_watched_files(created=created, deleted=deleted)
-        self._known_project_paths = project_paths
+        self._known_source_paths = known_paths
         for path, source in sources.items():
             digest = hashlib.sha256(source.encode()).hexdigest()
             current = self._open_documents.get(path)
@@ -1666,7 +1671,8 @@ class _LSPTypeOracle(TypeOracle):
                 lsp, prepared_sources or {str(path): source}, project_paths
             )
 
-            symbols = _collect_symbols(source)
+            symbols = _collect_symbols(source, path.suffix.lstrip("."), str(root))
+            source_lines = source.encode("utf-8").split(b"\n")
             ft = FileTypes(path=str(path))
 
             for name, line0, col_start0, col_end0 in symbols:
@@ -1675,7 +1681,10 @@ class _LSPTypeOracle(TypeOracle):
                 line = line0 + 1
                 col_start = col_start0 + 1
                 col_end = col_end0 + 1
-                hover_text = lsp.hover(path, line, col_start)
+                # Internal columns are UTF-8 bytes; LSP defaults to UTF-16.
+                prefix = source_lines[line0][:col_start0].decode("utf-8")
+                hover_col = len(prefix.encode("utf-16-le")) // 2 + 1
+                hover_text = lsp.hover(path, line, hover_col)
                 if not hover_text:
                     continue
 

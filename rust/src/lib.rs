@@ -264,13 +264,17 @@ fn files_importing_module(
     Ok(result)
 }
 
-/// Collect all identifier and attribute positions from Python source.
+/// Collect identifier and attribute positions with the configured grammar.
 ///
 /// Returns a list of (name, line, start_col, end_col) tuples, all 0-indexed
 /// (tree-sitter native rows and byte columns).
 #[pyfunction]
-fn collect_identifier_positions(source: &str) -> PyResult<Vec<(String, usize, usize, usize)>> {
-    Ok(pattern::collect_identifier_positions(source))
+#[pyo3(signature = (source, ext="py", project_root="."))]
+fn collect_identifier_positions(source: &str, ext: &str, project_root: &str) -> PyResult<Vec<(String, usize, usize, usize)>> {
+    let config = scope::LanguageConfig::load_for_extension(ext, &PathBuf::from(project_root))
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    pattern::collect_identifier_positions(source, ext, &config)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
 /// Collect all string literal nodes from source code.
