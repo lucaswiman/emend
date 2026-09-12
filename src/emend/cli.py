@@ -80,6 +80,7 @@ _COMMANDS: list[_CmdEntry] = [
     _CmdEntry(app, "saturate",   saturate_cmd, hidden=True),
 
     # ---- top-level hidden aliases for analysis commands ----
+    _CmdEntry(app, "dupes",      dupes_cmd,    hidden=True),
     _CmdEntry(app, "refs",       refs_cmd,     hidden=True, aliases=["references"]),
     _CmdEntry(app, "graph",      graph_cmd,    hidden=True),
     _CmdEntry(app, "deadcode",   dead_code_cmd, hidden=True, aliases=["dead-code", "dead_code"]),

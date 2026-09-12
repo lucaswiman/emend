@@ -1,13 +1,11 @@
 """Experimental near-clone differences; candidates for review, not bug verdicts.
 
-Run with ``uv run python -m emend.inconsistency src/emend``. Python-only for
+Run with ``emend dupes src/emend --near``. Python-only for
 now, sharing the duplicate detector's tree-sitter parsing and canonicalizer.
 """
 
 from collections import Counter, defaultdict
-import argparse
 from difflib import SequenceMatcher, unified_diff
-import json
 from pathlib import Path
 
 from emend.duplicate import (
@@ -16,7 +14,6 @@ from emend.duplicate import (
     _preparse_files,
     canonicalize_subtree,
 )
-from emend.file_collection import collect_source_files_scandir
 from emend.language_registry import detect_language
 
 
@@ -127,21 +124,3 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
                 "diff": "".join(unified_diff(a["source"], b["source"], a["location"], b["location"])),
             })
     return sorted(findings, key=lambda f: (f["category"], -f["similarity"], f["left"], f["right"]))
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("paths", nargs="+", type=Path, help="Files or directories (Python only)")
-    arguments = parser.parse_args(argv)
-    for path in arguments.paths:
-        if not path.exists():
-            parser.error(f"path does not exist: {path}")
-    files = [
-        file for path in arguments.paths
-        for file in (collect_source_files_scandir(str(path)) if path.is_dir() else [path])
-    ]
-    print(json.dumps(find_inconsistencies(files), indent=2))
-
-
-if __name__ == "__main__":
-    main()

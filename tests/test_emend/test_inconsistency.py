@@ -1,18 +1,19 @@
 """Behavioral probes for the experimental near-clone comparison."""
 
 import pytest
+import json
+from typer.testing import CliRunner
 
-from emend.inconsistency import find_inconsistencies, main
+from emend.inconsistency import find_inconsistencies
+from emend.cli import app
 
 
-@pytest.mark.parametrize("arguments, status", [([], 2), (["missing.py"], 2), (["--help"], 0)])
-def test_module_usage(arguments, status, monkeypatch, capsys, tmp_path):
+@pytest.mark.parametrize("arguments, status", [([], 0), (["missing.py"], 2), (["--help"], 0), (["--mode", "exact"], 2)])
+def test_near_cli_usage(arguments, status, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(SystemExit) as error:
-        main(arguments)
-    assert error.value.code == status
-    output = capsys.readouterr()
-    assert "usage:" in (output.err if status else output.out)
+    result = CliRunner().invoke(app, ["dupes", "--near", *arguments])
+    assert result.exit_code == status, result.output
+    assert result.output
 
 
 @pytest.mark.parametrize("change", ["guard", "operator", "literal", "rename", "docstring", "parenthesized_docstring", "indentation", "fstring", "comma", "multi", "non_python"])
@@ -47,6 +48,15 @@ def test_near_clone_differences(tmp_path, change):
     for path, content in zip(files, [original, variants[change]]):
         path.write_text(content)
     findings = find_inconsistencies(files)
+    result = CliRunner().invoke(app, ["analyze", "dupes", str(tmp_path), "--near", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == json.loads(json.dumps(findings))
+    if change == "operator":
+        text = CliRunner().invoke(app, ["dupes", str(tmp_path), "--near"])
+        assert text.exit_code == 0 and "not confirmed bugs" in text.output
+        assert "--- " in text.output and "+        if value < 10:" in text.output
+        limited = CliRunner().invoke(app, ["dupes", str(tmp_path), "--near", "--json", "--limit", "0"])
+        assert limited.exit_code == 0 and json.loads(limited.output) == []
     assert len(findings) == (0 if change in {"rename", "docstring", "parenthesized_docstring", "comma", "multi", "non_python"} else 1)
     if change == "multi":
         relaxed = find_inconsistencies(files, max_regions=3)

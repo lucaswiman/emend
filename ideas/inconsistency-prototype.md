@@ -8,17 +8,20 @@ parser or source-parsing regexes were added.
 Run from the repository's built environment:
 
 ```bash
-UV_CACHE_DIR=.uv-cache uv run --no-sync python -m emend.inconsistency src/emend
-UV_CACHE_DIR=.uv-cache uv run --no-sync python -m emend.inconsistency tests/test_emend
+uv run --no-sync emend dupes src/emend --near --json
+uv run --no-sync emend dupes tests/test_emend --near --json
 make test TESTS="tests/test_emend/test_inconsistency.py tests/test_emend/test_duplicate.py"
 ```
 
 Output is JSON containing both symbol locations, canonical token changes,
 similarity, a category, and a unified source diff. Addition/deletion candidates
 appear first; their direction does not establish which implementation is wrong.
-Nothing is registered in the public CLI, lint, or MCP surface yet.
+Use `emend dupes PATH --near` (or `emend analyze dupes PATH --near`) for text
+diffs, with `--json` for structured output and `--limit` to cap results (50 by
+default). Exact/sequence-specific filter flags are rejected in near mode.
+Lint and MCP integration are not registered yet.
 
-The module accepts one or more paths and supports `--help`; missing paths are
+The command accepts a file or directory (default: current directory); missing paths are
 errors. Mixed-directory scans ignore non-Python files using the language
 registry. Parenthesized docstrings are ignored just like ordinary docstrings.
 
