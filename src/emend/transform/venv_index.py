@@ -31,7 +31,6 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
     Returns the DB path, or ``None`` if venv lookup is disabled / no venv.
     """
     import sqlite3 as _sql3
-    from .cache import _init_cache_schema
 
     from emend.project_config import resolve_environment_path
 
@@ -59,7 +58,8 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
 
     try:
         # Create schema if needed
-        _init_cache_schema(conn)
+        from .cache import _initialize_cache_connection
+        _initialize_cache_connection(conn)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS venv_meta "
             "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -96,7 +96,6 @@ def _build_venv_index(
     """Scan site-packages and populate the venv symbol index."""
     import sqlite3 as _sql3
     from emend.query import _collect_symbols
-    from .cache import _init_cache_schema
 
     sp = Path(site_packages)
     # Collect .py and .pyi files, skipping common non-package dirs
@@ -127,7 +126,8 @@ def _build_venv_index(
     logger.info("Venv index: found %d Python files in %s", len(py_files), site_packages)
 
     conn = _sql3.connect(db_path, timeout=30)
-    _init_cache_schema(conn)
+    from .cache import _initialize_cache_connection
+    _initialize_cache_connection(conn)
 
     # Clear old data
     conn.execute("DELETE FROM symbol_index")

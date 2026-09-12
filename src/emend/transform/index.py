@@ -196,12 +196,12 @@ def _write_index_rows(
 def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int, int]:
     """Own one connection per worker batch, with one transaction per file."""
     import sqlite3
-    from .cache import _init_cache_schema
+    from .cache import _initialize_cache_connection
 
     if not args[3]:
         return (0, 0, 0, 0, 0, 0, 0)
     with closing(sqlite3.connect(args[0], timeout=30)) as conn:
-        _init_cache_schema(conn)
+        _initialize_cache_connection(conn)
         return _index_batch_rows(args, conn)
 
 
@@ -1140,7 +1140,6 @@ def warm_caches(
         _SCHEMA_VERSION,
         _cache_db_dir,
         _get_worktree_id,
-        _init_cache_schema,
     )
     from .project_iter import _find_project_root, _find_source_root, _collect_source_files_scandir
 
@@ -1178,7 +1177,8 @@ def warm_caches(
     import sqlite3 as _sqlite3
     try:
         _init_conn = _sqlite3.connect(db_path)
-        _init_cache_schema(_init_conn)
+        from .cache import _initialize_cache_connection
+        _initialize_cache_connection(_init_conn)
         _init_conn.close()
     except _sqlite3.Error:
         logger.debug("cache schema pre-creation failed", exc_info=True)
@@ -1280,6 +1280,7 @@ def warm_caches(
                     _fts_conn.execute("PRAGMA journal_mode=WAL")
                     _fts_conn.execute("PRAGMA synchronous=NORMAL")
                     fts_count = _rebuild_fts(_fts_conn)
+                    _fts_conn.commit()
                 stats["fts_indexed"] = fts_count
                 logger.info(
                     "warm_caches: FTS index rebuilt (%d rows) in %.3fs",
