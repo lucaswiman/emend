@@ -27,7 +27,7 @@ from emend.symbol_projection import SymbolInfo, _symbol_info_view
 from emend.sqlite_writer import SQLiteWriter
 
 
-EXTRACTION_ARTIFACT_VERSION = "11"
+EXTRACTION_ARTIFACT_VERSION = "12"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 logger = logging.getLogger(__name__)
 
@@ -1363,11 +1363,15 @@ class AnalysisStore:
 
         @cache
         def module_revision(name: str, language: str):
-            exact = module_to_revision.get(name)
+            local_name = name
+            if language == "typescript":
+                from emend.emend_core import resolve_node_import
+                local_name = resolve_node_import(name, "")
+            exact = module_to_revision.get(local_name)
             if exact is not None:
                 return exact
-            matches = list(suffix_to_revisions.get(name, ()))
-            parts = name.split(".")
+            matches = list(suffix_to_revisions.get(local_name, ()))
+            parts = (local_name or "").split(".")
             matches.extend(
                 candidate
                 for index in range(1, len(parts))
@@ -1377,7 +1381,7 @@ class AnalysisStore:
             matches = list({
                 candidate.file_path: candidate for candidate in matches
             }.values())
-            if matches and language != "python":
+            if matches and language == "rust":
                 return matches[0] if len(matches) == 1 else None
             from emend.project_config import resolve_environment_path
             if language not in external_roots:
@@ -1435,6 +1439,8 @@ class AnalysisStore:
                     aliases.append(
                         (ts_base / str(replacement).replace("*", captured)).resolve()
                     )
+            if "baseUrl" in compiler_options:
+                aliases.append((ts_base / name).resolve())
             return aliases
 
         def source_candidates(base: Path, language: str) -> list[Path]:
@@ -1497,16 +1503,17 @@ class AnalysisStore:
                         ) for path in paths
                     )
                 else:
-                    if revision.language == "typescript" and ts_paths:
+                    if revision.language == "typescript":
                         candidates.extend(
                             revisions.get(str(path))
                             for base in typescript_aliases(name)
                             for path in source_candidates(base, revision.language)
                         )
                     normalized = name.replace("::", ".").replace("/", ".")
-                    candidates.append(module_revision(
-                        name if revision.language == "typescript" else normalized, revision.language
-                    ))
+                    if not any(candidates):
+                        candidates.append(module_revision(
+                            name if revision.language == "typescript" else normalized, revision.language
+                        ))
                 resolved_dependencies.update(
                     candidate.file_path for candidate in candidates
                     if candidate is not None

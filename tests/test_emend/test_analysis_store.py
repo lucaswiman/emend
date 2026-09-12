@@ -1046,11 +1046,13 @@ def test_installed_type_dependencies_refresh_and_share_artifacts(tmp_path, monke
 
 @pytest.mark.parametrize("linked", [False, True])
 @pytest.mark.parametrize("extension", ["ts", "d.ts"])
-def test_installed_typescript_relative_dependencies(tmp_path, linked, extension):
+@pytest.mark.parametrize("alias", [{"paths": {"dep": ["./dep.ts"]}}, {"baseUrl": "."}])
+def test_installed_typescript_relative_dependencies(tmp_path, linked, extension, alias):
     root = tmp_path / "project"
     root.mkdir()
     target = root / "app.ts"
     target.write_text('import {value} from "dep"; const result = value;\n')
+    (root / "dep.ts").write_text("export const value = false;\n")
     installed = root / "node_modules"
     installed.mkdir()
     package = tmp_path / "linked-package" if linked else installed / "dep"
@@ -1059,15 +1061,21 @@ def test_installed_typescript_relative_dependencies(tmp_path, linked, extension)
         (installed / "dep").symlink_to(package, target_is_directory=True)
     (package / f"index.{extension}").write_text('import {value} from "./inner"; export {value};\n')
     dependency = package / f"inner.{extension}"
-    dependency.write_text("export const value: number;\n")
+    dependency.write_text("export declare const value: number;\n")
     store = AnalysisStore.open(root)
     initial = store.type_file_identity(target)
-    dependency.write_text('export const value: string;\n')
+    dependency.write_text('export declare const value: string;\n')
     assert store.type_file_identity(target) != initial
-    dependency.write_text("export const value: number;\n")
+    dependency.write_text("export declare const value: number;\n")
     assert store.type_file_identity(target) == initial
     dependency.unlink()
     assert store.type_file_identity(target) != initial
+    (root / "tsconfig.json").write_text(json.dumps({"compilerOptions": alias}))
+    aliased = store.type_file_identity(target)
+    dependency.write_text("export declare const value: boolean;\n")
+    assert store.type_file_identity(target) == aliased
+    (root / "dep.ts").write_text("export const value = 42;\n")
+    assert store.type_file_identity(target) != aliased
 
 
 def test_typed_view_retries_failures_and_refreshes_installed_inputs(tmp_path, monkeypatch):

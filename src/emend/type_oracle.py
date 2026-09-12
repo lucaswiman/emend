@@ -409,7 +409,7 @@ class FileTypes:
     """All type bindings for a single file."""
     path: str
     bindings: list[TypeBinding] = field(default_factory=list)
-    complete: bool = True
+    complete: bool = True  # Successful empty output is distinct from failure.
     # Indexed by (line, col) for fast positional lookup
     _by_position: dict[tuple[int, int], TypeBinding] = field(default_factory=dict, repr=False)
     # Indexed by name for symbol lookup
@@ -1586,6 +1586,7 @@ class _LSPTypeOracle(TypeOracle):
                 logger.info("Starting %s LSP server…", self._tool_name)
                 self._lsp = LSPClient(self._lsp_command(), project_root)
                 if not self._lsp.start():
+                    self._lsp.stop()
                     self._lsp = None
             return self._lsp
 
@@ -1699,6 +1700,7 @@ class _LSPTypeOracle(TypeOracle):
             raise
         except Exception:
             logger.debug("%s infer_file failed for %s", self._tool_name, path, exc_info=True)
+            self._cache_context_changed()
             ft = None
 
         return self._publish_result(

@@ -57,12 +57,14 @@ impl PyScopeResolver {
         } else {
             LanguageConfig::python_default()
         };
-        Ok(Self {
-            inner: ScopeResolver::new_with_module_root(
-                config, root.clone(), module_root.map(PathBuf::from).unwrap_or(root),
-                root_module_file.map(PathBuf::from),
+        let mut inner = match module_root {
+            Some(module_root) => ScopeResolver::new_with_module_root(
+                config, root, PathBuf::from(module_root), None,
             ),
-        })
+            None => ScopeResolver::new(config, root),
+        };
+        inner.root_module_file = root_module_file.map(PathBuf::from);
+        Ok(Self { inner })
     }
 
     /// Index a single file.  Re-indexes only if content hash changed.

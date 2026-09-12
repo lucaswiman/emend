@@ -47,10 +47,13 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
     from .cache import _initialize_cache_connection
 
     from emend.project_config import resolve_environment_path
+    from emend.analysis_store import EXTRACTION_ARTIFACT_VERSION
+    from emend.language_registry import config_identity
 
     site_packages = resolve_environment_path(project_root, language)
     if site_packages is None:
         return None
+    context = repr((EXTRACTION_ARTIFACT_VERSION, config_identity(language)))
 
     db_path = _venv_db_path(project_root, language)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,10 +85,11 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
                 "SELECT path, device, inode, size, mtime_ns, ctime_ns FROM venv_files"
             )
         }
-        row = conn.execute(
-            "SELECT value FROM venv_meta WHERE key = 'environment_path'"
-        ).fetchone()
-        environment_changed = row is None or row[0] != str(site_packages)
+        metadata = dict(conn.execute("SELECT key, value FROM venv_meta"))
+        environment_changed = (
+            metadata.get("environment_path") != str(site_packages)
+            or metadata.get("context") != context
+        )
         changed = [Path(path) for path, identity in current.items()
                    if environment_changed or previous.get(path) != identity]
         removed = (
@@ -96,7 +100,7 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
         if environment_changed or changed or removed:
             _update_venv_index(
                 conn, site_packages, changed, removed, current, project_root,
-                reset=environment_changed, language=language,
+                reset=environment_changed, language=language, context=context,
             )
         conn.close()
         return db_path
@@ -111,7 +115,7 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
 
 
 def _update_venv_index(
-    conn, sp: Path, changed, removed, current, project_root, *, reset=False, language="python"
+    conn, sp: Path, changed, removed, current, project_root, *, context, reset=False, language="python"
 ) -> None:
     """Apply one inventory delta atomically."""
     from emend.analysis_store import AnalysisStore
@@ -204,9 +208,9 @@ def _update_venv_index(
                 "(path, device, inode, size, mtime_ns, ctime_ns, content_hash) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)", indexed_files,
             )
-        conn.execute(
-            "INSERT OR REPLACE INTO venv_meta VALUES ('environment_path', ?)",
-            (str(sp),),
+        conn.executemany(
+            "INSERT OR REPLACE INTO venv_meta VALUES (?, ?)",
+            (("environment_path", str(sp)), ("context", context)),
         )
     logger.info(
         "Venv index: updated %d symbols from %d changed files; removed %d files",
