@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.5.2
+
+- Faster cold indexing: parallel file extraction streams into fact storage,
+  with type checking overlapping fact processing. Cold fact builds use more
+  temporary memory to reduce disk writes; incremental updates remain disk-backed.
+- Ordinary indexing no longer precomputes duplicate analysis; duplicate
+  detection prepares its data on demand.
+- Prevented long native database operations from stalling Python threads and
+  fixed transaction completion and failure handling.
+- Preserved dotted TypeScript module names during cross-file resolution.
+
 ## 0.5.1 (2026-09-08)
 
 ### Upgrade note

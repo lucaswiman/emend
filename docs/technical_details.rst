@@ -235,32 +235,41 @@ side-effect of running the Rust ``PyScopeResolver``: after each file is
 resolved, the qualified-name set is stored in the cache.
 
 **Eager (``emend tool index``).**  ``warm_caches()`` scans the project in parallel
-using a ``ProcessPoolExecutor``.  Each worker subprocess (``_index_batch()``)
-receives a batch of ``(file_path, source_text)`` tuples and performs:
+using a ``ThreadPoolExecutor``.  ``--jobs`` controls file-worker concurrency
+(default: CPU count), not the separate type engine's worker count.  Each
+worker derives and caches a file's search projections:
 
 1. **QN resolution** — ``PyScopeResolver`` → compressed pickle → ``qn_index``.
 2. **Symbol collection** — ``emend_core.collect_symbols_from_str()`` →
    ``symbol_index`` rows (name, kind, line, signature, etc.).
-3. **Import extraction** — regex scan of ``import`` / ``from … import``
-   statements → ``import_graph`` rows.
+3. **Import extraction** — tree-sitter import bindings → ``import_graph`` rows.
 4. **Reference collection** — ``PyScopeResolver`` reference output →
    ``reference_index`` rows (target QN, line, column, ref_kind).
 
 All analysis is handled by the Rust tree-sitter backend.
 
-After all workers finish, the main process performs three additional steps:
+Workers also produce content-addressed native facts.  A bounded queue feeds
+these directly to one fact builder while subsequent files are still being
+processed, without reloading their extraction results.  Cold fact graphs are
+built in memory and bulk-saved to SQLite before atomic publication; incremental
+updates use disk-backed private generations.  Cold builds therefore trade
+higher temporary memory use for fewer disk writes.
+
+After extraction supplies the import inventory, the configured type engine
+runs in a separate subprocess, overlapping the remaining fact writes and
+publication.  It stores its results in ``type_cache``.  Indexing also updates:
 
 - **File manifest** — ``stat()`` every indexed file and writes
   ``(worktree_id, path, mtime_ns, size, content_hash, timestamp)`` to
   ``file_manifest``.  Each worktree maintains its own set of manifest rows.
 - **Git HEAD** — runs ``git rev-parse HEAD`` and stores the SHA in
   ``index_meta`` under the key ``git_head:<worktree_id>``.
-- **Type cache** — runs the configured type engine (pyrefly / pyright / ty)
-  and stores results in ``type_cache``.
+- **Editor search** — populates the full-text search index.
 
-Workers write directly to the SQLite database (WAL mode permits concurrent
-writers across processes).  Files whose content hash already appears in all
-relevant tables are skipped.
+Workers write per-file search rows through their own SQLite connections.
+WAL mode allows readers alongside a writer; SQLite still serializes writers.
+Unchanged extraction and search results are reused.  Ordinary indexing does
+not precompute duplicate analysis; duplicate detection prepares it on demand.
 
 How caches are invalidated
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
