@@ -49,6 +49,10 @@ from emend.policy import (
      "def f():\n    open(x)\n    open(y)\n    close(y)\n", [3]),
     (("open()", "close()"),
      "def f(flag):\n    if flag:\n        open()\n    else:\n        open()\n        close()\n", [5]),
+    (("close()", "use()"), "def f():\n    use()\n    close()\n", []),
+    (("close()", "use()"), "def f():\n    while flag:\n        use()\n        close()\n", [4]),
+    (("close()", "use()"), "def f():\n    while flag:\n        use()\n        close()\n        break\n", []),
+    (("$FD.close()", "$FD.read()"), "def f(fd):\n    while flag:\n        fd.read()\n        fd.close()\n", [4]),
 ])
 def test_sequence_keeps_each_occurrence_and_capture(tmp_path, patterns, source, expected):
     (tmp_path / "app.py").write_text(source)
@@ -75,6 +79,47 @@ def test_sequence_blockers_use_candidate_captures(tmp_path, blocker, position):
     assert sorted(v.line for v in _run_sequence_check(check, policy, str(tmp_path))) == (
         [2 + (position == 0), 6] if position != 1 or blocker == "commit(y)" else [6]
     )
+
+
+@pytest.mark.parametrize("position", [0, 1, 2, None])
+def test_sequence_backedge_blockers(tmp_path, position):
+    body = ["use()", "close()"]
+    if position is not None:
+        body.insert(position, "commit()")
+    (tmp_path / "app.py").write_text("def f():\n    while flag:\n        " + "\n        ".join(body) + "\n")
+    check = SequenceCheck("seq", "bad", [SequenceStep("a", "close()"), SequenceStep("b", "use()")],
+                          [SequencePathConstraint("a", "b", not_through=["commit()"])])
+    assert bool(_run_sequence_check(check, Policy("p", "", "error", [check]), str(tmp_path))) == (position in (1, None))
+
+
+@pytest.mark.parametrize("option", ["type", "nonadjacent", "reversed", "self"])
+def test_sequence_rejects_unsupported_contracts(option, request):
+    check = SequenceCheck("seq", "bad", [SequenceStep(name, f"{name}()") for name in "abc"])
+    if option == "type":
+        check.sequence[0].type_constraint = "int"
+    else:
+        start, end = {"nonadjacent": ("a", "c"), "reversed": ("b", "a"), "self": ("a", "a")}[option]
+        check.path_constraints = [SequencePathConstraint(start, end, not_through=["commit()"])]
+    assert validate_policies([Policy("p", "", "error", [check])])
+    with pytest.raises(ValueError, match="unsupported"):
+        _compile_sequence_query(check, {})
+    from emend.fact_graph import compile_sequence_rule
+    graph = FactGraph()
+    request.addfinalizer(graph.close)
+    with pytest.raises(ValueError, match="unsupported"):
+        compile_sequence_rule(graph, check)
+
+
+@pytest.mark.parametrize("endpoint", ["step", "blocker"])
+def test_sequence_reports_invalid_patterns(tmp_path, endpoint):
+    (tmp_path / "app.py").write_text("def f():\n    start()\n    end()\n")
+    check = SequenceCheck("seq", "bad", [SequenceStep("a", "start()"), SequenceStep("b", "end()")])
+    if endpoint == "step":
+        check.sequence[0].pattern = "("
+    else:
+        check.path_constraints = [SequencePathConstraint("a", "b", not_through=["("])]
+    violations = _run_sequence_check(check, Policy("p", "", "error", [check]), str(tmp_path))
+    assert len(violations) == 1 and violations[0].check_name == "sequence:seq:error"
 
 
 class TestSequenceCheckParsing:
