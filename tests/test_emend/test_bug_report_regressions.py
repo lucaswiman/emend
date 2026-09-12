@@ -746,14 +746,16 @@ def test_move_symbol_split_indented_import(tmp_path, emend_cmd):
         f"Moved import should be indented inside TYPE_CHECKING block.\n"
         f"consumer.py:\n{consumer_content}"
     )
-    assert "    from source_mod import load_bundle" in consumer_content, (
+    assert "from source_mod import load_bundle" in consumer_content, (
         f"Remaining import should be indented inside TYPE_CHECKING block.\n"
         f"consumer.py:\n{consumer_content}"
     )
 
     # The result must be syntactically valid Python.
     try:
-        ast.parse(consumer_content)
+        tree = ast.parse(consumer_content)
+        guard = next(node for node in tree.body if isinstance(node, ast.If))
+        assert [node.module for node in guard.body] == ["dest_mod", "source_mod"]
     except SyntaxError as exc:
         pytest.fail(
             f"consumer.py is not valid Python after move:\n{consumer_content}\n"
