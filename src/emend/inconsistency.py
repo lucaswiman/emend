@@ -5,10 +5,10 @@ now, sharing the duplicate detector's tree-sitter parsing and canonicalizer.
 """
 
 from collections import Counter, defaultdict
+import argparse
 from difflib import SequenceMatcher, unified_diff
 import json
 from pathlib import Path
-import sys
 
 from emend.duplicate import (
     _find_containing_symbol,
@@ -17,10 +17,11 @@ from emend.duplicate import (
     canonicalize_subtree,
 )
 from emend.file_collection import collect_source_files_scandir
+from emend.language_registry import detect_language
 
 
 def _is_docstring(node):
-    if node.kind == "concatenated_string":
+    if node.kind in {"concatenated_string", "parenthesized_expression"}:
         return all(_is_docstring(child) for child in node.named_children())
     return node.kind == "string" and node.text().lstrip("rRuU").startswith(("'", '"'))
 
@@ -51,9 +52,12 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
     shingles (>40 functions) are ignored to bound boilerplate candidate fanout.
     These are deliberately heuristic recall limits, not soundness guarantees.
     """
-    _, parsed = _preparse_files(sorted({str(Path(p).resolve()) for p in files}), None)
+    _, parsed = _preparse_files(sorted({
+        str(Path(p).resolve()) for p in files if detect_language(str(p)) == "python"
+    }), None)
     functions = []
     for path, (content, tree, qn_at, def_loc, symbols) in parsed.items():
+        source_lines = content.splitlines(keepends=True)
         for node in _iter_candidates(tree):
             if node.kind != "function_definition":
                 continue
@@ -82,7 +86,7 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
             functions.append({
                 "location": f"{path}:{line + 1}::{_find_containing_symbol(line, symbols)}",
                 "tokens": tuple(tokens),
-                "source": content.splitlines(keepends=True)[line:node.end_point[0] + 1],
+                "source": source_lines[line:node.end_point[0] + 1],
                 "path": path, "start": node.start_byte, "end": node.end_byte,
             })
 
@@ -125,9 +129,19 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
     return sorted(findings, key=lambda f: (f["category"], -f["similarity"], f["left"], f["right"]))
 
 
-if __name__ == "__main__":
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("paths", nargs="+", type=Path, help="Files or directories (Python only)")
+    arguments = parser.parse_args(argv)
+    for path in arguments.paths:
+        if not path.exists():
+            parser.error(f"path does not exist: {path}")
     files = [
-        file for argument in sys.argv[1:]
-        for file in (collect_source_files_scandir(argument) if Path(argument).is_dir() else [argument])
+        file for path in arguments.paths
+        for file in (collect_source_files_scandir(str(path)) if path.is_dir() else [path])
     ]
     print(json.dumps(find_inconsistencies(files), indent=2))
+
+
+if __name__ == "__main__":
+    main()

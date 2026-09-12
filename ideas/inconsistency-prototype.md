@@ -18,6 +18,10 @@ similarity, a category, and a unified source diff. Addition/deletion candidates
 appear first; their direction does not establish which implementation is wrong.
 Nothing is registered in the public CLI, lint, or MCP surface yet.
 
+The module accepts one or more paths and supports `--help`; missing paths are
+errors. Mixed-directory scans ignore non-Python files using the language
+registry. Parenthesized docstrings are ignored just like ordinary docstrings.
+
 ## Experiment, 2026-09-07
 
 Measured locally on main `54fb850` plus this prototype, scanning each directory

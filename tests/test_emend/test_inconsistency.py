@@ -2,10 +2,20 @@
 
 import pytest
 
-from emend.inconsistency import find_inconsistencies
+from emend.inconsistency import find_inconsistencies, main
 
 
-@pytest.mark.parametrize("change", ["guard", "operator", "literal", "rename", "docstring", "indentation", "fstring", "comma", "multi"])
+@pytest.mark.parametrize("arguments, status", [([], 2), (["missing.py"], 2), (["--help"], 0)])
+def test_module_usage(arguments, status, monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as error:
+        main(arguments)
+    assert error.value.code == status
+    output = capsys.readouterr()
+    assert "usage:" in (output.err if status else output.out)
+
+
+@pytest.mark.parametrize("change", ["guard", "operator", "literal", "rename", "docstring", "parenthesized_docstring", "indentation", "fstring", "comma", "multi", "non_python"])
 def test_near_clone_differences(tmp_path, change):
     original = '''def process(items):
     result = []
@@ -24,16 +34,20 @@ def test_near_clone_differences(tmp_path, change):
         "literal": original.replace("value > 10", "value > 11"),
         "rename": original.replace("items", "records").replace("result", "output"),
         "docstring": original.replace("    result =", '    "Different documentation."\n    result ='),
+        "parenthesized_docstring": original.replace("    result =", '    ("Different documentation.")\n    result ='),
+        "non_python": original.replace("value > 10", "value < 10"),
         "indentation": original.replace("    save(result)", "        save(result)"),
         "fstring": original.replace("    result =", '    f"{audit()}"\n    result ='),
         "comma": original.replace("save(result)", "save(result,)"),
         "multi": original.replace("allowed", "authorized").replace("transform", "convert").replace("save", "persist"),
     }
     files = [tmp_path / "a.py", tmp_path / "b.py"]
+    if change == "non_python":
+        files[1] = files[1].with_suffix(".txt")
     for path, content in zip(files, [original, variants[change]]):
         path.write_text(content)
     findings = find_inconsistencies(files)
-    assert len(findings) == (0 if change in {"rename", "docstring", "comma", "multi"} else 1)
+    assert len(findings) == (0 if change in {"rename", "docstring", "parenthesized_docstring", "comma", "multi", "non_python"} else 1)
     if change == "multi":
         relaxed = find_inconsistencies(files, max_regions=3)
         assert len(relaxed) == 1 and len(relaxed[0]["changes"]) == 3

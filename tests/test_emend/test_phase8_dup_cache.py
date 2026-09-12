@@ -20,6 +20,7 @@ from textwrap import dedent
 
 import pytest
 
+from emend.duplicate import DUP_CACHE_VERSION
 from emend.transform import warm_caches, _cache_db_dir, _compute_duplicate_payloads
 
 
@@ -97,7 +98,7 @@ def test_warm_caches_populates_valid_duplicate_payloads(tmp_path):
     assert len(rows) == 2
 
     for content_hash, version, data in rows:
-        assert version == "4"
+        assert version == DUP_CACHE_VERSION
         payload = pickle.loads(zlib.decompress(data))
         assert isinstance(payload, dict), "Payload should be a dict"
         assert "subtrees" in payload, "Payload should have 'subtrees' key"
@@ -233,7 +234,7 @@ def test_compute_duplicate_payloads_directly(tmp_path):
 
     assert len(rows) == 1
     content_hash, version, data = rows[0]
-    assert version == "4"
+    assert version == DUP_CACHE_VERSION
 
     assert content_hash == expected_hash
 
