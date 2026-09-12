@@ -11,7 +11,6 @@ Tests that verify:
 
 from __future__ import annotations
 
-import hashlib
 import pickle
 import sqlite3
 import zlib
@@ -20,6 +19,7 @@ from textwrap import dedent
 
 import pytest
 
+from emend.duplicate import DUP_CACHE_VERSION, _duplicate_cache_key
 from emend.transform import warm_caches, _cache_db_dir, _compute_duplicate_payloads
 
 
@@ -97,7 +97,7 @@ def test_warm_caches_populates_valid_duplicate_payloads(tmp_path):
     assert len(rows) == 2
 
     for content_hash, version, data in rows:
-        assert version == "4"
+        assert version == DUP_CACHE_VERSION
         payload = pickle.loads(zlib.decompress(data))
         assert isinstance(payload, dict), "Payload should be a dict"
         assert "subtrees" in payload, "Payload should have 'subtrees' key"
@@ -153,9 +153,7 @@ def test_incremental_refresh_on_edit(tmp_path):
     # The new set should differ from the original: the edited file produces a
     # new hash, so the total should have increased by 1 (new entry) while the
     # old entry for that file remains (content-addressed cache never deletes).
-    new_file_hash = hashlib.md5(
-        new_content.encode(), usedforsecurity=False
-    ).hexdigest()
+    new_file_hash = _duplicate_cache_key("sample.py", new_content)
     assert new_file_hash in new_hashes, "New content hash should be in dup_cache"
 
 
@@ -214,9 +212,7 @@ def test_compute_duplicate_payloads_directly(tmp_path):
     py_file.write_text(_SIMPLE_FUNC)
 
     file_contents = [(str(py_file), _SIMPLE_FUNC)]
-    expected_hash = hashlib.md5(
-        _SIMPLE_FUNC.encode(), usedforsecurity=False
-    ).hexdigest()
+    expected_hash = _duplicate_cache_key(str(py_file), _SIMPLE_FUNC)
     conn = sqlite3.connect(str(db_path))
     conn.execute(
         "INSERT INTO dup_cache (hash, version, data) VALUES (?, ?, ?)",
@@ -233,7 +229,7 @@ def test_compute_duplicate_payloads_directly(tmp_path):
 
     assert len(rows) == 1
     content_hash, version, data = rows[0]
-    assert version == "4"
+    assert version == DUP_CACHE_VERSION
 
     assert content_hash == expected_hash
 
@@ -243,8 +239,8 @@ def test_compute_duplicate_payloads_directly(tmp_path):
     assert all("symbol" in item for item in payload["subtrees"])
 
 
-def test_compute_duplicate_payloads_skips_non_python(tmp_path):
-    """_compute_duplicate_payloads should skip non-.py files."""
+def test_compute_duplicate_payloads_skips_unsupported_languages(tmp_path):
+    """Prewarming ignores grammars not supported by duplicate detection."""
     from emend.transform import _init_cache_schema
 
     db_path = tmp_path / "parse.db"
@@ -254,7 +250,7 @@ def test_compute_duplicate_payloads_skips_non_python(tmp_path):
 
     file_contents = [
         (str(tmp_path / "style.css"), "body { color: red; }"),
-        (str(tmp_path / "config.ts"), "const x: number = 1;"),
+        (str(tmp_path / "config.json"), '{"x": 1}'),
     ]
 
     _compute_duplicate_payloads(str(db_path), str(tmp_path), file_contents)
@@ -263,7 +259,7 @@ def test_compute_duplicate_payloads_skips_non_python(tmp_path):
     count = conn.execute("SELECT COUNT(*) FROM dup_cache").fetchone()[0]
     conn.close()
 
-    assert count == 0, "Non-Python files should produce no dup_cache rows"
+    assert count == 0, "Unsupported languages should produce no dup_cache rows"
 
 
 def test_compute_duplicate_payloads_idempotent(tmp_path):

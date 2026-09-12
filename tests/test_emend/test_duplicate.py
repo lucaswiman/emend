@@ -19,6 +19,17 @@ import pytest
 from pathlib import Path
 
 
+def test_canonicalization_preserves_text_around_string_escapes():
+    from emend import emend_core
+    from emend.duplicate import canonicalize_subtree
+
+    forms = [
+        canonicalize_subtree(emend_core.parse_source(source, "py").root, {}, {})
+        for source in ['consume("safe\\n")', 'consume("unsafe\\n")']
+    ]
+    assert forms[0] != forms[1]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

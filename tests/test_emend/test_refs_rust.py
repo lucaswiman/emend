@@ -112,90 +112,27 @@ class TestFindReferencesRust:
             f"Expected at least 2 refs (definition + usage), got {len(refs)}: {refs}"
         )
 
-    def test_refs_finds_variable_references(self, tmp_path):
-        """find_references finds references to a Rust variable."""
+    @pytest.mark.parametrize("filters, lines", [
+        ({}, {2, 3, 4}), ({"writes_only": True}, {2, 3}), ({"reads_only": True}, {3, 4}),
+    ])
+    def test_local_refs_keep_function_scope_and_tail_reads(self, tmp_path, filters, lines):
         from emend.transform import find_references
 
-        project = tmp_path / "project"
-        project.mkdir()
-
-        lib_rs = project / "lib.rs"
-        lib_rs.write_text(
-            "fn compute() -> i32 {\n"
-            "    let count = 0;\n"
-            "    let result = count + 1;\n"
-            "    result\n"
-            "}\n"
-        )
-
-        selector = _make_selector(lib_rs, "count")
-        refs = list(find_references(selector, project_path=str(project)))
-
-        # count is defined on line 2 and read on line 3
-        assert len(refs) >= 2, (
-            f"Expected at least 2 refs (definition + usage), got {len(refs)}: {refs}"
-        )
-
-    def test_refs_writes_only(self, tmp_path):
-        """--writes-only filters to write references."""
-        from emend.transform import find_references
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        lib_rs = project / "lib.rs"
-        lib_rs.write_text(
-            "fn mutate() {\n"
+        path = tmp_path / "lib.rs"
+        path.write_text(
+            "fn mutate() -> i32 {\n"
             "    let mut x = 0;\n"
             "    x = x + 1;\n"
-            "    println!(\"{}\", x);\n"
+            "    x\n"
             "}\n"
+            "fn other() -> i32 { let x = 2; x }\n"
         )
-
-        selector = _make_selector(lib_rs, "x")
-
-        all_refs = list(find_references(selector, project_path=str(project)))
-        writes_only = list(
-            find_references(selector, project_path=str(project), writes_only=True)
-        )
-
-        assert len(writes_only) < len(all_refs), (
-            f"writes_only ({len(writes_only)}) should be fewer than all refs ({len(all_refs)})"
-        )
-        assert all(r.is_write for r in writes_only), (
-            f"All writes_only refs should have is_write=True, got {writes_only}"
-        )
-
-    def test_refs_reads_only(self, tmp_path):
-        """--reads-only filters to read references."""
-        from emend.transform import find_references
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        lib_rs = project / "lib.rs"
-        lib_rs.write_text(
-            "fn mutate() {\n"
-            "    let mut x = 0;\n"
-            "    x = x + 1;\n"
-            "    println!(\"{}\", x);\n"
-            "}\n"
-        )
-
-        selector = _make_selector(lib_rs, "x")
-
-        all_refs = list(find_references(selector, project_path=str(project)))
-        reads_only = list(
-            find_references(selector, project_path=str(project), reads_only=True)
-        )
-
-        assert len(reads_only) > 0, "Expected at least one read reference"
-        assert len(reads_only) <= len(all_refs), (
-            "reads_only should be a subset of all refs"
-        )
-        assert all(not r.is_write for r in reads_only), (
-            f"All reads_only refs should have is_write=False, got {reads_only}"
-        )
+        refs = list(find_references(
+            _make_selector(path, "mutate", "x"), project_path=str(tmp_path), **filters,
+        ))
+        assert {r.line for r in refs} == lines
+        if filters:
+            assert all(r.is_write == filters.get("writes_only", False) for r in refs)
 
     def test_refs_cross_file(self, tmp_path):
         """find_references finds references to a Rust function across files."""

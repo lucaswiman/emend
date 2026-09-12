@@ -207,11 +207,15 @@ Examples:
    emend analyze facts --type references --symbol package.module.func --json
    emend analyze cfg src/module.py --format json
    emend analyze dupes src/                                   # scan whole tree
+   emend dupes src/ --near                                    # near-clone review diffs
    emend analyze dupes --check-file src/emend/foo.py --json   # post-write hook
 
 ``analyze dupes`` detects exact structural duplicates (alpha-renamed AST
 subtrees) and sibling-sequence duplicates (shared statement runs across
-functions). Useful flags:
+functions) in Python, Rust, and TypeScript/JavaScript (including TSX/JSX).
+All modes share language-configured parsing and canonicalization; clusters
+never mix languages. Optional duplicate-cache prewarming supports the same
+languages. Useful flags:
 
 - ``--mode exact|sequence|all`` -- which detector(s) to run.
 - ``--file PATH`` -- restrict the scan to one file or directory (intra-scope only).
@@ -220,6 +224,12 @@ functions). Useful flags:
   code 0 and empty JSON (``[]``) when nothing is found.
 - ``--min-lines N`` / ``--min-score S`` -- tighten the signal/noise floor.
 - ``--json`` -- machine-readable output with line ranges, scores, and members.
+
+``emend dupes PATH --near`` compares near-identical Python, Rust, and
+TypeScript/JavaScript function bodies (including TSX/JSX) within each language and
+prints their differences for review, not confirmed bugs. Use ``--json`` for
+structured results and ``--limit`` to cap pairs (default: 50). Near mode does
+not accept exact/sequence filters such as ``--mode`` or ``--check-file``.
 
 Post-write hook example (Claude Code ``settings.json``): run the duplicate
 check after every successful ``Edit``/``Write`` and surface non-trivial
