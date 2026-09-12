@@ -227,9 +227,10 @@ def _find_impact_via_fact_graph(
                 continue
             try:
                 result = fdb.run(
-                    "?[mqn] := *symbol[mqn, fp, name, _, _, _, _], "
-                    "fp == $fp, name == $name",
-                    {"fp": fp, "name": name},
+                    "?[mqn] := *search_symbol[fp, mqn, name, local_qn, "
+                    "_, _, _, _, _, _, _, _], fp == $fp, name == $name, "
+                    "local_qn == $qn",
+                    {"fp": fp, "name": name, "qn": qn},
                 )
             except Exception:
                 logger.debug(
