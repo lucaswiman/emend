@@ -476,6 +476,17 @@ class TestStatus:
 
 
 class TestServerProtocol:
+    @pytest.mark.parametrize("payload", ["[]", "null", '"hello"', "42", '{"method": 3}', '{"method":"search","params":[]}'])
+    def test_invalid_request_does_not_stop_server(self, tmp_path, monkeypatch, capsys, payload):
+        import io
+        from emend.editor_search import run_editor_server
+
+        monkeypatch.setattr("sys.stdin", io.StringIO(payload + '\n{"id":2,"method":"shutdown"}\n'))
+        run_editor_server(str(tmp_path))
+        responses = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert responses[-2]["error"]["code"] == -32600
+        assert responses[-1] == {"jsonrpc": "2.0", "id": 2, "result": {"ok": True}}
+
     def test_dispatch_search(self, indexed_project):
         from emend.editor_search import EditorSearchEngine, _dispatch
 

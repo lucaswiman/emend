@@ -3198,6 +3198,15 @@ def run_editor_server(project_path: str = ".") -> None:
                 })
                 continue
 
+            if (not isinstance(request, dict)
+                    or not isinstance(request.get("method"), str)
+                    or not isinstance(request.get("params", {}), dict)):
+                _write_json({
+                    "jsonrpc": "2.0", "id": None,
+                    "error": {"code": -32600, "message": "Invalid request"},
+                })
+                continue
+
             req_id = request.get("id")
             method = request.get("method", "")
             params = request.get("params", {})
