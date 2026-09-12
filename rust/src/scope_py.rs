@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 use std::path::PathBuf;
 
-use crate::scope::{LanguageConfig, ScopeResolver, StructuredImport};
+use crate::scope::{config_for_ext, LanguageConfig, ScopeResolver, StructuredImport};
 
 /// Convert a `StructuredImport` to a Python dict.
 fn structured_import_to_pydict(py: Python, si: &StructuredImport) -> PyResult<PyObject> {
@@ -37,12 +37,10 @@ impl PyScopeResolver {
     fn new(project_root: &str, extension: Option<&str>) -> PyResult<Self> {
         let root = PathBuf::from(project_root);
         let config = if let Some(ext) = extension {
-            // Use the same fallback behaviour as find_pattern_in_files: silently
-            // fall back to python_default() when the project-local config fails
-            // to load (e.g. malformed TOML), rather than propagating a
-            // RuntimeError that would silently empty all goto_definition results.
+            // A malformed project-local override must not change the requested
+            // language. Fall back to that language's embedded configuration.
             LanguageConfig::load_for_extension(ext, &root)
-                .unwrap_or_else(|_| LanguageConfig::python_default())
+                .unwrap_or_else(|_| config_for_ext(ext).clone())
         } else {
             LanguageConfig::python_default()
         };
