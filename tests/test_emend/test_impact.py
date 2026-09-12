@@ -88,6 +88,8 @@ class TestFindImpact:
         impacted_names = [s.split("::")[-1] for s in result.impacted_symbols]
         assert "middle_func" in impacted_names
         assert "top_func" in impacted_names
+        selectors = set(result.changed_symbols + result.impacted_symbols)
+        assert all(e.source in selectors and e.target in selectors for e in result.edges)
 
     def test_impact_detects_test_files(self, tmp_path):
         """Impact analysis identifies impacted test files."""
@@ -407,45 +409,44 @@ class TestImpactHelpers:
 class TestImpactWithDiff:
     """Tests for impact analysis via git diff input."""
 
-    def test_impact_diff_with_git_repo(self, tmp_path):
-        """Impact analysis can parse a diff and find changed symbols."""
+    @pytest.mark.parametrize("ext", ["py", "ts"])
+    @pytest.mark.parametrize("change", ["replace", "delete_line", "delete_symbol", "delete_file"])
+    def test_impact_diff_with_git_repo(self, tmp_path, change, ext):
+        """Both sides of a diff contribute identities, including deletions."""
         import subprocess
 
         project = tmp_path / "project"
         project.mkdir()
 
-        # Initialize git repo
-        subprocess.run(
-            ["git", "init", "-b", "main"], cwd=str(project),
-            capture_output=True, check=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.email", "test@test.com"],
-            cwd=str(project), capture_output=True, check=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test"],
-            cwd=str(project), capture_output=True, check=True,
-        )
-        subprocess.run(
-            ["git", "config", "commit.gpgsign", "false"],
-            cwd=str(project), capture_output=True, check=True,
-        )
+        def git(*args):
+            subprocess.run(["git", *args], cwd=project, capture_output=True, check=True)
 
-        lib = project / "lib.py"
-        lib.write_text("def greet():\n    return 'hello'\n")
-
-        subprocess.run(
-            ["git", "add", "."], cwd=str(project),
-            capture_output=True, check=True,
+        git("init", "-b", "main")
+        for key, value in [("user.email", "test@test.com"), ("user.name", "Test"), ("commit.gpgsign", "false")]:
+            git("config", key, value)
+        (project / "pkg").mkdir()
+        lib = project / "pkg" / f"lib.{ext}"
+        original = ("def greet():\n" if ext == "py" else "export function greet() {\n")
+        original += "    print('hello')\n    return 'hello'\n" + ("" if ext == "py" else "}\n")
+        lib.write_text(original)
+        test_file = project / f"test_lib.{ext}"
+        test_file.write_text(
+            "from pkg.lib import greet\ndef test_greet():\n    assert greet() == 'hello'\n"
+            if ext == "py" else
+            'import { greet } from "./pkg/lib";\nfunction test_greet() { greet(); }\n'
         )
-        subprocess.run(
-            ["git", "commit", "-m", "init"],
-            cwd=str(project), capture_output=True, check=True,
-        )
+        git("add", ".")
+        git("commit", "-m", "init")
 
         # Modify the file (unstaged change -- git diff HEAD will pick it up)
-        lib.write_text("def greet():\n    return 'hi there'\n")
+        if change == "delete_file":
+            lib.unlink()
+        else:
+            lib.write_text({
+                "replace": original.replace("return 'hello'", "return 'hi there'"),
+                "delete_line": original.replace("    print('hello')\n", ""),
+                "delete_symbol": "",
+            }[change])
 
         from emend.transform import find_impact
 
@@ -455,6 +456,23 @@ class TestImpactWithDiff:
         assert len(result.changed_symbols) >= 1
         changed_names = [s.split("::")[-1] for s in result.changed_symbols]
         assert "greet" in changed_names
+        assert result.impacted_tests == [f"{test_file}::test_greet"]
+        # Committed endpoints must not be interpreted using today's line map.
+        git("add", "-u")
+        git("commit", "-m", "change")
+        lib.write_text("def unrelated():\n    return 0\n")
+        from emend.transform.impact import _parse_diff_to_selectors
+        assert _parse_diff_to_selectors("HEAD~1..HEAD", str(project)) == [f"{lib}::greet"]
+
+    def test_diff_headers_are_not_hunk_payload(self):
+        from emend.transform.impact import _parse_diff
+        [changed] = _parse_diff(
+            'diff --git a/space name.py b/space name.py\n'
+            '--- a/space name.py\t\n+++ b/space name.py\t\n'
+            '@@ -2 +2 @@\n--- a/fake.py\n+++ b/fake.py\n'
+        )
+        assert changed.paths == ["space name.py", "space name.py"]
+        assert changed.lines == [[2], [2]]
 
 
 class TestFindImpactFactGraph:
