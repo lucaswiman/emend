@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.5.2
+
+- Linux wheels for free-threaded Python 3.13 and 3.14 now support glibc 2.17+
+  on x86_64 and aarch64, instead of requiring glibc 2.39.
+- Extended exact and statement-sequence duplicate detection to Rust and
+  TypeScript/JavaScript, including TSX/JSX. Added experimental `emend dupes
+  --near` to show near-clone differences for review across those languages
+  and Python; findings are review candidates, not confirmed bugs.
+- Fixed duplicate matching around string escapes and Rust/TypeScript local
+  scope resolution, including Rust tail expressions and arrow parameters.
+- Faster cold indexing: parallel file extraction streams into fact storage,
+  with type checking overlapping fact processing. Cold fact builds use more
+  temporary memory to reduce disk writes; incremental updates remain disk-backed.
+- Ordinary indexing no longer precomputes duplicate analysis; duplicate
+  detection prepares its data on demand.
+- Prevented long native database operations from stalling Python threads and
+  fixed transaction completion and failure handling.
+- Preserved dotted TypeScript module names during cross-file resolution.
+
 ## 0.5.1 (2026-09-08)
 
 ### Upgrade note
