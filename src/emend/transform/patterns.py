@@ -240,6 +240,12 @@ def find_pattern(
 
     # Parse pattern
     pattern = parse_pattern(pattern_str)
+    oracle_constraints = {
+        mv.name: parse_oracle_type_constraint(mv.type_constraint)
+        for mv in pattern.metavars if is_oracle_type_constraint(mv.type_constraint)
+    }
+    if oracle_constraints and type_oracle is None:
+        raise ValueError("Type-constrained matching requires a type oracle")
 
     # Read file (or use source_override)
     if source_override is not None:
@@ -325,15 +331,10 @@ def find_pattern(
         )
 
     # Post-filter by TypeOracle type constraints
-    if type_oracle is not None:
-        oracle_constraints = {}
-        for mv in pattern.metavars:
-            if is_oracle_type_constraint(mv.type_constraint):
-                oracle_constraints[mv.name] = parse_oracle_type_constraint(mv.type_constraint)
-        if oracle_constraints:
-            matches = _filter_matches_by_type_oracle(
-                matches, oracle_constraints, type_oracle, file_path
-            )
+    if oracle_constraints:
+        matches = _filter_matches_by_type_oracle(
+            matches, oracle_constraints, type_oracle, file_path
+        )
 
     return matches
 
