@@ -252,18 +252,23 @@ def find_pattern(
 
     # ``None`` is the auto-detection sentinel.  An explicit language must be
     # honored even when the file extension suggests something else.
-    explicit_language = language is not None
     if language is None:
         from emend.language_registry import detect_language
         language = detect_language(file_path) or "python"
 
-    # Compile pattern and constraints to Rust IR
-    rust_ir = compile_pattern_to_rust_ir(pattern_str, language=language)
+    from emend.language_registry import get_extensions
+    extensions = get_extensions(language)
+    ext = Path(file_path).suffix.lstrip('.') if file_path else None
+    if ext not in extensions:
+        ext = extensions[0] if extensions else ext
+
+    # Compile pattern, constraints and source with the same grammar dialect.
+    rust_ir = compile_pattern_to_rust_ir(pattern_str, language=language, extension=ext)
     if rust_ir is None:
         raise ValueError(f"Pattern '{pattern_str}' could not be compiled to Rust IR")
 
-    inside_ir = compile_constraint_to_rust_ir(inside, language=language) if inside else None
-    not_inside_ir = compile_constraint_to_rust_ir(not_inside, language=language) if not_inside else None
+    inside_ir = compile_constraint_to_rust_ir(inside, language=language, extension=ext) if inside else None
+    not_inside_ir = compile_constraint_to_rust_ir(not_inside, language=language, extension=ext) if not_inside else None
     
     if inside and inside_ir is None:
         raise ValueError(f"Unknown inside/not_inside constraint: '{inside}'")
@@ -271,12 +276,6 @@ def find_pattern(
         raise ValueError(f"Unknown inside/not_inside constraint: '{not_inside}'")
 
     # Find matches using Rust engine
-    ext = Path(file_path).suffix.lstrip('.') if file_path else None
-    if explicit_language:
-        from emend.language_registry import get_extensions
-        extensions = get_extensions(language)
-        if extensions and ext not in extensions:
-            ext = extensions[0]
     raw_matches = _rust.find_pattern_in_files(
         [(str(file_path), source_code)], rust_ir, inside_ir, not_inside_ir,
         extension=ext
@@ -299,10 +298,13 @@ def find_pattern(
     # Post-filter by scope if requested
     if scope is not None:
         from emend.ast_utils import find_nested_definitions, find_symbol_by_path
-        symbols = find_nested_definitions(file_path, ext=ext)
+        symbols = find_nested_definitions(file_path, ext=ext, source_override=source_code)
         target_sym = find_symbol_by_path(symbols, scope)
         if target_sym:
-            matches = [m for m in matches if m.line is not None and target_sym.line_start <= m.line <= target_sym.line_end]
+            starts = [0] + [i + 1 for i, byte in enumerate(source_code.encode()) if byte == 10]
+            matches = [m for m in matches if m.line is not None and m.end_line is not None
+                       and target_sym.start_byte <= starts[m.line - 1] + m.col
+                       and starts[m.end_line - 1] + m.end_col <= target_sym.end_byte]
         else:
             matches = []
 
@@ -366,27 +368,21 @@ def _remove_symbol_content(selector: ExtendedSelector) -> tuple[str, str]:
 
     # Use tree-sitter symbols to find the target symbol's range
     from emend.ast_utils import find_nested_definitions, find_symbol_by_path
-    symbols = find_nested_definitions(str(file_path), ext=selector.extension)
+    source_code = file_path.read_text()
+    symbols = find_nested_definitions(str(file_path), ext=selector.extension, source_override=source_code)
     sym = find_symbol_by_path(symbols, selector.symbol_path)
     
     if sym is None:
         raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
 
-    # Read original source
-    source_code = file_path.read_text()
-    lines = source_code.splitlines(keepends=True)
-    
-    # Symbols in tree-sitter include decorators if they are part of a decorated_definition.
-    # Our NestedSymbol uses decorator_line_start if decorators are present.
-    start_line = sym.decorator_line_start if sym.decorator_line_start is not None else sym.line_start
-    
-    # Remove the specified lines (1-indexed)
-    # We want to remove the range [start_line, sym.line_end]
-    start_idx = start_line - 1
-    end_idx = sym.line_end
-    
-    new_lines = lines[:start_idx] + lines[end_idx:]
-    new_code = "".join(new_lines)
+    data = source_code.encode()
+    start, end = sym.start_byte, sym.end_byte
+    line_start = data.rfind(b'\n', 0, start) + 1
+    line_end = data.find(b'\n', end)
+    line_end = len(data) if line_end < 0 else line_end + 1
+    if not data[line_start:start].strip() and not data[end:line_end].strip():
+        start, end = line_start, line_end
+    new_code = (data[:start] + data[end:]).decode()
 
     return source_code, new_code
 
@@ -433,23 +429,17 @@ def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
 
     # Handle symbol-based selectors
     from emend.ast_utils import find_nested_definitions, find_symbol_by_path
-    symbols = find_nested_definitions(str(file_path), ext=selector.extension)
+    source_code = file_path.read_text()
+    symbols = find_nested_definitions(str(file_path), ext=selector.extension, source_override=source_code)
     sym = find_symbol_by_path(symbols, selector.symbol_path)
     
     if sym is None:
         raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
 
-    # Extract source lines
-    source_code = file_path.read_text()
-    lines = source_code.splitlines(keepends=True)
-    
-    # Symbols in tree-sitter include decorators if they are part of a decorated_definition.
-    # Our NestedSymbol uses decorator_line_start if decorators are present.
-    start_line = sym.decorator_line_start if sym.decorator_line_start is not None else sym.line_start
-    
-    # line numbers are 1-indexed
-    symbol_lines = lines[start_line - 1 : sym.line_end]
-    code = "".join(symbol_lines)
+    data = source_code.encode()
+    line_start = data.rfind(b'\n', 0, sym.start_byte) + 1
+    prefix = data[line_start:sym.start_byte]
+    code = ((prefix if not prefix.strip() else b'') + data[sym.start_byte:sym.end_byte]).decode()
 
     # Symbol source is always dedented (the `dedent` flag only applies to
     # line-based selectors above): raw lines come from a potentially indented

@@ -277,7 +277,7 @@ def _pattern_spans(
         groups[(lang, extension)].append((path, source))
     rows = []
     for (lang, extension), pairs in groups.items():
-        ir = compile_pattern_to_rust_ir(pattern, language=lang)
+        ir = compile_pattern_to_rust_ir(pattern, language=lang, extension=extension)
         if ir is None:
             raise ValueError(f"Pattern {pattern!r} could not be compiled")
         rows.extend(emend_core.find_pattern_spans_in_files(

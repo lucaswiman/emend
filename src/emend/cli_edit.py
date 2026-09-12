@@ -1,4 +1,3 @@
-import logging
 import sys
 from pathlib import Path
 from typing import Annotated, Optional
@@ -23,7 +22,6 @@ from emend.component_selector import parse_extended_selector
 from emend.transform import (
     cmd_add,
     cmd_edit,
-    extract_pattern_literals,
     move_module,
     move_symbol,
     rename_module,
@@ -326,46 +324,15 @@ def replace_cmd(
         _lang = _state["language"]
         files, is_multi_file = resolve_file_scopes(paths, language=_lang)
 
-        # Pre-filter: use Rust matcher to find which files actually have
-        # matches, so we only need to process those files.
         file_strs = [str(f) for f in files]
-        if is_multi_file and len(file_strs) > 1:
-            import time as _time
-            _logger = logging.getLogger("emend.replace")
-            from emend import emend_core
-            from emend.pattern import compile_pattern_to_rust_ir, compile_constraint_to_rust_ir
+        if len(file_strs) > 1:
+            from emend.transform.project_iter import find_pattern_in_project
 
-            # First: substring pre-filter via Rust parallel I/O
-            literals = extract_pattern_literals(pattern)
-            _t0 = _time.monotonic()
-            file_contents = emend_core.read_and_filter_files(file_strs, literals)
-            _logger.info("read_and_filter: %d -> %d files in %.3fs", len(file_strs), len(file_contents), _time.monotonic() - _t0)
-
-            # Second: try structural pre-filter via Rust tree-sitter matcher
-            pattern_ir = compile_pattern_to_rust_ir(pattern, language=_lang)
-            if pattern_ir is not None:
-                inside_ir = compile_constraint_to_rust_ir(inside, language=_lang) if inside else None
-                not_inside_ir = compile_constraint_to_rust_ir(not_inside, language=_lang) if not_inside else None
-                if (inside is None or inside_ir is not None) and \
-                   (not_inside is None or not_inside_ir is not None):
-                    from emend.language_registry import get_extensions
-
-                    extensions = get_extensions(_lang)
-                    _t0 = _time.monotonic()
-                    raw_matches = emend_core.find_pattern_in_files(
-                        list(file_contents), pattern_ir, inside_ir, not_inside_ir,
-                        extension=extensions[0] if extensions else None,
-                    )
-                    candidate_files = {m[0] for m in raw_matches}
-                    _logger.info("rust pre-filter: %d -> %d files with matches in %.3fs",
-                                 len(file_contents), len(candidate_files), _time.monotonic() - _t0)
-                    file_strs = sorted(candidate_files)
-                else:
-                    _logger.info("constraint could not compile to Rust IR, skipping structural pre-filter")
-                    file_strs = [fp for fp, _ in file_contents]
-            else:
-                _logger.info("pattern could not compile to Rust IR, skipping structural pre-filter")
-                file_strs = [fp for fp, _ in file_contents]
+            candidates = {match.file_path for match in find_pattern_in_project(
+                pattern, file_strs, scope=scope, inside=inside, not_inside=not_inside,
+                type_oracle=oracle, language=_lang,
+            )}
+            file_strs = [path for path in file_strs if path in candidates]
 
         # Collect diffs across all files
         all_diffs = []

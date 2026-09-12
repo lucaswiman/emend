@@ -104,7 +104,7 @@ class PatternCompiler(ABC):
     """Abstract interface for compiling pattern strings to the Rust IR."""
 
     @abstractmethod
-    def compile(self, pattern_str: str) -> dict | None:
+    def compile(self, pattern_str: str, *, extension: str | None = None) -> dict | None:
         """Return a Rust-IR dict for *pattern_str*, or ``None`` if unsupported."""
         ...
 
@@ -541,7 +541,7 @@ class TreeSitterPatternCompiler(PatternCompiler):
     def __init__(self, language: str) -> None:
         self.language = language
 
-    def compile(self, pattern_str: str) -> dict | None:
+    def compile(self, pattern_str: str, *, extension: str | None = None) -> dict | None:
         from emend import emend_core
         from emend.language_registry import get_extensions
         from emend.pattern import (
@@ -586,7 +586,7 @@ class TreeSitterPatternCompiler(PatternCompiler):
 
         # 3. Parse with tree-sitter via emend_core
         exts = get_extensions(self.language)
-        ext = exts[0] if exts else "py"
+        ext = extension or (exts[0] if exts else "py")
 
         try:
             ir = emend_core.compile_pattern_treesitter(temp_code, ext)

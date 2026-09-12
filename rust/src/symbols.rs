@@ -21,6 +21,8 @@ pub struct RustSymbol {
     pub line: usize,
     pub end_line: usize,
     pub col_offset: usize,
+    pub start_byte: Option<usize>,
+    pub end_byte: Option<usize>,
     pub children: Vec<RustSymbol>,
     pub path: Vec<String>,
     pub depth: usize,
@@ -28,6 +30,19 @@ pub struct RustSymbol {
     pub decorator_line_start: Option<usize>,
     pub param_names: Vec<String>,
     pub bases: Vec<String>,
+}
+
+fn declaration_start(mut node: tree_sitter::Node, cfg: &crate::scope::SymbolsSection) -> usize {
+    let mut start = node.start_byte();
+    while let Some(previous) = node.prev_named_sibling() {
+        if previous.kind() == cfg.decorator_node() {
+            start = previous.start_byte();
+        } else if !previous.is_extra() {
+            break;
+        }
+        node = previous;
+    }
+    start
 }
 
 /// Convert a RustSymbol tree to a Python dict (recursively).
@@ -42,6 +57,8 @@ pub fn symbol_to_pydict(_py: Python, sym: &RustSymbol) -> PyResult<PyObject> {
     d.set_item("line", sym.line)?;
     d.set_item("end_line", sym.end_line)?;
     d.set_item("col_offset", sym.col_offset)?;
+    d.set_item("start_byte", sym.start_byte)?;
+    d.set_item("end_byte", sym.end_byte)?;
     d.set_item("depth", sym.depth)?;
 
     let path_list = PyList::new(_py, sym.path.iter().map(|s| s.as_str()))?;
@@ -750,6 +767,10 @@ fn collect_from_body(
             // Transparent declaration wrappers do not introduce a lexical scope.
             let mut inner = collect_from_body(child, source, depth, max_depth, path,
                 selector_path, defined_names_stack, in_class, cfg);
+            if inner.len() == 1 {
+                inner[0].start_byte = Some(child.start_byte());
+                inner[0].end_byte = Some(child.end_byte());
+            }
             symbols.append(&mut inner);
         } else if !expr_stmt_kind.is_empty() && kind == expr_stmt_kind {
             // Variable assignments inside classes/modules.
@@ -780,6 +801,8 @@ fn collect_from_body(
                                     line: start_line,
                                     end_line,
                                     col_offset,
+                                    start_byte: Some(inner_child.start_byte()),
+                                    end_byte: Some(inner_child.end_byte()),
                                     children: vec![],
                                     path: current_path,
                                     depth,
@@ -885,6 +908,8 @@ fn emit_function(
                                 line: 0,
                                 end_line: 0,
                                 col_offset: 0,
+                                start_byte: None,
+                                end_byte: None,
                                 children: vec![],
                                 path: vec![],
                                 depth: depth + 1,
@@ -915,6 +940,8 @@ fn emit_function(
             line: start_line,
             end_line,
             col_offset,
+            start_byte: Some(declaration_start(outer_node, cfg)),
+            end_byte: Some(outer_node.end_byte()),
             children,
             path: current_path,
             depth,
@@ -995,6 +1022,8 @@ fn emit_class(
             line: start_line,
             end_line,
             col_offset,
+            start_byte: Some(declaration_start(outer_node, cfg)),
+            end_byte: Some(outer_node.end_byte()),
             children,
             path: current_path,
             depth,

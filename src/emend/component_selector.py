@@ -46,6 +46,8 @@ class NestedSymbol:
     decorator_line_start: int | None = None  # Line number of first decorator
     parameters: list[str] = field(default_factory=list)
     children: list['NestedSymbol'] = field(default_factory=list)
+    start_byte: int | None = None
+    end_byte: int | None = None
 
 
 @dataclass

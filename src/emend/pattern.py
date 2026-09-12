@@ -251,16 +251,16 @@ def _build_metavar_map_and_replace(
     return temp_code, metavar_map
 
 
-def compile_pattern_to_rust_ir(pattern_str: str, language: str = "python") -> dict | None:
+def compile_pattern_to_rust_ir(pattern_str: str, language: str = "python", *, extension: str | None = None) -> dict | None:
     """Compile a pattern through its language plugin using tree-sitter."""
     from emend.language_plugins import load_plugin
 
     compiler = load_plugin(language).pattern_compiler
-    return compiler.compile(pattern_str) if compiler is not None else None
+    return compiler.compile(pattern_str, extension=extension) if compiler is not None else None
 
 
 def compile_constraint_to_rust_ir(
-    constraint: str | None, language: str = "python"
+    constraint: str | None, language: str = "python", *, extension: str | None = None
 ) -> dict | None:
     """Compile an inside/not_inside constraint string to Rust IR dict."""
     if constraint is None:
@@ -355,14 +355,14 @@ def compile_constraint_to_rust_ir(
 
     stripped = constraint.rstrip()
     if stripped.endswith(":"):
-        ir = compile_pattern_to_rust_ir(stripped, language=language)
+        ir = compile_pattern_to_rust_ir(stripped, language=language, extension=extension)
         if ir is not None:
             return ir
 
     # Users often omit the trailing colon on compound statement headers;
     # normalise before trying the pattern compiler.
     if not stripped.endswith(":") and _COMPOUND_HEADER_RE.match(stripped + ":"):
-        ir = compile_pattern_to_rust_ir(stripped + ":", language=language)
+        ir = compile_pattern_to_rust_ir(stripped + ":", language=language, extension=extension)
         if ir is not None:
             return ir
 

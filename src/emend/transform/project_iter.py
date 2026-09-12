@@ -145,35 +145,38 @@ def find_pattern_in_project(
         or scope_local
         or type_oracle is not None
     )
+    from emend.language_registry import get_extensions
+    extensions = get_extensions(language)
+    dialects = {Path(fp).suffix.lstrip('.') for fp, _ in file_contents}
+    extension = next(iter(dialects)) if len(dialects) == 1 else None
+    if extension not in extensions:
+        extension = extensions[0] if extensions else None
 
-    if not has_constraints:
+    if not has_constraints and len(dialects) == 1:
         from emend.pattern import (
             compile_pattern_to_rust_ir,
             compile_constraint_to_rust_ir,
         )
 
-        pattern_ir = compile_pattern_to_rust_ir(pattern_str, language=language)
+        pattern_ir = compile_pattern_to_rust_ir(pattern_str, language=language, extension=extension)
         if pattern_ir is not None:
             inside_ir = (
-                compile_constraint_to_rust_ir(inside, language=language) if inside else None
+                compile_constraint_to_rust_ir(inside, language=language, extension=extension) if inside else None
             )
             not_inside_ir = (
-                compile_constraint_to_rust_ir(not_inside, language=language)
+                compile_constraint_to_rust_ir(not_inside, language=language, extension=extension)
                 if not_inside
                 else None
             )
             if (inside is None or inside_ir is not None) and (
                 not_inside is None or not_inside_ir is not None
             ):
-                from emend.language_registry import get_extensions
-
-                extensions = get_extensions(language)
                 raw = None
                 try:
                     raw = _rust.find_pattern_in_files(
                         list(file_contents), pattern_ir,
                         inside_ir, not_inside_ir,
-                        extension=extensions[0] if extensions else None,
+                        extension=extension,
                     )
                 except Exception:
                     logger.debug("Rust batch path failed, falling back", exc_info=True)

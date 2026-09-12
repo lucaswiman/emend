@@ -27,7 +27,7 @@ from emend.symbol_projection import SymbolInfo, _symbol_info_view
 from emend.sqlite_writer import SQLiteWriter
 
 
-EXTRACTION_ARTIFACT_VERSION = "15"
+EXTRACTION_ARTIFACT_VERSION = "16"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 TYPE_RESULT_VERSION = 3  # Language-correct UTF-16 LSP queries, including cached reads.
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ class AnalysisStore:
                     ).close(), artifacts=True)
                     from emend.language_registry import config_identity
                     config = config_identity(detect_language(f"file.{ext}") or "python")
-                    identity = repr(("2", EXTRACTION_ARTIFACT_VERSION, key, config))
+                    identity = repr(("4", EXTRACTION_ARTIFACT_VERSION, key, config))
                     row = conn.execute(
                         "SELECT payload FROM symbol_projection WHERE identity = ?", (identity,)
                     ).fetchone()

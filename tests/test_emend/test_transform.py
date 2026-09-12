@@ -124,6 +124,7 @@ class TestReplacePattern:
     @pytest.mark.parametrize("language", [None, "typescript"])
     def test_replace_jsx_preserves_dialect(self, tmp_path, extension, language):
         from emend.transform import find_pattern, replace_pattern
+        from emend.checks.flow import _pattern_spans
 
         target = tmp_path / f"component.{extension}"
         target.write_text("const f = () => <div>{print(1)}</div>;\n")
@@ -131,6 +132,32 @@ class TestReplacePattern:
         assert replace_pattern("print($X)", "log($X)", str(target),
                                language=language, apply=True)[1] == 1
         assert target.read_text() == "const f = () => <div>{log(1)}</div>;\n"
+        assert len(find_pattern("<div>{$X}</div>", str(target), language=language)) == 1
+        assert len(_pattern_spans("<div>{$X}</div>", [(str(target), target.read_text())], language=language)) == 1
+        assert replace_pattern("<div>{$X}</div>", "<span>{$X}</span>", str(target),
+                               language=language, apply=True)[1] == 1
+        assert "<span>{log(1)}</span>" in target.read_text()
+
+    @pytest.mark.parametrize("extension,keyword", [("ts", "function"), ("rs", "fn"),
+                                                     ("ts", "export function"), ("rs", "#[test]\nfn"),
+                                                     ("rs", "#[cfg(any())]\n// comment\nfn"),
+                                                     ("rs", "#[cfg(any())]\n/* comment */\nfn")])
+    @pytest.mark.parametrize("separator", [" ", "\n"])
+    def test_symbol_operations_preserve_same_line_neighbors(self, tmp_path, extension, keyword, separator):
+        from emend.transform import find_pattern, replace_pattern, get_symbol_source, remove_symbol
+
+        target = tmp_path / f"symbols.{extension}"
+        keep, change = f'{keyword} keep() {{ print("é"); }}', f'{keyword} change() {{ print(2); }}'
+        target.write_text(keep + separator + change + '\n')
+        selector = sel(target, 'change')
+        assert get_symbol_source(selector) == change + '\n'
+        assert len(find_pattern('print($X)', str(target), scope=['change'])) == 1
+        assert len(find_pattern('print($X)', str(target), scope=['change'],
+                                source_override='\n\n' + target.read_text())) == 1
+        assert replace_pattern('print($X)', 'log($X)', str(target), scope=['change'], apply=True)[1] == 1
+        assert target.read_text() == keep + separator + change.replace('print', 'log') + '\n'
+        remove_symbol(selector, apply=True)
+        assert target.read_text().strip() == keep
 
     @pytest.mark.parametrize("argument", ["1", '"""first\nsecond"""'])
     def test_replace_multiline_preserves_indentation_and_strings(self, tmp_path, argument):
