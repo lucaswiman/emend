@@ -1000,6 +1000,100 @@ def test_type_batch_uses_one_snapshot_and_reuses_linked_worktree_payload(
     assert main_store.type_file_identity(target) == before
 
 
+@pytest.mark.parametrize("extension", ["py", "pyi"])
+@pytest.mark.parametrize("package", [False, True])
+def test_installed_type_dependencies_refresh_and_share_artifacts(tmp_path, monkeypatch, extension, package):
+    main, linked = _linked_worktrees(tmp_path)
+    for root in (main, linked):
+        (root / "target.py").write_text("from dependency import value\nresult = value\n")
+        (root / "pyproject.toml").write_text("[tool.emend.environment_lookup]\nenabled=false\n")
+        installed = root / ".venv/lib/python3.14/site-packages"
+        installed.mkdir(parents=True)
+        dep = installed / "dependency" if package else installed
+        dep.mkdir(exist_ok=True)
+        (dep / f"{'__init__' if package else 'dependency'}.{extension}").write_text(
+            f"from {'.' if package else ''}transitive import value\n"
+        )
+        (dep / f"transitive.{extension}").write_text("value: int = 1\n")
+        (installed / f"unrelated.{extension}").write_text("other = 1\n")
+        (root / "unrelated").mkdir()
+        (root / "unrelated/dependency.py").write_text("value = False\n")
+    target = main / "target.py"
+    store = AnalysisStore.open(main)
+    initial = store.type_file_identity(target)
+    linked_store = AnalysisStore.open(linked)
+    assert linked_store.type_file_identity(linked / "target.py") == initial
+    with sqlite3.connect(store.artifact_path) as db:
+        assert db.execute("SELECT count(*) FROM dependency_import_artifact").fetchone()[0] == 2
+    installed = main / ".venv/lib/python3.14/site-packages"
+    original_read = Path.read_text
+    def no_dependency_read(path, *args, **kwargs):
+        assert not path.is_relative_to(installed), "unchanged dependencies must not be reread"
+        return original_read(path, *args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", no_dependency_read)
+        assert store.type_file_identity(target) == initial
+    (installed / f"unrelated.{extension}").write_text("other = 2\n")
+    assert store.type_file_identity(target) == initial
+    dependency = (installed / "dependency" if package else installed) / f"transitive.{extension}"
+    dependency.write_text("value: str = 'changed'\n")
+    assert store.type_file_identity(target) != initial
+    dependency.write_text("value: int = 1\n")
+    assert store.type_file_identity(target) == initial
+    dependency.unlink()
+    assert store.type_file_identity(target) != initial
+
+
+@pytest.mark.parametrize("linked", [False, True])
+@pytest.mark.parametrize("extension", ["ts", "d.ts"])
+def test_installed_typescript_relative_dependencies(tmp_path, linked, extension):
+    root = tmp_path / "project"
+    root.mkdir()
+    target = root / "app.ts"
+    target.write_text('import {value} from "dep"; const result = value;\n')
+    installed = root / "node_modules"
+    installed.mkdir()
+    package = tmp_path / "linked-package" if linked else installed / "dep"
+    package.mkdir()
+    if linked:
+        (installed / "dep").symlink_to(package, target_is_directory=True)
+    (package / f"index.{extension}").write_text('import {value} from "./inner"; export {value};\n')
+    dependency = package / f"inner.{extension}"
+    dependency.write_text("export const value: number;\n")
+    store = AnalysisStore.open(root)
+    initial = store.type_file_identity(target)
+    dependency.write_text('export const value: string;\n')
+    assert store.type_file_identity(target) != initial
+    dependency.write_text("export const value: number;\n")
+    assert store.type_file_identity(target) == initial
+    dependency.unlink()
+    assert store.type_file_identity(target) != initial
+
+
+def test_typed_view_retries_failures_and_refreshes_installed_inputs(tmp_path, monkeypatch):
+    (tmp_path / "app.py").write_text("from dependency import value\n")
+    installed = tmp_path / ".venv/lib/python3.14/site-packages"
+    installed.mkdir(parents=True)
+    dependency = installed / "dependency.py"
+    dependency.write_text("value = 1\n")
+    class Oracle(_TypedOracle):
+        calls = 0
+        def infer_file(self, path, project_root=None):
+            if not self.calls:
+                type(self).calls += 1
+                return FileTypes(path=str(path), complete=False)
+            return super().infer_file(path, project_root)
+    monkeypatch.setattr("emend.type_oracle.create_type_oracle", lambda **_: Oracle())
+    store = AnalysisStore.open(tmp_path)
+    assert not store.query_facts(include_types=True).types_for("value")
+    typed = store.query_facts(include_types=True)
+    assert typed.types_for("value") and Oracle.calls == 2
+    assert store.query_facts(include_types=True) is typed
+    dependency.write_text("value = 'changed'\n")
+    assert store.query_facts(include_types=True) is not typed
+    assert Oracle.calls == 3
+
+
 def test_typed_fact_view_is_lazy_cached_and_snapshot_bound(tmp_path, monkeypatch):
     source = tmp_path / "app.py"
     source.write_text("value = 1\n")

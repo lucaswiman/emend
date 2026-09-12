@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from functools import cache
 import hashlib
 import importlib.util
 import json
 import logging
 import os
 import pickle
+import posixpath
 from pathlib import Path
 import sqlite3
 import threading
@@ -19,6 +21,7 @@ from collections.abc import Callable, Iterable
 
 from emend.analysis_snapshot import AnalysisSnapshot, ExtractedFile, FileRevision, TypeFact
 from emend.errors import BUG_EXCEPTIONS
+from emend.file_collection import file_stat_identity
 from emend.project_config import find_project_root
 from emend.symbol_projection import SymbolInfo, _symbol_info_view
 from emend.sqlite_writer import SQLiteWriter
@@ -86,6 +89,7 @@ class AnalysisStore:
         ] = {}
         self._observed_loaded = False
         self._symbols: dict[tuple[str, str], tuple] = {}
+        self._external_type_files = {}
 
     def symbols(self, source: str, ext: str = "py") -> tuple:
         """Return immutable syntax symbols; content identity never includes a path."""
@@ -246,12 +250,7 @@ class AnalysisStore:
         path = getattr(graph, "_db_path", None)
         return Path(path) if path is not None else None
 
-    @staticmethod
-    def _stat_identity(stat: os.stat_result) -> tuple[int, int, int, int, int]:
-        return (
-            stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
-            getattr(stat, "st_ctime_ns", int(stat.st_ctime * 1_000_000_000)),
-        )
+    _stat_identity = staticmethod(file_stat_identity)
 
     def close(self) -> None:
         with self._connection_lock:
@@ -513,6 +512,12 @@ class AnalysisStore:
         with self._connection_lock:
             if self._artifact_connection is None:
                 self._artifact_connection = self._read_connection(self.artifact_path)
+                def initialize(db):
+                    db.execute("CREATE TABLE IF NOT EXISTS dependency_import_artifact "
+                               "(identity TEXT PRIMARY KEY, payload BLOB NOT NULL)")
+                    db.execute("CREATE TABLE IF NOT EXISTS source_artifact "
+                               "(content_hash TEXT PRIMARY KEY, payload BLOB NOT NULL)")
+                self.write(initialize, artifacts=True)
             return self._artifact_connection
 
     def _extract_revisions(
@@ -981,8 +986,16 @@ class AnalysisStore:
                 self._type_oracle[1].close()
             self._type_oracle = (oracle_key, oracle)
         cache_context = str(getattr(oracle, "cache_context_id", ""))
+        def type_generation():
+            identities = self.type_file_identities(
+                (revision.file_path for revision in graph.snapshot.files),
+                graph=graph, include_overlays=True,
+            )
+            return hashlib.sha256(repr(sorted(identities.items())).encode()).hexdigest()
+
+        generation = type_generation()
         key = (
-            graph.snapshot.snapshot_id,
+            f"{graph.snapshot.snapshot_id}:{generation}",
             f"{TYPE_FACTS_ARTIFACT_VERSION}:{cache_context}",
             resolved_engine,
         )
@@ -1006,9 +1019,11 @@ class AnalysisStore:
             source_loader=self._revision_source,
         )
         type_facts: list[TypeFact] = []
+        complete = available
         if paths and available:
             try:
                 results = oracle.infer_batch(paths, project_root=self.project_root)
+                complete = all(str(path) in results and results[str(path)].complete for path in paths)
                 for revision in graph.snapshot.files:
                     file_types = results.get(str(Path(revision.file_path).resolve()))
                     if file_types is None:
@@ -1027,6 +1042,7 @@ class AnalysisStore:
                 raise
             except Exception:
                 logger.debug("Could not populate type bindings", exc_info=True)
+                complete = False
         try:
             typed.replace_types_batch(type_facts)
         except BaseException:
@@ -1038,7 +1054,7 @@ class AnalysisStore:
         # started; refresh once and fail rather than returning a mismatch if
         # the project is being edited continuously.
         current_id = self.source_snapshot().snapshot_id
-        if current_id != graph.snapshot.snapshot_id:
+        if current_id != graph.snapshot.snapshot_id or type_generation() != generation:
             typed.close()
             self._unlink(typed_path)
             if _retry:
@@ -1047,12 +1063,14 @@ class AnalysisStore:
                 self.query_facts(), engine, _retry=True
             )
         previous = self._typed_graph
-        self._typed_graph = (key, typed)
+        self._typed_graph = (key, typed) if complete else None
         previous_path = self._graph_path(previous[1]) if previous is not None else None
         if previous_path != typed_path:
             # The old graph may still be held by a reader.  SQLite keeps its
             # open handle valid after unlinking the private backing file.
             self._unlink(previous_path)
+        if not complete:
+            self._unlink(typed_path)
         return typed
 
     @contextmanager
@@ -1229,6 +1247,50 @@ class AnalysisStore:
             include_overlays=include_overlays,
         )[resolved]
 
+    def _external_type_source(self, path, language, root, module, config):
+        """Observe one resolved dependency; reuse path-free parsing artifacts."""
+        from emend.file_collection import source_file_identities
+        from emend import emend_core
+
+        path = Path(path)
+        with self._source_lock:
+            identity = source_file_identities([path]).get(str(path))
+            if identity is None:
+                return None
+            path = path.resolve()
+            observed_key = (str(path), config.identity)
+            previous = self._external_type_files.get(observed_key)
+            if previous is not None and previous[0] == identity:
+                digest, imports = previous[1:]
+            else:
+                try:
+                    source = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    return None
+                if source_file_identities([path]).get(str(path)) != identity:
+                    raise RuntimeError(f"dependency changed while reading: {path}")
+                digest = hashlib.sha256(source.encode()).hexdigest()
+                artifact_key = repr(("2", path.suffix, digest, config.identity))
+                row = self.artifact_connection().execute(
+                    "SELECT payload FROM dependency_import_artifact WHERE identity = ?",
+                    (artifact_key,),
+                ).fetchone()
+                if row is None:
+                    resolver = emend_core.PyScopeResolver(str(self.project_root), path.suffix.lstrip("."))
+                    resolver.index_file(str(path), source)
+                    imports = tuple((row[1].strip("'\""), row[2])
+                                    for row in resolver.imports_in_file(str(path)))
+                    def publish(db):
+                        db.execute("INSERT OR IGNORE INTO dependency_import_artifact VALUES (?, ?)",
+                                   (artifact_key, pickle.dumps(imports)))
+                        db.execute("INSERT OR IGNORE INTO source_artifact VALUES (?, ?)",
+                                   (digest, zlib.compress(source.encode())))
+                    self.write(publish, artifacts=True)
+                else:
+                    imports = pickle.loads(row[0])
+                self._external_type_files[observed_key] = (identity, digest, imports)
+            return FileRevision.create(root, path, digest, language, module), imports
+
     def _type_dependency_state(self, graph=None, *, include_overlays=False, local_state=None):
         """Resolve import dependencies without requiring graph materialization."""
         from emend.language_registry import registry_snapshot
@@ -1276,7 +1338,31 @@ class AnalysisStore:
                     revision
                 )
 
-        def module_revision(name: str):
+        external_roots = {}
+        pending_revisions = list(revisions.values())
+        configs = {r.language: r.analysis_config for r in revisions.values()}
+
+        @cache
+        def external_revision(path, language, root, module):
+            existing = revisions.get(str(path))
+            if existing is not None:
+                return existing
+            if configs.get(language) is None:
+                from emend.language_registry import language_config_snapshot
+                configs[language] = language_config_snapshot(language, self.project_root)
+            result = self._external_type_source(path, language, root, module, configs[language])
+            if result is None:
+                return None
+            revision, imports = result
+            if revision.file_path in revisions:
+                return revisions[revision.file_path]
+            revisions[revision.file_path] = revision
+            imports_by_path[revision.file_path] = imports
+            pending_revisions.append(revision)
+            return revision
+
+        @cache
+        def module_revision(name: str, language: str):
             exact = module_to_revision.get(name)
             if exact is not None:
                 return exact
@@ -1291,7 +1377,27 @@ class AnalysisStore:
             matches = list({
                 candidate.file_path: candidate for candidate in matches
             }.values())
-            return matches[0] if len(matches) == 1 else None
+            if matches and language != "python":
+                return matches[0] if len(matches) == 1 else None
+            from emend.project_config import resolve_environment_path
+            if language not in external_roots:
+                external_roots[language] = resolve_environment_path(
+                    str(self.project_root), language, require_enabled=False
+                )
+            root = external_roots[language]
+            if root is None:
+                return None
+            base = root / name if language == "typescript" else root.joinpath(*name.split("."))
+            if language == "python":
+                candidates = [base.with_suffix(".pyi"), base.with_suffix(".py"),
+                              base / "__init__.pyi", base / "__init__.py"]
+            else:
+                candidates = source_candidates(base, language)
+            for path in candidates:
+                result = external_revision(path, language, root, name)
+                if result is not None:
+                    return result
+            return None
 
         from emend.project_config import load_typescript_config
 
@@ -1332,11 +1438,13 @@ class AnalysisStore:
             return aliases
 
         def source_candidates(base: Path, language: str) -> list[Path]:
-            extensions = language_extensions.get(language, ())
+            extensions = list(language_extensions.get(language, ()))
+            if language == "typescript":
+                extensions.insert(2, "d.ts")
+            stem = base.with_suffix("") if base.suffix.lstrip(".") in extensions else base
             candidates = [base]
-            candidates.extend(base.with_suffix(f".{ext}") for ext in extensions)
-            if not base.suffix:
-                candidates.extend(base / f"index.{ext}" for ext in extensions)
+            candidates.extend(Path(f"{stem}.{ext}") for ext in extensions)
+            candidates.extend(base / f"index.{ext}" for ext in extensions)
             return candidates
 
         dependencies: dict[str, set[str]] = {}
@@ -1346,7 +1454,7 @@ class AnalysisStore:
             if revision.language == "typescript"
             and revision.file_path.endswith(".d.ts")
         }
-        for revision in revisions.values():
+        for revision in pending_revisions:
             resolved_dependencies = (
                 ambient_typescript - {revision.file_path}
                 if revision.language == "typescript" else set()
@@ -1356,24 +1464,38 @@ class AnalysisStore:
                 if revision.language == "python":
                     if name.startswith("."):
                         package = revision.module_name
-                        if Path(revision.file_path).name != "__init__.py":
+                        if Path(revision.file_path).stem != "__init__":
                             package = package.rpartition(".")[0]
                         try:
                             name = importlib.util.resolve_name(name, package)
                         except (ImportError, ValueError):
                             pass
                     name = name.lstrip(".").replace("::", ".").replace("/", ".")
-                    candidates.append(module_revision(name))
+                    candidates.append(module_revision(name, revision.language))
+                    candidates.extend(module_revision(".".join(name.split(".")[:i]), revision.language)
+                                      for i in range(1, len(name.split("."))))
                     if imported_name not in (None, "*"):
                         candidates.append(module_revision(
-                            f"{name}.{imported_name}"
+                            f"{name}.{imported_name}", revision.language
                         ))
                 elif name.startswith("."):
                     base = (Path(revision.file_path).parent / name).resolve()
                     # TypeScript commonly imports emitted ``.js`` names whose
                     # source dependency is ``.ts``/``.tsx``.
                     paths = source_candidates(base, revision.language)
-                    candidates.extend(revisions.get(str(path)) for path in paths)
+                    module = revision.module_name
+                    if Path(revision.file_path).name not in {
+                        f"index.{ext}" for ext in (*language_extensions.get(revision.language, ()), "d.ts")
+                    }:
+                        module = module.rpartition("/")[0]
+                    imported_module = posixpath.normpath(posixpath.join(module, name))
+                    candidates.extend(
+                        revisions.get(str(path)) or (
+                            external_revision(path, revision.language, Path(revision.project_root),
+                                              imported_module)
+                            if revision.project_root != str(self.project_root) else None
+                        ) for path in paths
+                    )
                 else:
                     if revision.language == "typescript" and ts_paths:
                         candidates.extend(
@@ -1382,7 +1504,9 @@ class AnalysisStore:
                             for path in source_candidates(base, revision.language)
                         )
                     normalized = name.replace("::", ".").replace("/", ".")
-                    candidates.append(module_revision(normalized))
+                    candidates.append(module_revision(
+                        name if revision.language == "typescript" else normalized, revision.language
+                    ))
                 resolved_dependencies.update(
                     candidate.file_path for candidate in candidates
                     if candidate is not None
@@ -1466,7 +1590,8 @@ class AnalysisStore:
         return (
             identities,
             {path: self._revision_source(revisions[path]) for path in inputs},
-            set(revisions),
+            {path for path, revision in revisions.items()
+             if revision.project_root == str(self.project_root)},
         )
 
     def update_overlay(

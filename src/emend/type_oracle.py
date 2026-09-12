@@ -27,6 +27,7 @@ from typing import Literal, Any
 from emend.errors import BUG_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
+_TYPE_RESULT_VERSION = 2  # Earlier caches could contain failed-empty analyses.
 
 TypeBatchInputs = tuple[dict[str, str], dict[str, str], set[str]]
 
@@ -228,7 +229,9 @@ class LSPClient:
             "textDocument": {"uri": path.as_uri()},
             "position": {"line": line - 1, "character": col - 1},
         })
-        if not res or "result" not in res or res["result"] is None:
+        if not res or "result" not in res:
+            raise RuntimeError("LSP hover request failed")
+        if res["result"] is None:
             return None
         
         contents = res["result"].get("contents", "")
@@ -406,6 +409,7 @@ class FileTypes:
     """All type bindings for a single file."""
     path: str
     bindings: list[TypeBinding] = field(default_factory=list)
+    complete: bool = True
     # Indexed by (line, col) for fast positional lookup
     _by_position: dict[tuple[int, int], TypeBinding] = field(default_factory=dict, repr=False)
     # Indexed by name for symbol lookup
@@ -518,6 +522,12 @@ class TypeOracle(ABC):
             include_overlays=self._uses_overlay_source,
         )
 
+    def _publish_result(self, path, result, key, current_key):
+        """Cache only successful analysis of the unchanged input generation."""
+        if result is not None and current_key == key:
+            self._cache.put(key, result)
+        return result if result is not None else FileTypes(path=str(path), complete=False)
+
     def _prepare_file_keys(
         self, paths: list[Path], project_root: Path | None,
         inputs: TypeBatchInputs | None = None,
@@ -574,7 +584,7 @@ class TypeOracle(ABC):
                         raise
                     except Exception:
                         logger.debug("infer_file failed for %s", resolved, exc_info=True)
-                        results[str(resolved)] = FileTypes(path=str(resolved))
+                        results[str(resolved)] = FileTypes(path=str(resolved), complete=False)
         finally:
             del self._prepared_file_keys
             self.__dict__.pop("_prepared_source_texts", None)
@@ -1033,6 +1043,8 @@ class _FileTypeCache:
                 del self._cache[next(iter(self._cache))]
 
     def put(self, content_hash: str, ft: FileTypes) -> None:
+        if not ft.complete:
+            return
         content_hash = self._key(content_hash)
         self._put_memory(content_hash, ft)
         # Persist to disk
@@ -1237,7 +1249,7 @@ def _type_engine_context(engine: str, options: dict[str, Any]) -> str:
         for key, value in sorted(options.items())
         if key != "db_path"
     }
-    payload = (engine, executable_identity, executable_version, stable_options)
+    payload = (_TYPE_RESULT_VERSION, engine, executable_identity, executable_version, stable_options)
     return hashlib.sha256(repr(payload).encode()).hexdigest()
 
 
@@ -1378,17 +1390,11 @@ class PyreflyAdapter(TypeOracle):
         # Run pyrefly
         logger.info("Building type index for %s via pyrefly", path)
         debug_json = self._run_pyrefly(path, project_root)
-        if debug_json is None:
-            ft = FileTypes(path=str(path))
-        else:
-            ft = _parse_pyrefly_debug(debug_json, str(path))
-
-        # The checker reads the workspace itself.  If an edit raced the
-        # subprocess, return its answer but never persist it under the older
-        # source identity.
-        if self._current_file_key(path, project_root) == content_hash:
-            self._cache.put(content_hash, ft)
-        return ft
+        ft = (_parse_pyrefly_debug(debug_json, str(path))
+              if debug_json is not None else None)
+        return self._publish_result(
+            path, ft, content_hash, self._current_file_key(path, project_root)
+        )
 
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -1505,7 +1511,7 @@ class PyreflyAdapter(TypeOracle):
                         raise
                     except Exception:
                         logger.debug("pyrefly parse failed for %s", path_obj, exc_info=True)
-                        ft = FileTypes(path=str(path_obj))
+                        continue
                     results[str(path_obj)] = ft
         except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
             pass
@@ -1515,14 +1521,6 @@ class PyreflyAdapter(TypeOracle):
             except OSError:
                 pass
 
-        # Fill in empty results for files that weren't in the output and
-        # cache them so subsequent runs don't re-invoke pyrefly for them.
-        for rp in to_check:
-            key = str(rp)
-            if key not in results:
-                ft = FileTypes(path=key)
-                results[key] = ft
-
         from emend.analysis_store import AnalysisStore
 
         current = AnalysisStore.open(
@@ -1530,8 +1528,9 @@ class PyreflyAdapter(TypeOracle):
         ).type_file_identities(to_check, include_overlays=False)
         for path_obj in to_check:
             key = str(path_obj)
-            if current.get(key) == hashes[key]:
-                self._cache.put(hashes[key], results[key])
+            results[key] = self._publish_result(
+                path_obj, results.get(key), hashes[key], current.get(key)
+            )
 
         return results
 
@@ -1644,10 +1643,7 @@ class _LSPTypeOracle(TypeOracle):
                 try:
                     source = path.read_text(encoding="utf-8")
                 except (OSError, UnicodeError):
-                    ft = FileTypes(path=str(path))
-                    if path.exists() and self._file_key(path, project_root) == content_hash:
-                        self._cache.put(content_hash, ft)
-                    return ft
+                    return FileTypes(path=str(path), complete=False)
             else:
                 content_hash = identities[str(path)]
                 source = sources[str(path)]
@@ -1661,7 +1657,7 @@ class _LSPTypeOracle(TypeOracle):
         root = project_root or path.parent
         lsp = self._get_lsp(root)
         if not lsp:
-            return FileTypes(path=str(path))
+            return FileTypes(path=str(path), complete=False)
 
         try:
             logger.info("Building type index for %s via %s", path, self._tool_name)
@@ -1703,10 +1699,11 @@ class _LSPTypeOracle(TypeOracle):
             raise
         except Exception:
             logger.debug("%s infer_file failed for %s", self._tool_name, path, exc_info=True)
-            return FileTypes(path=str(path))
+            ft = None
 
-        self._cache.put(content_hash, ft)
-        return ft
+        return self._publish_result(
+            path, ft, content_hash, self._current_file_key(path, project_root)
+        )
 
     def infer_batch(
         self, paths: list[Path], project_root: Path | None = None, *,
@@ -1722,7 +1719,7 @@ class _LSPTypeOracle(TypeOracle):
                 key = str(path)
                 content_hash = self._prepared_file_keys.get(key)
                 if content_hash is None:
-                    results[key] = FileTypes(path=key)
+                    results[key] = FileTypes(path=key, complete=False)
                     continue
                 cached = self._cache.get(content_hash, path)
                 if cached is None:
@@ -1735,7 +1732,7 @@ class _LSPTypeOracle(TypeOracle):
             lsp = self._get_lsp(root)
             if lsp is None:
                 return results | {
-                    str(path): FileTypes(path=str(path)) for path in missing
+                    str(path): FileTypes(path=str(path), complete=False) for path in missing
                 }
             self._sync_documents(
                 lsp, self._prepared_source_texts, self._prepared_project_paths
@@ -1747,7 +1744,7 @@ class _LSPTypeOracle(TypeOracle):
                     raise
                 except Exception:
                     logger.debug("infer_file failed for %s", path, exc_info=True)
-                    results[str(path)] = FileTypes(path=str(path))
+                    results[str(path)] = FileTypes(path=str(path), complete=False)
         finally:
             self.__dict__.pop("_prepared_file_keys", None)
             self.__dict__.pop("_prepared_source_texts", None)
@@ -1759,12 +1756,7 @@ class _LSPTypeOracle(TypeOracle):
 
     def clear_cache(self) -> None:
         self._cache.clear()
-        with self._lsp_lock:
-            if self._lsp:
-                self._lsp.stop()
-            self._lsp = None
-            self._open_documents.clear()
-            self._known_project_paths = None
+        self._cache_context_changed()
 
     def __del__(self):
         with self._lsp_lock:
@@ -1874,7 +1866,7 @@ _TS_TYPE_HELPER = """\
 "use strict";
 var ts;
 try { ts = require("typescript"); } catch(e) {
-    process.stdout.write("[]"); process.exit(0);
+    process.stderr.write(String(e)); process.exit(1);
 }
 var path = require("path");
 var filePath = path.resolve(process.argv[2]);
@@ -1988,11 +1980,11 @@ class TypeScriptAdapter(TypeOracle):
 
         logger.info("Building type index for %s via TypeScript", path)
         ft = self._run_tsc(path, project_root)
-        if self._current_file_key(path, project_root) == content_hash:
-            self._cache.put(content_hash, ft)
-        return ft
+        return self._publish_result(
+            path, ft, content_hash, self._current_file_key(path, project_root)
+        )
 
-    def _run_tsc(self, path: Path, project_root: Path | None) -> FileTypes:
+    def _run_tsc(self, path: Path, project_root: Path | None) -> FileTypes | None:
         """Run the TypeScript helper script and parse its output."""
         script = self._get_script()
         cwd = str(project_root) if project_root else str(path.parent)
@@ -2007,12 +1999,12 @@ class TypeScriptAdapter(TypeOracle):
                     "TypeScript helper returned %d: %s",
                     result.returncode, result.stderr[:500] if result.stderr else "",
                 )
-                return FileTypes(path=str(path))
+                return None
 
             bindings_data = json.loads(result.stdout)
         except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as exc:
             logger.debug("TypeScript helper failed: %s", exc)
-            return FileTypes(path=str(path))
+            return None
 
         ft = FileTypes(path=str(path))
         for entry in bindings_data:

@@ -12,6 +12,30 @@ from pathlib import Path
 import pytest
 
 
+@pytest.mark.parametrize("language,relative,source", [
+    ("typescript", "node_modules/library/index.ts", "export function installedFunction(): number { return 1; }"),
+    ("typescript", "node_modules/library/index.d.ts", "export declare function installedFunction(): number;"),
+    ("rust", "target/library/lib.rs", "pub fn installedFunction() -> u32 { 1 }"),
+])
+def test_dependency_lookup_uses_requested_language(tmp_path, language, relative, source):
+    from emend.transform.index import query_symbol_index
+    from emend.transform.venv_index import lookup_venv_symbol
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='test'\n")
+    dependency = tmp_path / relative
+    dependency.parent.mkdir(parents=True)
+    dependency.write_text(source)
+    for query in (lookup_venv_symbol, query_symbol_index):
+        rows = query(str(tmp_path), language=language, name_pattern="installedFunction")
+        assert [row["file_path"] for row in rows] == [str(dependency)]
+        if language == "typescript":
+            assert query(str(tmp_path), language=language,
+                         qualified_name="library/installedFunction")
+    dependency.write_text(source.replace("installedFunction", "renamedFunction"))
+    assert not lookup_venv_symbol(str(tmp_path), language=language, name_pattern="installedFunction")
+    assert lookup_venv_symbol(str(tmp_path), language=language, name_pattern="renamedFunction")
+
+
 # ---------------------------------------------------------------------------
 # project_config tests
 # ---------------------------------------------------------------------------

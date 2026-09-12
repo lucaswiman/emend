@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import hashlib
 import shutil
+import subprocess
 import textwrap
 from pathlib import Path
 
@@ -569,12 +570,72 @@ class TestFileTypes:
 
 class TestFileTypeCache:
 
+    @pytest.mark.parametrize("engine,suffix", [("pyrefly", "py"), ("typescript", "ts"), ("pyright", "py")])
+    @pytest.mark.parametrize("batch", [False, True])
+    @pytest.mark.parametrize("empty", [False, True])
+    def test_failed_analysis_retries_but_success_is_cached(
+        self, tmp_path, monkeypatch, engine, suffix, batch, empty
+    ):
+        target = tmp_path / f"target.{suffix}"
+        target.write_text("value = 1\n" if suffix == "py" else "const value = 1;\n")
+        adapter = create_type_oracle(engine, tmp_path)
+        calls = []
+
+        def run(cmd, **kwargs):
+            if "--version" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, "test", "")
+            calls.append(cmd)
+            if len(calls) == 1:
+                raise subprocess.TimeoutExpired(cmd, 60)
+            if engine == "pyright":
+                result = None if empty else {"contents": {"value": "```python\nvalue: int\n```"}}
+                return subprocess.CompletedProcess(cmd, 0, json.dumps({"result": result}), "")
+            if engine == "pyrefly":
+                bindings = [] if empty else [{"key": "Key::Definition(value 1:1-6)", "result": "int"}]
+                Path(cmd[cmd.index("--debug-info") + 1]).write_text(json.dumps(
+                    {"modules": {"__unknown__": {"bindings": bindings}}}
+                ))
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            bindings = [] if empty else [{"name": "value", "line": 1, "col_start": 7, "type": "number"}]
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(bindings), "")
+
+        monkeypatch.setattr("emend.type_oracle.subprocess.run", run)
+        if engine == "pyright":
+            from emend.type_oracle import LSPClient
+            lsp = LSPClient([], tmp_path)
+            monkeypatch.setattr(lsp, "send_request", lambda *a, **k: json.loads(run(["hover"]).stdout))
+            monkeypatch.setattr(adapter, "_get_lsp", lambda root: lsp)
+        def infer():
+            return (adapter.infer_batch([target], tmp_path)[str(target)] if batch
+                    else adapter.infer_file(target, tmp_path))
+        failure = infer()
+        assert not failure.complete and failure.bindings == []
+        for _ in range(2):
+            result = infer()
+            assert result.complete and bool(result.bindings) is not empty
+        assert len(calls) == 2
+
+    def test_result_contract_upgrade_drops_legacy_empty_cache(self, tmp_path, monkeypatch):
+        target = tmp_path / "target.py"
+        target.write_text("value = 1\n")
+        monkeypatch.setattr("emend.type_oracle._TYPE_RESULT_VERSION", 1)
+        old = create_type_oracle("pyrefly", tmp_path)
+        key = old._file_key(target, tmp_path)
+        old._cache.put(key, FileTypes(path=str(target)))
+        monkeypatch.setattr("emend.type_oracle._TYPE_RESULT_VERSION", 2)
+        current = create_type_oracle("pyrefly", tmp_path)
+        assert current._cache.get(key, target) is None
+        current._cache.put(key, FileTypes(path=str(target)))
+        assert create_type_oracle("pyrefly", tmp_path)._cache.get(key, target).complete
+
     def test_get_miss(self):
         cache = _FileTypeCache(max_entries=10)
         assert cache.get("nonexistent") is None
 
     def test_put_and_get(self):
         cache = _FileTypeCache(max_entries=10)
+        cache.put("abc123", FileTypes(path="test.py", complete=False))
+        assert cache.get("abc123") is None
         ft = FileTypes(path="test.py")
         cache.put("abc123", ft)
         assert cache.get("abc123") is ft
@@ -1018,6 +1079,7 @@ class TestAdapterCommon:
         adapter = adapter_cls(**construct_kwargs)
         test_file = tmp_path / ("test" + ext)
         test_file.write_text(source)
+        adapter._cache.put(adapter._file_key(test_file, tmp_path), FileTypes(path=str(test_file)))
         ft1 = adapter.infer_file(test_file, project_root=tmp_path)
         ft2 = adapter.infer_file(test_file, project_root=tmp_path)
         if isinstance(adapter, _LSPTypeOracle):
