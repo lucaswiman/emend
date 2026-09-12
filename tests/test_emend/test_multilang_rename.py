@@ -6,6 +6,36 @@ from emend.component_selector import ExtendedSelector
 from emend.transform import rename_symbol, warm_caches
 
 
+@pytest.mark.parametrize("alias", ["alias", "stuff"])
+@pytest.mark.parametrize("ext,definition,consumer", [
+    ("py", "def f():\n    return 1\n", "from source import f as {alias}\n{alias}()\n"),
+    ("ts", "export function f() {{}}\n", "import {{ f as {alias} }} from './source';\n{alias}();\n"),
+    ("rs", "pub fn f() {{}}\n", "use crate::source::f as {alias};\nfn run() {{ {alias}(); }}\n"),
+])
+def test_rename_preserves_import_alias(tmp_path, alias, ext, definition, consumer):
+    target, caller = tmp_path / f"source.{ext}", tmp_path / f"consumer.{ext}"
+    target.write_text(definition.format())
+    original = consumer.format(alias=alias)
+    caller.write_text(original)
+    rename_symbol(ExtendedSelector(str(target), ["f"]), "g", project_path=str(tmp_path), apply=True)
+    assert caller.read_text() == original.replace("f as", "g as")
+
+
+@pytest.mark.parametrize("tail,new_name", [
+    ("def g():\n    return 2\nresult = (f(), g())\n", "g"),
+    ("def caller(g):\n    return f()\n", "g"),
+    ("", "not valid"),
+])
+@pytest.mark.parametrize("apply", [False, True])
+def test_rename_rejects_invalid_binding_plan(tmp_path, tail, new_name, apply):
+    target = tmp_path / "source.py"
+    original = "def f():\n    return 1\n" + tail
+    target.write_text(original)
+    with pytest.raises(ValueError):
+        rename_symbol(ExtendedSelector(str(target), ["f"]), new_name, project_path=str(tmp_path), apply=apply)
+    assert target.read_text() == original
+
+
 def test_warm_qn_cache_tracks_typescript_root_change(tmp_path):
     web = tmp_path / "web"
     web.mkdir()

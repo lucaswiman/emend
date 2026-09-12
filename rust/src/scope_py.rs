@@ -187,6 +187,78 @@ impl PyScopeResolver {
             .unwrap_or_default()
     }
 
+    /// Plan token edits, then check that re-resolving the result preserves bindings.
+    fn rename_symbol_content(&self, path: &str, source: &str, target: &str, new_name: &str) -> PyResult<String> {
+        use crate::scope::ReferenceKind;
+        use pyo3::exceptions::PyValueError;
+        let path = PathBuf::from(path);
+        let fs = self.inner.file_scopes.get(&path)
+            .ok_or_else(|| PyValueError::new_err("File is not indexed"))?;
+        let sep = &self.inner.config.qualified_names.module_separator;
+        let (owner, old_name) = target.rsplit_once(sep).unwrap_or(("", target));
+        let new_target = if owner.is_empty() { new_name.to_string() } else { format!("{owner}{sep}{new_name}") };
+        let mapped = |name: &str| {
+            if name == target { new_target.clone() }
+            else if let Some(rest) = name.strip_prefix(&format!("{target}{sep}")) {
+                format!("{new_target}{sep}{rest}")
+            } else { name.to_string() }
+        };
+        if target != new_target && fs.definitions.iter().any(|(qn, _)| qn.name == new_target)
+            && fs.definitions.iter().any(|(qn, _)| qn.name == target) {
+            return Err(PyValueError::new_err(format!("Rename would collide with {new_target}")));
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let tree = crate::pattern::parse_by_extension(source, ext)
+            .ok_or_else(|| PyValueError::new_err("Cannot parse rename source"))?;
+        let mut edits = Vec::new();
+        for reference in &fs.references {
+            if reference.qn.name != target { continue; }
+            // Aggregate references end at their final name token. Never infer
+            // token boundaries from a textual suffix (aliases can share it).
+            let Some(token) = tree.root_node().descendant_for_byte_range(
+                reference.end_byte.saturating_sub(1), reference.end_byte,
+            ) else { continue; };
+            if &source[token.start_byte()..token.end_byte()] != old_name { continue; }
+            let replacement = if reference.kind == ReferenceKind::Reexport {
+                format!("{new_name} as {old_name}")
+            } else { new_name.to_string() };
+            edits.push((token.start_byte(), token.end_byte(), replacement));
+        }
+        edits.sort();
+        edits.dedup();
+        let mut updated = source.to_string();
+        for (start, end, replacement) in edits.iter().rev() {
+            updated.replace_range(*start..*end, replacement);
+        }
+        if edits.is_empty() { return Ok(updated); }
+        let mut resolver = ScopeResolver::new_with_module_root(
+            self.inner.config.clone(), self.inner.project_root.clone(),
+            self.inner.module_root.clone(), self.inner.root_module_file.clone(),
+        );
+        let updated_tree = crate::pattern::parse_by_extension(&updated, ext)
+            .ok_or_else(|| PyValueError::new_err("Cannot parse renamed source"))?;
+        resolver.index_file(&path, &updated, &updated_tree);
+        let after = &resolver.file_scopes[&path];
+        let references: std::collections::HashSet<_> = after.references.iter()
+            .map(|r| (r.byte_offset, r.qn.name.as_str())).collect();
+        let mut shift = 0_isize;
+        let shifts: Vec<_> = edits.iter().map(|(start, end, replacement)| {
+            shift += replacement.len() as isize - (end - start) as isize;
+            (*end, shift)
+        }).collect();
+        for reference in &fs.references {
+            let index = shifts.partition_point(|(end, _)| *end <= reference.byte_offset);
+            let offset = reference.byte_offset as isize + if index == 0 { 0 } else { shifts[index - 1].1 };
+            let expected = mapped(&reference.qn.name);
+            if !references.contains(&(offset as usize, expected.as_str())) {
+                return Err(PyValueError::new_err(format!(
+                    "Rename would change binding at {}:{} ({})", path.display(), reference.line, reference.lexical_qn,
+                )));
+            }
+        }
+        Ok(updated)
+    }
+
     /// Positions of references resolved through an exact lexical import
     /// binding.  Local shadows of an imported spelling are excluded.
     fn import_bound_reference_positions(&self, path: &str) -> Vec<(usize, usize)> {
