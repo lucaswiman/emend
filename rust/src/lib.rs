@@ -5,7 +5,7 @@
 
 use pyo3::prelude::*;
 use rayon::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 mod scanner;
 mod pattern;
@@ -221,19 +221,36 @@ fn extract_imports(files: Vec<String>) -> PyResult<Vec<(String, Vec<String>)>> {
 ///
 /// Returns paths of files that import from the target module.
 #[pyfunction]
-fn files_importing_module(files: Vec<String>, target_module: &str) -> PyResult<Vec<String>> {
+#[pyo3(signature = (files, target_module, project_root=None, module_root=None, root_module_file=None))]
+fn files_importing_module(
+    files: Vec<String>, target_module: &str, project_root: Option<&str>,
+    module_root: Option<&str>, root_module_file: Option<&str>,
+) -> PyResult<Vec<String>> {
     let target = target_module.to_string();
+    let project = PathBuf::from(project_root.unwrap_or("."));
+    let modules = PathBuf::from(module_root.unwrap_or_else(|| project_root.unwrap_or(".")));
+    let root_file = root_module_file.map(PathBuf::from);
     let result: Vec<String> = files
         .into_par_iter()
         .filter(|path| {
-            std::fs::read_to_string(path)
-                .map(|content| {
-                    if !content.contains(&target) {
-                        return false;
-                    }
-                    pattern::files_importing_module_from_source(&content, &target)
+            let file = PathBuf::from(path);
+            let Some(ext) = file.extension().and_then(|value| value.to_str()) else { return false };
+            let Ok(content) = std::fs::read_to_string(&file) else { return false };
+            let Ok(config) = scope::LanguageConfig::load_for_extension(ext, &project) else { return false };
+            let separator = config.qualified_names.module_separator.clone();
+            let Some(tree) = pattern::parse_by_extension(&content, ext) else { return false };
+            let mut resolver = scope::ScopeResolver::new_with_module_root(
+                config, project.clone(), modules.clone(), root_file.clone(),
+            );
+            resolver.index_file(&file, &content, &tree);
+            resolver.file_scopes.get(&file).is_some_and(|scope| {
+                scope.scoped_imports.iter().any(|scoped| {
+                    scoped.binding.module_path == target
+                }) || scope.references.iter().any(|reference| {
+                    reference.qn.name == target
+                        || reference.qn.name.starts_with(&format!("{target}{separator}"))
                 })
-                .unwrap_or(false)
+            })
         })
         .collect();
     Ok(result)

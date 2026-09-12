@@ -55,22 +55,31 @@ def rename_symbol(
     scan_root = project_path if project_path else _find_project_root(selector.file_path)
     module_root = _find_project_root(selector.file_path)
     resolved_target = str(Path(selector.file_path).resolve())
-    target_module = _normalize_module_qn(_file_to_module(selector.file_path, module_root))
+    from emend.project_config import resolver_module_name_for_file
+    target_module = resolver_module_name_for_file(selector.file_path, module_root)
 
     # Use fully qualified name for matching
-    target_qn = f"{target_module}.{symbol_name}" if target_module else symbol_name
+    from emend.language_registry import get_module_separator
+    separator = get_module_separator(selector.language)
+    target_path = separator.join(selector.symbol_path)
+    target_qn = f"{target_module}{separator}{target_path}" if target_module else target_path
 
     # Use import graph to pre-filter files
     language = selector.language
     candidates = _files_importing_module(scan_root, target_module, language=language)
 
     diffs = {}
+    pending_contents: dict[str, str] = {}
+    wildcard_reexport = None
+
     for py_file, content, resolver in visit_project_ts(
-        name_hint=symbol_name,
+        # Export-star contains no symbol token, so Node rename traverses the
+        # exact semantic dependency candidates without the leaf-name filter.
+        name_hint="" if language in {"typescript", "javascript"} else symbol_name,
         project_path=scan_root,
         target_file=resolved_target,
         candidate_files=candidates,
-        target_qnames={target_qn},
+        target_qnames={target_qn, target_module},
         language=language,
     ):
         references = resolver.references_in_file(py_file)
@@ -86,12 +95,20 @@ def rename_symbol(
         symbol_name_bytes = symbol_name.encode('utf-8')
 
         for qn, line, col, offset, end_offset, kind, _ann in references:
+            if kind == "wildcard_reexport" and qn == target_module:
+                wildcard_reexport = py_file
             if qn == target_qn:
                 # Check if the text at the position matches symbol_name
                 # (to avoid renaming aliases or coincidental names in attributes)
                 # Now using end_offset for better precision!
                 if content_bytes[offset:end_offset].endswith(symbol_name_bytes):
-                    transform.replace_range(end_offset - len(symbol_name_bytes), end_offset, new_name)
+                    replacement = (
+                        f"{new_name} as {symbol_name}"
+                        if kind == "reexport" else new_name
+                    )
+                    transform.replace_range(
+                        end_offset - len(symbol_name_bytes), end_offset, replacement,
+                    )
                     changed = True
 
         if not changed:
@@ -112,7 +129,15 @@ def rename_symbol(
         diffs[py_file] = diff
 
         if apply:
-            Path(py_file).write_text(new_content)
+            pending_contents[py_file] = new_content
+
+    if wildcard_reexport is not None:
+        raise ValueError(
+            f"Cannot safely rename {target_qn}: wildcard re-export in "
+            f"{wildcard_reexport} has no symbol token to update"
+        )
+    for file_path, new_content in pending_contents.items():
+        Path(file_path).write_text(new_content)
 
     return diffs
 
