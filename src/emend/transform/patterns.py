@@ -15,6 +15,7 @@ from ..pattern import (
 )
 from emend import emend_core as _rust
 from emend.errors import BUG_EXCEPTIONS
+from emend.edit_session import read_source, write_source
 from .components import _extract_string_content_from_text
 
 if TYPE_CHECKING:
@@ -247,7 +248,7 @@ def find_pattern(
         file = Path(file_path)
         if not file.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
-        source_code = file.read_text()
+        source_code = read_source(file)
 
     # ``None`` is the auto-detection sentinel.  An explicit language must be
     # honored even when the file extension suggests something else.
@@ -338,7 +339,7 @@ selector: ExtendedSelector, apply: bool = False) -> str:
     from .components import _generate_diff
     original, updated = _remove_symbol_content(selector)
     if apply:
-        Path(selector.file_path).write_text(updated)
+        write_source(selector.file_path, updated, extension=selector.extension)
     return _generate_diff(selector.file_path, original, updated)
 
 
@@ -362,7 +363,7 @@ def _remove_symbol_content(selector: ExtendedSelector) -> tuple[str, str]:
 
     # Use tree-sitter symbols to find the target symbol's range
     from emend.ast_utils import find_nested_definitions, find_symbol_by_path
-    source_code = file_path.read_text()
+    source_code = read_source(file_path)
     symbols = find_nested_definitions(str(file_path), ext=selector.extension, source_override=source_code)
     sym = find_symbol_by_path(symbols, selector.symbol_path)
     
@@ -946,7 +947,7 @@ def replace_pattern(
     if not file.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    source_code = file.read_text()
+    source_code = read_source(file)
 
     if language is None:
         from emend.language_registry import detect_language
@@ -1040,7 +1041,10 @@ def replace_pattern(
 
     # Apply changes if requested
     if apply:
-        file.write_text(new_code)
+        from emend.language_registry import get_extensions
+        extensions = get_extensions(language)
+        extension = file.suffix.lstrip(".")
+        write_source(file, new_code, extension=extension if extension in extensions else extensions[0])
 
     return diff, replacement_count
 

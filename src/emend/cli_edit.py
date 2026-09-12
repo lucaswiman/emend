@@ -514,105 +514,87 @@ def batch_cmd(
         if not isinstance(operations, list):
             raise ValueError("'operations' must be a list")
 
-        all_output = []
-
-        for i, op in enumerate(operations):
-            if not isinstance(op, dict) or len(op) != 1:
-                raise ValueError(
-                    f"Operation #{i+1}: must be a dict with one key "
-                    "(rename/replace/add/edit/remove)"
-                )
-
-            op_type, op_args = next(iter(op.items()))
-
-            if not isinstance(op_args, dict):
-                raise ValueError(
-                    f"Operation #{i+1} ({op_type}): missing configuration; "
-                    "expected a mapping of settings (e.g. 'selector', 'value')"
-                )
-
-            if op_type in ("edit", "add"):
-                selector_str = op_args.get("selector")
-                value = op_args.get("value")
-                if not selector_str or value is None:
+        from emend.edit_session import EditSession
+        with EditSession() as session:
+            for i, op in enumerate(operations):
+                if not isinstance(op, dict) or len(op) != 1:
                     raise ValueError(
-                        f"Operation #{i+1} ({op_type}): requires 'selector' and 'value'"
-                    )
-                command = cmd_add if op_type == "add" else cmd_edit
-                positioning = (
-                    {key: op_args.get(key) for key in ("before", "after", "at")}
-                    if op_type == "add" else {}
-                )
-                result = command(
-                    selector_str=selector_str, value=value, apply=apply,
-                    language=_state["language"], **positioning,
-                )
-                if result.strip():
-                    all_output.append(result)
-
-            elif op_type == "remove":
-                selector_str = op_args.get("selector")
-                if not selector_str:
-                    raise ValueError(
-                        f"Operation #{i+1} (remove): requires 'selector'"
-                    )
-                result = cmd_edit(
-                    selector_str=selector_str, rm=True, apply=apply,
-                    language=_state["language"],
-                )
-                if result.strip():
-                    all_output.append(result)
-
-            elif op_type == "replace":
-                pattern = op_args.get("pattern")
-                replacement = op_args.get("replacement")
-                target_path = op_args.get("path")
-                if not pattern or replacement is None or not target_path:
-                    raise ValueError(
-                        f"Operation #{i+1} (replace): requires 'pattern', "
-                        "'replacement', and 'path'"
+                        f"Operation #{i+1}: must be a dict with one key "
+                        "(rename/replace/add/edit/remove)"
                     )
 
-                _lang = _state["language"]
-                files, _ = resolve_files(target_path, language=_lang)
+                op_type, op_args = next(iter(op.items()))
 
-                op_diffs = []
-                for fp in files:
-                    try:
-                        diff, cnt = replace_pattern(
-                            pattern, replacement, str(fp), apply=apply,
-                            language=_lang,
+                if not isinstance(op_args, dict):
+                    raise ValueError(
+                        f"Operation #{i+1} ({op_type}): missing configuration; "
+                        "expected a mapping of settings (e.g. 'selector', 'value')"
+                    )
+
+                if op_type in ("edit", "add"):
+                    selector_str = op_args.get("selector")
+                    value = op_args.get("value")
+                    if not selector_str or value is None:
+                        raise ValueError(
+                            f"Operation #{i+1} ({op_type}): requires 'selector' and 'value'"
                         )
-                        if diff:
-                            op_diffs.append(diff)
-                    except FileNotFoundError:
-                        continue
-                if op_diffs:
-                    all_output.append("".join(op_diffs))
-
-            elif op_type == "rename":
-                selector_str = op_args.get("selector")
-                new_name = op_args.get("to")
-                if not selector_str or not new_name:
-                    raise ValueError(
-                        f"Operation #{i+1} (rename): requires 'selector' and 'to'"
+                    command = cmd_add if op_type == "add" else cmd_edit
+                    positioning = (
+                        {key: op_args.get(key) for key in ("before", "after", "at")}
+                        if op_type == "add" else {}
                     )
-                parsed_selector = parse_extended_selector(selector_str)
-                diffs = rename_symbol(
-                    parsed_selector, new_name, apply=apply,
-                )
-                if diffs:
-                    diff_text = "".join(d for d in diffs.values() if d)
-                    if diff_text.strip():
-                        all_output.append(diff_text)
+                    command(
+                        selector_str=selector_str, value=value, apply=True,
+                        language=_state["language"], **positioning,
+                    )
 
-            else:
-                raise ValueError(
-                    f"Operation #{i+1}: unknown operation type '{op_type}'. "
-                    "Supported: rename, replace, add, edit, remove"
-                )
+                elif op_type == "remove":
+                    selector_str = op_args.get("selector")
+                    if not selector_str:
+                        raise ValueError(
+                            f"Operation #{i+1} (remove): requires 'selector'"
+                        )
+                    cmd_edit(
+                        selector_str=selector_str, rm=True, apply=True,
+                        language=_state["language"],
+                    )
 
-        output = "\n".join(all_output)
+                elif op_type == "replace":
+                    pattern = op_args.get("pattern")
+                    replacement = op_args.get("replacement")
+                    target_path = op_args.get("path")
+                    if not pattern or replacement is None or not target_path:
+                        raise ValueError(
+                            f"Operation #{i+1} (replace): requires 'pattern', "
+                            "'replacement', and 'path'"
+                        )
+
+                    _lang = _state["language"]
+                    files, _ = resolve_files(target_path, language=_lang)
+
+                    for fp in files:
+                        replace_pattern(pattern, replacement, str(fp), apply=True,
+                                        language=_lang)
+
+                elif op_type == "rename":
+                    selector_str = op_args.get("selector")
+                    new_name = op_args.get("to")
+                    if not selector_str or not new_name:
+                        raise ValueError(
+                            f"Operation #{i+1} (rename): requires 'selector' and 'to'"
+                        )
+                    parsed_selector = parse_extended_selector(selector_str)
+                    rename_symbol(
+                        parsed_selector, new_name, apply=True,
+                    )
+
+                else:
+                    raise ValueError(
+                        f"Operation #{i+1}: unknown operation type '{op_type}'. "
+                        "Supported: rename, replace, add, edit, remove"
+                    )
+
+            output = session.publish(apply)
         if output:
             print(output, end='')
             if not apply:

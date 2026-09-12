@@ -11,6 +11,54 @@ from emend.cli import app
 runner = CliRunner()
 
 
+@pytest.mark.parametrize("fail", [False, True])
+def test_batch_composes_snapshot_before_publication(tmp_path, fail):
+    source, consumer = tmp_path / "api.py", tmp_path / "consumer.py"
+    originals = {source: "def old():\n    return 1\n",
+                 consumer: "from api import old\nvalue = old()\n"}
+    for path, content in originals.items():
+        path.write_text(content)
+    operations = [
+        {"rename": {"selector": f"{source}::old", "to": "middle"}},
+        {"edit": {"selector": f"{source}::middle[returns]", "value": "int"}},
+        {"add": {"selector": f"{source}::middle[params]", "value": "temporary: int"}},
+        {"remove": {"selector": f"{source}::middle[params][temporary]"}},
+        {"replace": {"path": str(source), "pattern": "return 1", "replacement": "return 2"}},
+        {"rename": {"selector": f"{source}::middle", "to": "final"}},
+    ]
+    if fail:
+        operations.append({"edit": {"selector": f"{source}::missing[returns]", "value": "str"}})
+    ops_file = tmp_path / "ops.json"
+    ops_file.write_text(json.dumps({"operations": operations}))
+    preview = runner.invoke(app, ["batch", str(ops_file)])
+    assert (preview.exit_code != 0) == fail, preview.output
+    assert {path: path.read_text() for path in originals} == originals
+    applied = runner.invoke(app, ["batch", str(ops_file), "--apply"])
+    assert (applied.exit_code != 0) == fail, applied.output
+    if fail:
+        assert {path: path.read_text() for path in originals} == originals
+    else:
+        assert source.read_text() == "def final() -> int:\n    return 2\n"
+        assert consumer.read_text() == "from api import final\nvalue = final()\n"
+        assert preview.output.split("\n\nRun with")[0].rstrip() == applied.output.rstrip()
+
+
+def test_edit_session_rejects_changed_snapshot(tmp_path):
+    from emend.edit_session import EditSession, read_source, write_source
+
+    source = tmp_path / "source.py"
+    source.write_text("x = 1\n")
+    with EditSession() as session:
+        assert read_source(source) == "x = 1\n"
+        write_source(source, "x = 2\n")
+        assert source.read_text() == "x = 1\n"
+        assert read_source(source) == "x = 2\n"
+        source.write_text("x = 3\n")  # Another writer, outside the session.
+        with pytest.raises(ValueError, match="Source changed"):
+            session.publish(True)
+    assert source.read_text() == "x = 3\n"
+
+
 class TestBatchJSON:
     """Tests for batch command with JSON input."""
 
@@ -40,9 +88,10 @@ class TestBatchJSON:
         # Should show diff
         assert "-> str" in result.stdout or "str" in result.stdout
 
-    def test_batch_edit_apply(self, tmp_path):
+    @pytest.mark.parametrize("suffix", ["py", "rs"])
+    def test_batch_edit_apply(self, tmp_path, suffix):
         """Batch edit with --apply modifies file."""
-        test_file = tmp_path / "api.py"
+        test_file = tmp_path / f"api.{suffix}"
         test_file.write_text("def get_user() -> int:\n    return 1\n")
 
         ops_file = tmp_path / "ops.json"

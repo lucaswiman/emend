@@ -13,6 +13,7 @@ import time
 from ..language_plugins import NOQA_PATTERN as _NOQA_PATTERN
 from emend import emend_core as _rust
 from emend.errors import BUG_EXCEPTIONS
+from emend.edit_session import current_edit_session, read_source, write_source
 
 if TYPE_CHECKING:
     import sqlite3
@@ -373,6 +374,8 @@ def _files_importing_module(project_root: str, module_dotted: str, language: str
     Returns None if the filter cannot be applied (caller should fall back
     to scanning all files).
     """
+    if current_edit_session() is not None:
+        return None
     from .index import query_import_graph
     # The legacy graph stores dotted module names, which are lossy for TS/Rust.
     # Their native scan below retains exact identities; QN caching stays enabled.
@@ -412,6 +415,11 @@ def visit_project_ts(
     from emend.project_config import module_resolution_context
     source_files = _collect_source_files(project_root, language=language)
 
+    # Disk-derived prefilters cannot describe an uncommitted edit snapshot.
+    session = current_edit_session()
+    if session is not None:
+        candidate_files = target_qnames = None
+
     if candidate_files is not None:
         source_files = [f for f in source_files
                         if f in candidate_files
@@ -420,14 +428,17 @@ def visit_project_ts(
     # Structural pre-filter: use tree-sitter to find files containing
     # an actual identifier matching name_hint (not just substring matches
     # in strings/comments).
-    if name_hint:
+    if name_hint and session is None:
         _name_matches = _rust.find_name_in_files(source_files, name_hint)
         source_files = list({m.file for m in _name_matches})
         if target_file and target_file not in source_files:
             source_files.append(target_file)
 
     # Read and filter files
-    file_contents = _rust.read_and_filter_files(source_files, [name_hint] if name_hint else [])
+    file_contents = ([(path, read_source(path)) for path in source_files] if session
+                     else _rust.read_and_filter_files(source_files, [name_hint] if name_hint else []))
+    if session and name_hint:
+        file_contents = [(path, content) for path, content in file_contents if name_hint in content]
 
     # QN-index pre-filter
     if target_qnames:
@@ -483,6 +494,7 @@ def _add_import_text(
     apply: bool,
     source_code: str,
     language: str = "python",
+    extension: str | None = None,
 ) -> str:
     """Add an import statement to a file using text manipulation.
 
@@ -509,6 +521,6 @@ def _add_import_text(
     diff = _generate_diff(str(file_path), source_code, new_code)
 
     if apply:
-        file_path.write_text(new_code)
+        write_source(file_path, new_code, extension=extension)
 
     return diff
