@@ -393,12 +393,16 @@ class AnalysisStore:
                 # Verify the identity around the read so a concurrent editor
                 # save cannot bind bytes to the wrong revision.
                 for _attempt in range(3):
-                    before = os.stat(file_path)
                     try:
+                        before = os.stat(file_path)
                         content = Path(file_path).read_text(encoding="utf-8")
+                        after = os.stat(file_path)
                     except (OSError, UnicodeDecodeError):
+                        # The file may disappear between inventory and the
+                        # snapshot boundary.  Do not publish bytes read from
+                        # a revision whose verification failed.
+                        content = None
                         break
-                    after = os.stat(file_path)
                     before_id = self._stat_identity(before)
                     after_id = self._stat_identity(after)
                     if before_id == after_id:
