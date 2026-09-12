@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
-import fnmatch
 import logging
 import re as _re
 import time
@@ -29,6 +28,7 @@ class DeadSymbol:
     last_reference_commit: str | None = None  # git commit that last touched this symbol
     root_causes: tuple[str, ...] = ()
     dependents: list[DeadSymbol] = field(default_factory=list)
+    qualified_name: str = ""
 
 
 @dataclass
@@ -295,6 +295,7 @@ def _string_literal_filter(
     all_files: bool,
     exclude_references_from: list[str] | None,
     exclude_test_references: bool,
+    excluded_files: set[str] | None = None,
 ) -> list["DeadSymbol"]:
     """Filter out dead code candidates referenced inside string literals.
 
@@ -320,36 +321,13 @@ def _string_literal_filter(
         scan_root, git_tracked_only=not all_files,
     )
 
-    _exclude_prefixes: list[str] = []
-    _exclude_globs: list[str] = []
-    if exclude_references_from:
-        import fnmatch as _fnmatch
-        for pattern in exclude_references_from:
-            if "*" in pattern or "?" in pattern:
-                if not pattern.startswith("*") and not Path(pattern).is_absolute():
-                    pattern = str(Path(scan_root) / pattern)
-                if not pattern.endswith("*"):
-                    pattern = pattern.rstrip("/") + "/*"
-                _exclude_globs.append(pattern)
-            else:
-                raw_path = Path(pattern)
-                _exclude_prefixes.append(str(
-                    raw_path.resolve()
-                    if raw_path.is_absolute()
-                    else (Path(scan_root) / raw_path).resolve()
-                ))
-
-    def _is_excluded_ref(path: str) -> bool:
-        if exclude_test_references:
-            from .impact import _is_test_file
-
-            if _is_test_file(path):
-                return True
-        if _exclude_prefixes and any(path.startswith(p) for p in _exclude_prefixes):
-            return True
-        if _exclude_globs:
-            return any(_fnmatch.fnmatch(path, g) for g in _exclude_globs)
-        return False
+    if excluded_files is None:
+        from .impact import _is_test_file
+        excluded_files = {
+            str(Path(path).resolve()) for path in source_files
+            if _path_is_excluded(str(Path(path).resolve()), exclude_references_from, scan_root)
+            or (exclude_test_references and _is_test_file(path))
+        }
 
     def _collect_string_literals(source: str, path: str) -> list[str]:
         """Return the inner text of every string literal in *source*.
@@ -378,7 +356,7 @@ def _string_literal_filter(
     file_str_cache: dict[str, str] = {}
     for _fp in source_files:
         _r = str(Path(_fp).resolve())
-        if _is_excluded_ref(_r):
+        if _r in excluded_files:
             continue
         try:
             _content = Path(_fp).read_text(errors="replace")
@@ -1271,47 +1249,15 @@ def find_dead_code(
 
     project_root_resolved = str(Path(_find_project_root(project_path)).resolve())
 
-    # Convert exclude_references_from to relative paths for the fact graph.
-    excl_ref_paths: list[str] | None = None
-    excl_ref_segments: list[str] | None = None  # For ** glob patterns
-    if exclude_references_from:
-        excl_ref_paths = []
-        excl_ref_segments = []
-        for excl_path in exclude_references_from:
-            if excl_path.startswith("**/"):
-                # Extract directory segment for str_includes matching
-                segment = excl_path[3:].rstrip("/")
-                if segment:
-                    excl_ref_segments.append(segment)
-            elif "*" in excl_path or "?" in excl_path:
-                continue  # Complex globs not supported in Datalog
-            else:
-                raw_path = Path(excl_path)
-                resolved = str(
-                    raw_path.resolve()
-                    if raw_path.is_absolute()
-                    else (Path(project_root_resolved) / raw_path).resolve()
-                )
-                try:
-                    rel = str(Path(resolved).relative_to(project_root_resolved))
-                except ValueError:
-                    rel = resolved
-                excl_ref_paths.append(rel)
-
-    # Test references are ignored by default, but exact file matching avoids
-    # broad directory-name guesses (e.g. a production ``contest/`` package).
-    excluded_test_files: list[str] = []
-    if exclude_test_references:
-        try:
-            ref_files = graph._client.run(
-                "?[fp] := *reference[_, fp, _, _, _, _, _]"
-            )["rows"]
-            excluded_test_files = sorted({
-                file_path for (file_path,) in ref_files
-                if _is_test_file(str(Path(project_root_resolved) / file_path))
-            })
-        except Exception:
-            logger.debug("Could not enumerate test reference files", exc_info=True)
+    # Resolve paths once for all reference kinds, then pass data (not glob
+    # fragments embedded in query syntax) to the graph.
+    from emend.file_collection import collect_all_source_files
+    source_files = collect_all_source_files(project_root_resolved)
+    excluded_files = {
+        str(Path(path).resolve()) for path in source_files
+        if _path_is_excluded(str(Path(path).resolve()), exclude_references_from, project_root_resolved)
+        or (exclude_test_references and _is_test_file(path))
+    }
 
     entry_options = _project_entry_point_options(
         graph, project_root_resolved, entry_point_decorators, entry_point_names,
@@ -1320,12 +1266,15 @@ def find_dead_code(
 
     query_options = dict(
         **entry_options,
-        exclude_reference_paths=excl_ref_paths if excl_ref_paths else None,
-        exclude_reference_segments=excl_ref_segments if excl_ref_segments else None,
-        exclude_reference_files=excluded_test_files or None,
+        exclude_reference_files=sorted(
+            str(Path(path).relative_to(project_root_resolved)) for path in excluded_files
+        ),
         include_transitive=True,
     )
     raw_dead, raw_unreachable = graph.dead_code_unified(**query_options)
+    local_names = dict(graph.client.run(
+        "?[mqn, local_qn] := *search_symbol[_, mqn, _, local_qn, _, _, _, _, _, _, _, _]"
+    )["rows"])
 
     # Build a language-plugin-backed cache for noqa checking.  This keeps
     # dead-code suppression aligned with lint and avoids treating arbitrary
@@ -1370,7 +1319,8 @@ def find_dead_code(
             name=sym.name,
             kind=sym.kind,
             line=sym.line,
-            selector=f"{abs_fp}::{sym.qualified_name}",
+            selector=f"{abs_fp}::{local_names[sym.qualified_name]}",
+            qualified_name=sym.qualified_name,
             reason="no references found",
             root_causes=sym.root_causes,
         ))
@@ -1380,9 +1330,10 @@ def find_dead_code(
         dead_symbols = _string_literal_filter(
             dead_symbols, project_root_resolved, all_files, exclude_references_from,
             exclude_test_references,
+            excluded_files,
         )
 
-    by_qn = {symbol.selector.split("::", 1)[1]: symbol for symbol in dead_symbols}
+    by_qn = {symbol.qualified_name: symbol for symbol in dead_symbols}
     protected = {symbol.qualified_name for symbol in raw_dead} - by_qn.keys()
     if protected and any(symbol.root_causes for symbol in raw_dead):
         # A suppressed/filtered root or intermediate helper must not make its
@@ -1412,33 +1363,6 @@ def find_dead_code(
         "dead_code: %d dead symbols in %.3fs",
         len(dead_symbols), time.monotonic() - t0,
     )
-
-    def _reference_file_is_excluded(file_path: str) -> bool:
-        # A reference file is excluded only when it actually matches one of
-        # the configured exclude patterns. Test files are not special-cased:
-        # excluding an unrelated directory (e.g. legacy/) must not silently
-        # drop test-file imports and produce false-positive "unused module"
-        # reports. Test references are handled separately by the default
-        # ``exclude_test_references`` policy.
-        if exclude_test_references and _is_test_file(file_path):
-            return True
-        if not exclude_references_from:
-            return False
-        try:
-            rel_path = str(Path(file_path).resolve().relative_to(project_root_resolved))
-        except ValueError:
-            rel_path = file_path
-
-        for pattern in exclude_references_from:
-            if fnmatch.fnmatch(file_path, pattern) or fnmatch.fnmatch(rel_path, pattern):
-                return True
-            if fnmatch.fnmatch(file_path, pattern + "*") or fnmatch.fnmatch(rel_path, pattern + "*"):
-                return True
-            if pattern.startswith("**/"):
-                segment = pattern[3:].rstrip("/")
-                if segment and segment in Path(rel_path).parts:
-                    return True
-        return False
 
     # Batch all block line-range lookups into a single source_loc query
     # instead of running one query per unreachable block.
@@ -1543,7 +1467,7 @@ def find_dead_code(
         importing_path = importing_path.resolve()
         if str(importing_path) not in source_file_set:
             continue
-        if _reference_file_is_excluded(str(importing_path)):
+        if str(importing_path) in excluded_files:
             continue
         _record_import(importing_path, module, imported_name)
 
