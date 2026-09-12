@@ -16,6 +16,15 @@ logger = logging.getLogger(__name__)
 # its own marker because its Cozo relation shape can change independently.
 _SCHEMA_VERSION = "8"
 
+
+def _initialize_cache_connection(conn: sqlite3.Connection) -> None:
+    """Configure and durably initialize an independently owned connection."""
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    _init_cache_schema(conn)
+    conn.commit()
+
+
 def _resolve_shared_data_root(project_root: str) -> Path:
     """Return the main checkout root for user-managed shared data.
 
@@ -91,8 +100,6 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
     search; ``import_graph`` is retained for compatibility but is no longer
     read by the facts.db build path.
     """
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
     qn_columns = {
         row[1] for row in conn.execute("PRAGMA table_info(qn_index)").fetchall()
     }
@@ -260,7 +267,6 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
         "  data BLOB NOT NULL"
         ")"
     )
-    conn.commit()
 
 
 # ---------------------------------------------------------------------------
