@@ -337,6 +337,43 @@ class TestScopeLocal:
         matches = find_pattern("process($X)", str(f), scope_local=True)
         assert len(matches) == 1
 
+    @pytest.mark.parametrize(
+        "filename,source,pattern,expected_lines",
+        [
+            ("alias.py", "from os.path import join as j\nj('a', 'b')\n", "j($A, $B)", []),
+            (
+                "nested.py",
+                "from os.path import join as j\ndef outer():\n"
+                "    def j(a, b): return a + b\n    return j('a', 'b')\n",
+                "j($A, $B)", [4],
+            ),
+            ("module.py", "import os.path as p\np.join('a', 'b')\n", "p.join($A, $B)", []),
+            (
+                "shadow.py", "import os\ndef use(os):\n    return os.path.join('a', 'b')\n",
+                "os.path.join($A, $B)", [3],
+            ),
+            (
+                "test.ts",
+                "import { join as j } from 'node:path';\nconst x = j('a', 'b');\n",
+                "j($A, $B)", [],
+            ),
+            (
+                "test.rs",
+                'use std::path::Path as P;\nfn f() { P::new("x"); }\n',
+                "P::new($X)", [],
+            ),
+        ],
+        ids=["alias", "nested-shadow", "module-alias", "parameter-shadow", "typescript", "rust"],
+    )
+    def test_scope_local_respects_import_and_scope_boundaries(
+        self, tmp_path, filename, source, pattern, expected_lines,
+    ):
+        f = tmp_path / filename
+        f.write_text(source)
+
+        matches = find_pattern(pattern, str(f), scope_local=True)
+        assert [match.line for match in matches] == expected_lines
+
     def test_scope_local_cli(self, tmp_path, run_emend_cmd):
         """CLI --scope-local flag works."""
         f = tmp_path / "test.py"

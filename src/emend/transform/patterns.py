@@ -68,7 +68,7 @@ def _filter_matches_by_import(
         return []
 
     # Use a single resolver per file for efficiency
-    resolver = _rust.PyScopeResolver(project_root)
+    resolver = _rust.PyScopeResolver(project_root, Path(file_path).suffix.lstrip("."))
     resolver.index_file(file_path, content)
 
     # Resolve references once and index by (line, col) for O(1) lookup.
@@ -109,27 +109,41 @@ def _filter_matches_by_scope_local(
     if not matches:
         return []
 
-    resolver = _rust.PyScopeResolver(project_root)
+    resolver = _rust.PyScopeResolver(project_root, Path(file_path).suffix.lstrip("."))
     resolver.index_file(file_path, content)
 
-    # Build a set of names that are imported (defined via import statements).
-    imported_names: set[str] = set()
+    from emend.language_registry import detect_language, get_module_separator
+    language = detect_language(file_path) or "python"
+    separator = get_module_separator(language)
+
+    # Compare resolved references, not their spelling: aliases do not share the
+    # imported symbol's last component, and a nested local may shadow an import.
+    imported_qns: set[str] = set()
+    for _local_name, module_path, imported_name, is_star in resolver.imports_in_file(file_path):
+        if is_star:
+            continue
+        imported_qns.add(
+            f"{module_path}{separator}{imported_name}" if imported_name else module_path
+        )
+
+    qn_by_position: dict[tuple[int, int], tuple[int, str]] = {}
     references = resolver.references_in_file(file_path)
     for qn, line, col, offset, end_offset, kind, _ann in references:
-        if kind == "import":
-            # Extract the local name from the qualified name
-            # (e.g., "os.path.join" → "join")
-            local_name = qn.rsplit(".", 1)[-1] if "." in qn else qn
-            imported_names.add(local_name)
+        if kind != "import":
+            key = (line, col)
+            candidate = (end_offset - offset, qn)
+            if key not in qn_by_position or candidate[0] < qn_by_position[key][0]:
+                qn_by_position[key] = candidate
 
     filtered = []
     for match in matches:
-        _root_match = re.search(r"[a-zA-Z_]\w*", match.node_text or "")
-        root_name = _root_match.group(0) if _root_match else None
-        if not root_name:
-            continue
-
-        if root_name not in imported_names:
+        positioned_qn = qn_by_position.get((match.line, match.col))
+        match_qn = positioned_qn[1] if positioned_qn else None
+        if not any(
+            match_qn == imported_qn or match_qn.startswith(imported_qn + separator)
+            for imported_qn in imported_qns
+            if match_qn is not None
+        ):
             filtered.append(match)
 
     return filtered

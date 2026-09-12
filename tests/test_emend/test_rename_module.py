@@ -59,6 +59,33 @@ func()
     assert "old_module" not in user_content
 
 
+def test_rename_module_preserves_relative_import_alias(tmp_path, run_emend_cmd):
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    module = pkg / "models.py"
+    module.write_text("VALUE = 42\n")
+    (pkg / "other.py").write_text("thing = object()\n")
+    consumer = pkg / "consumer.py"
+    consumer.write_text(
+        "from .other import thing as models\n"
+        "from . import models as m, other as models\n"
+        "result = m.VALUE\n"
+    )
+
+    result = run_emend_cmd([
+        "rename", str(module), "--to", "data",
+        "--project", str(tmp_path), "--apply",
+    ])
+
+    assert result.returncode == 0
+    assert consumer.read_text() == (
+        "from .other import thing as models\n"
+        "from . import data as m, other as models\n"
+        "result = m.VALUE\n"
+    )
+
+
 def test_rename_module_dry_run(tmp_path, run_emend_cmd):
     """Test that dry-run doesn't modify files."""
     test_file = tmp_path / "old.py"

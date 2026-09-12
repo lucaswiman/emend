@@ -16,6 +16,19 @@ fn structured_import_to_pydict(py: Python, si: &StructuredImport) -> PyResult<Py
         .map(|n| (n.name.clone(), n.alias.clone()))
         .collect();
     dict.set_item("names", names)?;
+    let name_spans: Vec<(String, usize, usize, Option<String>, Option<usize>, Option<usize>)> = si
+        .names
+        .iter()
+        .map(|n| (
+            n.name.clone(),
+            n.name_start_byte,
+            n.name_end_byte,
+            n.alias.clone(),
+            n.alias_range.map(|range| range.0),
+            n.alias_range.map(|range| range.1),
+        ))
+        .collect();
+    dict.set_item("name_spans", name_spans)?;
     dict.set_item("start_byte", si.start_byte)?;
     dict.set_item("end_byte", si.end_byte)?;
     dict.set_item("start_line", si.start_line)?;
