@@ -63,8 +63,6 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
 
     try:
         conn = _sql3.connect(str(db_path), timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
     except _sql3.Error:
         logger.debug("could not open parse_venv.db", exc_info=True)
         return None
