@@ -235,6 +235,7 @@ class AnalysisStore:
     def _extraction_context_id(self, revisions: Iterable[FileRevision]) -> str:
         """Return the schema/config identity governing extracted facts."""
         from emend.fact_graph import FACT_GRAPH_SCHEMA_VERSION
+        from emend.analysis_linking import LINKER_VERSION
 
         configurations = {
             (revision.language, revision.analysis_config.identity)
@@ -243,6 +244,7 @@ class AnalysisStore:
         }
         payload = (
             FACT_GRAPH_SCHEMA_VERSION,
+            LINKER_VERSION,
             EXTRACTION_ARTIFACT_VERSION,
             tuple(sorted(configurations)),
         )

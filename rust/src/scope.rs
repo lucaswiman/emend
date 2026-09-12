@@ -1203,22 +1203,42 @@ fn canonical_node_import(
 ) -> Option<String> {
     let raw = raw.trim_matches(['\'', '"']);
     if !(raw.starts_with("./") || raw.starts_with("../")) { return None; }
-    let mut parts: Vec<std::ffi::OsString> = Vec::new();
-    for component in file_path.parent()?.join(raw).components() {
-        match component {
-            std::path::Component::ParentDir => { parts.pop(); }
-            std::path::Component::CurDir => {}
-            other => parts.push(other.as_os_str().to_owned()),
+    [module_root, project_root].iter().find_map(|root| {
+        let relative = file_path.strip_prefix(root).ok()?;
+        let physical = relative.components().filter_map(|part| part.as_os_str().to_str())
+            .collect::<Vec<_>>().join("/");
+        let target = root.join(resolve_relative_node_path(raw, &physical)?);
+        let relative = target.strip_prefix(module_root)
+            .or_else(|_| target.strip_prefix(project_root)).ok()?;
+        Some(normalize_node_module(
+            relative.components().filter_map(|part| part.as_os_str().to_str())
+                .collect::<Vec<_>>().join(separator), separator,
+        ))
+    })
+}
+
+/// Resolve a file-local fact import using the same identities as live scope
+/// resolution. `module` is the physical source module, including index stems.
+#[pyo3::pyfunction]
+pub fn resolve_node_import(raw: &str, module: &str) -> Option<String> {
+    let raw = raw.trim_matches(['\'', '"']);
+    if !(raw.starts_with("./") || raw.starts_with("../")) {
+        return Some(canonical_import_module(raw, module, "/", "node", None, false));
+    }
+    resolve_relative_node_path(raw, module).map(|path| normalize_node_module(path, "/"))
+}
+
+fn resolve_relative_node_path(raw: &str, module: &str) -> Option<String> {
+    let parent = module.rsplit_once('/').map_or("", |(parent, _)| parent);
+    let mut parts: Vec<&str> = parent.split('/').filter(|part| !part.is_empty()).collect();
+    for part in raw.split('/') {
+        match part {
+            "." | "" => {}
+            ".." => { parts.pop()?; }
+            _ => parts.push(part),
         }
     }
-    let resolved: PathBuf = parts.iter().collect();
-    let relative = resolved.strip_prefix(module_root)
-        .or_else(|_| resolved.strip_prefix(project_root)).ok()?;
-    Some(normalize_node_module(
-        relative.components().filter_map(|part| part.as_os_str().to_str())
-            .collect::<Vec<_>>().join(separator),
-        separator,
-    ))
+    Some(parts.join("/"))
 }
 
 // ---------------------------------------------------------------------------
@@ -5085,6 +5105,10 @@ def handler():
 
     #[test]
     fn canonical_imports_preserve_module_identity() {
+        assert_eq!(resolve_node_import("react", "consumer").as_deref(), Some("<external>/react"));
+        assert_eq!(resolve_node_import("../../tools", "consumer"), None);
+        assert_eq!(canonical_node_import("./src/dep", Path::new("/project/consumer.ts"), Path::new("/project/src"), Path::new("/project"), "/").as_deref(), Some("dep"));
+        assert_eq!(canonical_node_import("../dep", Path::new("/project/src/consumer.ts"), Path::new("/project/src"), Path::new("/project"), "/").as_deref(), Some("dep"));
         assert_eq!(canonical_node_import("./dep", Path::new("/project/pkg/index.ts"), Path::new("/project"), Path::new("/project"), "/").as_deref(), Some("pkg/dep"));
         assert_eq!(canonical_node_import("../dep.js", Path::new("/project/pkg/sub/file.ts"), Path::new("/project"), Path::new("/project"), "/").as_deref(), Some("pkg/dep"));
         assert_eq!(canonical_import_module("self::child", "container", "::", "rust", None, false), "container::child");

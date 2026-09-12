@@ -505,15 +505,15 @@ def _scan_manifest(
 
         # Tier 2 + 3: Stat scan + hash verification
         # Load manifest into memory for fast lookup (filtered by worktree)
-        manifest: dict[str, bytes] = {}
+        manifest = {}
         try:
             for row in conn.execute(
-                "SELECT path, content_hash FROM file_manifest "
+                "SELECT path, content_hash, scope_hash FROM file_manifest "
                 "WHERE worktree_id = ?",
                 (worktree_id,),
             ).fetchall():
                 if in_scope(row[0]):
-                    manifest[row[0]] = row[1]
+                    manifest[row[0]] = row[1:]
         except _sql3.Error:
             # Table might not exist yet
             logger.debug("file_manifest read failed; treating all files as new", exc_info=True)
@@ -522,13 +522,13 @@ def _scan_manifest(
 
         result.deleted = list(set(manifest) - set(current))
         for path, content_hash in current.items():
-            stored_hash = manifest.get(path)
-            if stored_hash is None:
+            stored = manifest.get(path)
+            if stored is None:
                 result.new_files.append(path)
-            elif stored_hash == content_hash:
+            elif stored == (content_hash, _scope_cache_hash(b"", path, project_root)):
                 result.unchanged.append(path)
             else:
-                result.changed.append((path, stored_hash, content_hash))
+                result.changed.append((path, stored[0], content_hash))
     finally:
         if close_conn and conn:
             conn.close()
@@ -647,9 +647,10 @@ def _ensure_index_fresh_impl(
                     st = _os.stat(resolved)
                     conn.execute(
                         "INSERT OR REPLACE INTO file_manifest "
-                        "(worktree_id, path, mtime_ns, size, content_hash, indexed_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (worktree_id, resolved, st.st_mtime_ns, st.st_size, content_hash, now),
+                        "(worktree_id, path, mtime_ns, size, content_hash, indexed_at, scope_hash) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (worktree_id, resolved, st.st_mtime_ns, st.st_size, content_hash, now,
+                         _scope_cache_hash(b"", resolved, project_root)),
                     )
                 except (OSError, _sql3.Error):
                     logger.debug("manifest update failed for %s", py_file, exc_info=True)
@@ -1222,14 +1223,15 @@ def warm_caches(
                         st.st_size,
                         content_hash,
                         now,
+                        _scope_cache_hash(b"", py_file, project_root),
                     ))
                 except OSError:
                     pass
             if manifest_rows:
                 _mf_conn.executemany(
                     "INSERT OR REPLACE INTO file_manifest "
-                    "(worktree_id, path, mtime_ns, size, content_hash, indexed_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "(worktree_id, path, mtime_ns, size, content_hash, indexed_at, scope_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     manifest_rows,
                 )
             # Update git HEAD (scoped to this worktree)
