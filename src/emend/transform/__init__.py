@@ -41,7 +41,6 @@ from .index import (
     warm_caches,
 )
 from .venv_index import (
-    _build_venv_index,
     _ensure_venv_index,
     _venv_db_path,
     lookup_venv_symbol,
@@ -215,7 +214,7 @@ __all__ = [
     "_extract_noqa_lines", "_get_cached_qnames", "_index_batch", "_lookup_via_modmap",
     "_query_symbol_index_cozo", "_scan_manifest", "_venv_db_path", "ManifestScanResult",
     "get_index_status", "lookup_venv_symbol", "query_import_graph", "query_reference_index",
-    "query_symbol_index", "warm_caches", "_build_venv_index",
+    "query_symbol_index", "warm_caches",
     # project_iter
     "_SKIP_DIRS", "_add_import_text", "_collect_source_files", "_collect_source_files_scandir",
     "_ext_from_path", "_file_to_module", "_files_importing_module",
