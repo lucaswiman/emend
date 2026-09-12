@@ -13,6 +13,7 @@ import re
 from ..language_plugins import NOQA_PATTERN as _NOQA_PATTERN
 from emend import emend_core as _rust
 from emend.errors import BUG_EXCEPTIONS
+from emend.project_config import module_context_snapshot
 
 if TYPE_CHECKING:
     import sqlite3
@@ -204,6 +205,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         return _index_batch_rows(args, conn)
 
 
+@module_context_snapshot()
 def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, int, int, int, int]:
     """Worker function for per-file indexing.
 
@@ -434,6 +436,7 @@ class ManifestScanResult:
     git_head_changed: bool           # True if HEAD differs from stored HEAD
 
 
+@module_context_snapshot()
 def _scan_manifest(
     project_path: str,
     conn: sqlite3.Connection | None = None,

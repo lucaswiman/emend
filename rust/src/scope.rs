@@ -1177,7 +1177,7 @@ fn canonical_import_module(
 }
 
 fn normalize_node_module(mut module: String, separator: &str) -> String {
-    for extension in [".tsx", ".jsx", ".ts", ".js"] {
+    for extension in [".d.ts", ".tsx", ".jsx", ".ts", ".js"] {
         if module.ends_with(extension) {
             module.truncate(module.len() - extension.len());
             break;
@@ -4161,6 +4161,10 @@ fn derive_module_path(
         _ => parts,
     };
 
+    if strategy == "node" {
+        return normalize_node_module(parts.join(separator), separator);
+    }
+
     let mut parts = parts;
 
     // Strip file extension from last component
@@ -4178,12 +4182,6 @@ fn derive_module_path(
         "python" => {
              // Strip __init__ from end (package init files)
             if parts.last() == Some(&"__init__") {
-                parts.pop();
-            }
-        }
-        "node" => {
-             // Strip index from end
-            if parts.last() == Some(&"index") {
                 parts.pop();
             }
         }
@@ -5105,6 +5103,10 @@ def handler():
 
     #[test]
     fn canonical_imports_preserve_module_identity() {
+        for (path, expected) in [("library/index.d.ts", "library"), ("library/types.d.ts", "library/types")] {
+            assert_eq!(derive_module_path(Path::new(path), Path::new(""), "/", "node", &["ts".into()]), expected);
+            assert_eq!(resolve_node_import(&format!("./{path}"), "consumer").as_deref(), Some(expected));
+        }
         assert_eq!(resolve_node_import("react", "consumer").as_deref(), Some("<external>/react"));
         assert_eq!(resolve_node_import("../../tools", "consumer"), None);
         assert_eq!(canonical_node_import("./src/dep", Path::new("/project/consumer.ts"), Path::new("/project/src"), Path::new("/project"), "/").as_deref(), Some("dep"));

@@ -23,7 +23,7 @@ from emend.project_config import find_project_root
 from emend.symbol_projection import SymbolInfo, _symbol_info_view
 
 
-EXTRACTION_ARTIFACT_VERSION = "8"
+EXTRACTION_ARTIFACT_VERSION = "9"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 logger = logging.getLogger(__name__)
 
@@ -345,7 +345,9 @@ class AnalysisStore:
 
     def _scan_disk(self) -> _DiskScan:
         """Read the current source inventory, hashing only stat changes."""
-        with self._source_lock:
+        from emend.project_config import module_context_snapshot
+
+        with self._source_lock, module_context_snapshot():
             return self._scan_disk_locked()
 
     def _scan_disk_locked(self) -> _DiskScan:
@@ -355,13 +357,7 @@ class AnalysisStore:
             get_module_separator,
             registry_and_config_snapshots,
         )
-        from emend.project_config import find_source_root
-
         self._load_observed_files()
-        # Source-root configuration is mutable during long editor sessions.
-        # Recompute it once per language for this inventory, then let the LRU
-        # absorb all per-file module-name lookups below.
-        find_source_root.cache_clear()
         previous = self._observed_files
         registry, configs = registry_and_config_snapshots(self.project_root)
         module_separators = {
