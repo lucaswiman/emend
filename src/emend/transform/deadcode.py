@@ -1545,7 +1545,7 @@ def safe_delete(
     from .project_iter import _find_project_root
     from .impact import _is_test_file
     from emend.analysis_store import AnalysisStore
-    from .components import _generate_diff
+    from emend.edit_session import read_source
 
     scan_root = project_path or _find_project_root(selector.file_path)
 
@@ -1555,7 +1555,7 @@ def safe_delete(
 
     # Seed with the target.
     file_path = str(Path(selector.file_path).resolve())
-    symbols = find_nested_definitions(file_path)
+    symbols = find_nested_definitions(file_path, source_override=read_source(file_path))
     target_sym = find_symbol_by_path(symbols, selector.symbol_path)
     if target_sym is None:
         raise ValueError(
@@ -1663,59 +1663,34 @@ def safe_delete(
                         changed = True
 
     # ----- Phase 2: Apply deletions and collect diffs --------------------
-    # Group by file, process in reverse line order to avoid offset shifts.
+    # Group original-source spans by file; nested cascade targets may overlap.
     from collections import defaultdict
     by_file: dict[str, list[dict]] = defaultdict(list)
     for d in delete_set:
         by_file[d["file_path"]].append(d)
 
-    all_diffs: dict[str, str] = {}
-    pending: dict[Path, str] = {}
+    from .patterns import _remove_symbols_from_source
+    from .rename_move import _publish_edits
+    edits: dict[str, tuple[str, str]] = {}
 
     for fpath, entries in by_file.items():
         fp = Path(fpath)
-        if not fp.exists():
-            continue
-        source_code = fp.read_text()
-        lines = source_code.splitlines(keepends=True)
-
-        # Sort by line descending so we remove from bottom first.
-        entries.sort(key=lambda e: e["line"], reverse=True)
-
+        source_code = read_source(fp)
+        syms = find_nested_definitions(fpath, source_override=source_code)
+        selected = []
         for entry in entries:
             from emend.component_selector import parse_extended_selector as _parse_sel
             sel = _parse_sel(entry["selector"])
-            syms = find_nested_definitions(fpath)
             sym = find_symbol_by_path(syms, sel.symbol_path)
             if sym is None:
-                continue
-
-            start_line = (
-                sym.decorator_line_start
-                if sym.decorator_line_start is not None
-                else sym.line_start
-            )
-            start_idx = start_line - 1
-            end_idx = sym.line_end
-            lines = lines[:start_idx] + lines[end_idx:]
-
-        new_code = "".join(lines)
-        from emend import emend_core
-        if not emend_core.validate_syntax(new_code, fp.suffix.lstrip("."), fragment=False):
-            raise ValueError(f"Deletion would leave invalid syntax in {fpath}")
-        diff = _generate_diff(fpath, source_code, new_code)
-        if diff:
-            all_diffs[fpath] = diff
-            pending[fp] = new_code
-
-    if apply:
-        for fp, new_code in pending.items():
-            fp.write_text(new_code)
+                raise ValueError(f"Symbol disappeared while planning deletion: {entry['selector']}")
+            selected.append(sym)
+        edits[fpath] = (source_code, _remove_symbols_from_source(source_code, selected))
 
     return DeletePlan(
         target=selector_str,
         deletions=delete_set,
-        diffs=all_diffs,
+        diffs=_publish_edits(edits, apply),
     )
 
 

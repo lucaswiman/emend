@@ -370,16 +370,28 @@ def _remove_symbol_content(selector: ExtendedSelector) -> tuple[str, str]:
     if sym is None:
         raise ValueError(f"Symbol {'.'.join(selector.symbol_path)} not found in {selector.file_path}")
 
-    data = source_code.encode()
-    start, end = sym.start_byte, sym.end_byte
-    line_start = data.rfind(b'\n', 0, start) + 1
-    line_end = data.find(b'\n', end)
-    line_end = len(data) if line_end < 0 else line_end + 1
-    if not data[line_start:start].strip() and not data[end:line_end].strip():
-        start, end = line_start, line_end
-    new_code = (data[:start] + data[end:]).decode()
+    return source_code, _remove_symbols_from_source(source_code, [sym])
 
-    return source_code, new_code
+
+def _remove_symbols_from_source(source: str, symbols) -> str:
+    """Remove original-source spans once, preserving same-line neighbors."""
+    data = source.encode()
+    ranges = []
+    for sym in symbols:
+        start, end = sym.start_byte, sym.end_byte
+        line_start = data.rfind(b'\n', 0, start) + 1
+        line_end = data.find(b'\n', end)
+        line_end = len(data) if line_end < 0 else line_end + 1
+        if not data[line_start:start].strip() and not data[end:line_end].strip():
+            start, end = line_start, line_end
+        ranges.append((start, end))
+    kept = []
+    cursor = 0
+    for start, end in sorted(ranges):
+        if start > cursor:
+            kept.append(data[cursor:start])
+        cursor = max(cursor, end)
+    return b''.join([*kept, data[cursor:]]).decode()
 
 
 def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:

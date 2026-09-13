@@ -9,6 +9,32 @@ from emend.component_selector import ExtendedSelector, parse_extended_selector
 class TestSafeDeleteBasic:
     """Tests for basic (non-cascade) safe delete."""
 
+    @pytest.mark.parametrize("extension,source", [
+        ("ts", "function target() {} function retained() {}\n"),
+        ("rs", "fn target() {} fn retained() {}\n"),
+    ])
+    def test_delete_preserves_same_line_neighbor(self, tmp_path, extension, source):
+        from emend.transform import safe_delete
+        src = tmp_path / f"lib.{extension}"
+        src.write_text(source)
+        selector = parse_extended_selector(f"{src}::target")
+        plan = safe_delete(selector, apply=False)
+        assert src.read_text() == source
+        assert len(plan.deletions) == 1
+        safe_delete(selector, apply=True)
+        assert src.read_text() == source[source.index("}") + 1:]
+
+    def test_cascade_overlapping_parent_and_child_spans(self, tmp_path):
+        from emend.transform import safe_delete
+        (tmp_path / "pyproject.toml").write_text('[project]\nname="example"\nversion="0"\n')
+        src = tmp_path / "lib.py"
+        retained = "def retained():\n    return 1\n"
+        src.write_text("def outer():\n    def target():\n        return outer()\n    return target\n" + retained)
+        plan = safe_delete(parse_extended_selector(f"{src}::outer.target"), cascade=True,
+                           project_path=str(tmp_path), apply=True)
+        assert {item["name"] for item in plan.deletions} == {"outer", "target"}
+        assert src.read_text() == retained
+
     def test_delete_single_function(self, tmp_path):
         """Deleting a single function produces the expected diff."""
         from emend.transform import safe_delete
