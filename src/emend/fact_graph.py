@@ -1377,6 +1377,38 @@ class FactGraph:
             for r in result["rows"]
         ]
 
+    def _entry_point_rules(
+        self, entry_point_decorators=None, entry_point_names=None,
+        entry_point_prefixes=None, entry_point_qualified_names=None,
+    ) -> str:
+        """One query-local entry-point policy for analysis and destructive planning."""
+        rules = "".join(
+            self._inline_relation(f"seed_ep_{kind}", ["value"], [(v,) for v in values or []])
+            for kind, values in (
+                ("decorator", entry_point_decorators), ("name", entry_point_names),
+                ("prefix", entry_point_prefixes), ("qn", entry_point_qualified_names),
+            )
+        )
+        return rules + (
+            'entry_point[qn] := seed_ep_qn[qn]\n'
+            'entry_point[qn] := *symbol[qn, _, name, _, _, _, _], '
+            'starts_with(name, "__"), ends_with(name, "__")\n'
+            'entry_point[qn] := *exported_symbol[_, qn]\n'
+        ) + "".join(
+            f'entry_point[qn] := {source}, {relation}[value], {condition}\n'
+            for kind, source, condition in (
+                ("prefix", '*symbol[qn, _, name, _, _, _, _]', 'starts_with(name, value)'),
+                ("name", '*symbol[qn, _, name, _, _, _, _]', 'name == value'),
+                ("decorator", '*decorator_on[qn, dec]', 'lowercase(dec) == lowercase(value)'),
+            )
+            for relation in (f"*entry_point_{kind}", f"seed_ep_{kind}")
+        )
+
+    def entry_point_qualified_names(self, **options) -> set[str]:
+        return {row[0] for row in self._client.run(
+            self._entry_point_rules(**options) + '?[qn] := entry_point[qn]'
+        )["rows"]}
+
     def dead_code_unified(
         self,
         entry_point_decorators: list[str] | None = None,
@@ -1406,19 +1438,9 @@ class FactGraph:
         # Per-invocation seeds must remain query-local.  The stored relations
         # contain only project configuration; putting CLI arguments into them
         # makes one dead-code invocation affect all later invocations.
-        seed_rules = (
-            self._inline_relation(
-                "seed_ep_decorator", ["decorator"],
-                [(d,) for d in (entry_point_decorators or [])],
-            )
-            + self._inline_relation(
-                "seed_ep_name", ["name"],
-                [(n,) for n in (entry_point_names or [])],
-            )
-            + self._inline_relation(
-                "seed_ep_prefix", ["prefix"],
-                [(p,) for p in (entry_point_prefixes or [])],
-            )
+        seed_rules = self._entry_point_rules(
+            entry_point_decorators, entry_point_names,
+            entry_point_prefixes, entry_point_qualified_names,
         )
 
         # Build excluded-path filter clauses for CozoDB.
@@ -1456,16 +1478,8 @@ class FactGraph:
         if excl_parts_ref:
             excl_clauses_ref = ", " + ", ".join(excl_parts_ref)
 
-        exact_entry_rules = ""
-        if entry_point_qualified_names:
-            exact_entry_rules = self._inline_relation(
-                "configured_entry_point",
-                ["qn"],
-                [(qn,) for qn in entry_point_qualified_names],
-            ) + "entry_point[qn] := configured_entry_point[qn]\n"
-
         query = (
-            seed_rules + excluded_file_rules + exact_entry_rules +
+            seed_rules + excluded_file_rules +
             # Live references: from reachable code via pre-computed relations
             # (ref_by_block keyed on (fp, fq, bid, sq) joins efficiently with
             # reachable_block keyed on (fp, fq, bid))
@@ -1514,43 +1528,6 @@ class FactGraph:
 
             'live_ref[qn] := reference_edge[_, qn]\n'
             'live_ref[qn] := external_ref[qn]\n'
-
-            # Entry points: dunder methods
-            'entry_point[qn] := '
-            '*symbol[qn, _, name, _, _, _, _], '
-            'starts_with(name, "__"), ends_with(name, "__")\n'
-
-            # Entry points: dynamic prefix rules (test_, Test, describe_, etc.)
-            'entry_point[qn] := '
-            '*symbol[qn, _, name, _, _, _, _], '
-            '*entry_point_prefix[pfx], '
-            'starts_with(name, pfx)\n'
-            'entry_point[qn] := '
-            '*symbol[qn, _, name, _, _, _, _], '
-            'seed_ep_prefix[pfx], '
-            'starts_with(name, pfx)\n'
-
-            # Entry points: decorated symbols (case-insensitive for TS PascalCase)
-            'entry_point[qn] := '
-            '*decorator_on[qn, dec], '
-            '*entry_point_decorator[ep_dec], '
-            'lowercase(dec) == lowercase(ep_dec)\n'
-            'entry_point[qn] := '
-            '*decorator_on[qn, dec], '
-            'seed_ep_decorator[ep_dec], '
-            'lowercase(dec) == lowercase(ep_dec)\n'
-
-            # Entry points: named symbols
-            'entry_point[qn] := '
-            '*symbol[qn, _, name, _, _, _, _], '
-            '*entry_point_name[name]\n'
-            'entry_point[qn] := '
-            '*symbol[qn, _, name, _, _, _, _], '
-            'seed_ep_name[name]\n'
-
-            # Entry points: explicitly exported symbols
-            'entry_point[qn] := '
-            '*exported_symbol[_, qn]\n'
 
             # A private method is only actionable when its containing class is
             # itself live or externally exposed. This avoids duplicating every
