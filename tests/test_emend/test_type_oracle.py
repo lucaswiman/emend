@@ -638,22 +638,23 @@ class TestFileTypeCache:
             assert adapter._get_lsp(tmp_path) is None
         assert client.stop.call_count == 2
 
-    def test_result_contract_upgrade_drops_legacy_empty_cache(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("engine, previous_version", [("pyrefly", 2), ("typescript", 3)])
+    def test_result_contract_upgrade_invalidates_cache_views(self, tmp_path, monkeypatch, engine, previous_version):
         from emend.type_oracle import load_cached_file_types
 
         target = tmp_path / "target.py"
         target.write_text("value = 1\n")
-        monkeypatch.setattr("emend.analysis_store.TYPE_RESULT_VERSION", 2)
-        old = create_type_oracle("pyrefly", tmp_path)
+        monkeypatch.setattr("emend.analysis_store.TYPE_RESULT_VERSION", previous_version)
+        old = create_type_oracle(engine, tmp_path)
         key = old._file_key(target, tmp_path)
         old._cache.put(key, FileTypes(path=str(target)))
         assert load_cached_file_types(target, project_root=tmp_path).complete
-        monkeypatch.setattr("emend.analysis_store.TYPE_RESULT_VERSION", 3)
-        current = create_type_oracle("pyrefly", tmp_path)
+        monkeypatch.setattr("emend.analysis_store.TYPE_RESULT_VERSION", 4)
+        current = create_type_oracle(engine, tmp_path)
         assert current._cache.get(key, target) is None
         assert load_cached_file_types(target, project_root=tmp_path) is None
         current._cache.put(key, FileTypes(path=str(target)))
-        assert create_type_oracle("pyrefly", tmp_path)._cache.get(key, target).complete
+        assert create_type_oracle(engine, tmp_path)._cache.get(key, target).complete
 
     def test_get_miss(self):
         cache = _FileTypeCache(max_entries=10)
@@ -2422,18 +2423,30 @@ _has_node = shutil.which("node") is not None
 class TestTypeScriptAdapterIntegration:
     """Integration tests for TypeScriptAdapter (requires node + typescript)."""
 
-    def test_simple_variable(self, tmp_path):
+    @pytest.fixture(autouse=True)
+    def require_typescript(self):
+        result = subprocess.run(["node", "-p", "require.resolve('typescript/package.json')"], capture_output=True, text=True)
+        if result.returncode:
+            pytest.skip("TypeScript dependency is not installed")
+        return Path(result.stdout.strip()).parent
+
+    def test_simple_variable(self, tmp_path, monkeypatch, require_typescript):
+        modules = tmp_path / "node_modules"
+        modules.mkdir()
+        (modules / "typescript").symlink_to(require_typescript, target_is_directory=True)
+        monkeypatch.delenv("NODE_PATH", raising=False)
         ts_file = tmp_path / "test.ts"
-        ts_file.write_text("const greeting: string = 'hello';\n")
+        prefix = "/* 😀 */ const "
+        ts_file.write_text(prefix + "café: string = 'hello';\n")
         adapter = TypeScriptAdapter(db_path=None)
         ft = adapter.infer_file(ts_file, project_root=tmp_path)
-        if not ft.bindings:
-            pytest.skip("TypeScript toolchain produced no bindings")
-        names = {b.name for b in ft.bindings}
-        assert "greeting" in names
-        greeting_bindings = ft.types_for_name("greeting")
-        assert greeting_bindings
-        assert "string" in greeting_bindings[0].raw_type
+        assert ft.complete
+        binding = ft.type_at(1, len(prefix.encode()) + 1)
+        assert binding is not None and binding.name == "café"
+        assert binding.col_end == len((prefix + "café").encode()) + 1
+        assert "string" in binding.raw_type
+        from emend.transform import find_pattern
+        assert [m.node_text for m in find_pattern("$X:type[string]", str(ts_file), type_oracle=adapter)] == ["café"]
 
     def test_function_types(self, tmp_path):
         ts_file = tmp_path / "test.ts"
@@ -2445,8 +2458,7 @@ class TestTypeScriptAdapterIntegration:
         """))
         adapter = TypeScriptAdapter(db_path=None)
         ft = adapter.infer_file(ts_file, project_root=tmp_path)
-        if not ft.bindings:
-            pytest.skip("TypeScript toolchain produced no bindings")
+        assert ft.complete
         names = {b.name for b in ft.bindings}
         assert "add" in names or "result" in names
 
@@ -2455,8 +2467,7 @@ class TestTypeScriptAdapterIntegration:
         ts_file.write_text("const items: Array<string> = ['a', 'b'];\n")
         adapter = TypeScriptAdapter(db_path=None)
         ft = adapter.infer_file(ts_file, project_root=tmp_path)
-        if not ft.bindings:
-            pytest.skip("TypeScript toolchain produced no bindings")
+        assert ft.complete
         items = ft.types_for_name("items")
         assert items
         assert "string" in items[0].raw_type

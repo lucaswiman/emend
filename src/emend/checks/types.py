@@ -24,6 +24,25 @@ class TypeCheck:
     expected_type: str
     kind: str = "has_type"  # "has_type" or "returns"
 
+    def subject(self) -> str:
+        """Require one explicit root capture, never guess a nested subject."""
+        from emend.pattern import parse_pattern, is_oracle_type_constraint
+
+        if self.kind not in {"has_type", "returns"}:
+            raise ValueError(f"Invalid type check kind: {self.kind!r}")
+        pattern = parse_pattern(self.symbol_pattern)
+        if len(pattern.metavars) == 1:
+            mv = pattern.metavars[0]
+            suffix = f":{mv.type_constraint}" if mv.type_constraint else ""
+            if (not mv.ellipsis and not is_oracle_type_constraint(mv.type_constraint)
+                    and self.symbol_pattern.strip() == f"${mv.name}{suffix}"):
+                return mv.name
+        raise ValueError(
+            "TypeCheck symbol_pattern must be a root metavariable such as "
+            "'$X:identifier'; use a structural pattern with an explicitly "
+            "type-constrained capture for nested expressions"
+        )
+
 
 def run_type_check(
     check: TypeCheck,
@@ -35,6 +54,9 @@ def run_type_check(
 ) -> "list[PolicyViolation]":
     """Run a type constraint check using the type oracle."""
     from emend.transform import find_pattern
+    from emend.transform.patterns import _filter_matches_by_type_oracle
+
+    subject = check.subject()
 
     def unavailable(reason: str) -> list[PolicyViolation]:
         return [PolicyViolation(
@@ -47,11 +69,6 @@ def run_type_check(
             message=f"{policy.description}: type oracle unavailable ({reason})",
             witness=[],
         )]
-
-    if check.kind == "returns":
-        augmented_pattern = f"{check.symbol_pattern}:returns[{check.expected_type}]"
-    else:
-        augmented_pattern = f"{check.symbol_pattern}:type[{check.expected_type}]"
 
     all_matches = find_pattern(
         check.symbol_pattern,
@@ -76,12 +93,12 @@ def run_type_check(
         logger.debug("Could not create type oracle for type check", exc_info=True)
         return unavailable(str(exc) or "engine initialization failed")
 
-    typed_matches = find_pattern(
-        augmented_pattern,
+    typed_matches = _filter_matches_by_type_oracle(
+        all_matches,
+        {subject: ("returns" if check.kind == "returns" else "type", check.expected_type)},
+        type_oracle,
         file_path,
-        source_override=source,
-        type_oracle=type_oracle,
-        language=language,
+        source,
     )
 
     typed_positions = {(m.line, m.col) for m in typed_matches}

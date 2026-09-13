@@ -1875,13 +1875,13 @@ class TyAdapter(_LSPTypeOracle):
 # LSP round-trips, making it significantly faster than an LSP-based approach.
 _TS_TYPE_HELPER = """\
 "use strict";
-var ts;
-try { ts = require("typescript"); } catch(e) {
-    process.stderr.write(String(e)); process.exit(1);
-}
 var path = require("path");
 var filePath = path.resolve(process.argv[2]);
 var projectRoot = process.argv[3] || path.dirname(filePath);
+var ts;
+try { ts = require(require.resolve("typescript", {paths:[projectRoot]})); } catch(e) {
+    process.stderr.write(String(e)); process.exit(1);
+}
 var configPath = ts.findConfigFile(projectRoot, ts.sys.fileExists, "tsconfig.json");
 var options = {target:ts.ScriptTarget.ES2020, module:ts.ModuleKind.CommonJS,
     allowJs:true, noEmit:true, strict:false, skipLibCheck:true};
@@ -1921,8 +1921,10 @@ function visit(node) {
                             ts.isPropertyDeclaration(par) || ts.isInterfaceDeclaration(par) ||
                             ts.isTypeAliasDeclaration(par)) && par.name === node)
                             kind = "definition";
-                        bindings.push({name:node.text, line:p.line+1, col_start:p.character+1,
-                            col_end:p.character+1+node.text.length, type:s, kind:kind});
+                        var col = Buffer.byteLength(sf.text.slice(
+                            sf.getPositionOfLineAndCharacter(p.line, 0), node.getStart(sf)), "utf8") + 1;
+                        bindings.push({name:node.text, line:p.line+1, col_start:col,
+                            col_end:col+Buffer.byteLength(node.getText(sf), "utf8"), type:s, kind:kind});
                     }
                 }
             } catch(e) {}

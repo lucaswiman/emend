@@ -198,6 +198,10 @@ def validate_policies(policies: list[Policy]) -> list[str]:
                 if not check.pattern:
                     errors.append(f"{cprefix}: pattern is required")
             elif isinstance(check, TypeCheck):
+                try:
+                    check.subject()
+                except ValueError as exc:
+                    errors.append(f"{cprefix}: {exc}")
                 if not check.symbol_pattern:
                     errors.append(f"{cprefix}: symbol_pattern is required")
                 if not check.expected_type:

@@ -31,10 +31,10 @@ def _type_policy(check):
 
 
 def test_unavailable_type_oracle_only_fails_for_matching_symbols(tmp_path):
-    check = TypeCheck("target($X)", "str")
+    check = TypeCheck("$X:identifier", "str")
     policy = _type_policy(check)
 
-    assert _run_type_check(check, policy, "app.py", "other(1)\n", "python") == []
+    assert _run_type_check(check, policy, "app.py", "1\n", "python") == []
     violations = _run_type_check(check, policy, "app.py", "target(1)\n", "python")
     assert len(violations) == 1
     assert violations[0].check_name == "type:unavailable:has_type"
@@ -52,7 +52,7 @@ def test_matching_type_check_reports_oracle_failure(tmp_path, monkeypatch, failu
         return UnavailableOracle()
 
     monkeypatch.setattr("emend.type_oracle.create_type_oracle", create_type_oracle)
-    check = TypeCheck("target($X)", "str")
+    check = TypeCheck("$X:identifier", "str")
 
     violations = _run_type_check(
         check, _type_policy(check), "app.py", "target(1)\n", "python", str(tmp_path),
@@ -60,6 +60,44 @@ def test_matching_type_check_reports_oracle_failure(tmp_path, monkeypatch, failu
 
     assert len(violations) == 1
     assert "type oracle unavailable" in violations[0].message
+
+
+@pytest.mark.parametrize("kind", ["has_type", "returns"])
+def test_type_check_rejects_ambiguous_subject_before_matching(kind):
+    check = TypeCheck("target($X)", "str", kind)
+    policy = _type_policy(check)
+    assert any("root metavariable" in error for error in validate_policies([policy]))
+    with pytest.raises(ValueError, match="root metavariable"):
+        _run_type_check(check, policy, "app.py", "", "python")
+
+
+@pytest.mark.parametrize("kind", ["has_type", "returns"])
+def test_type_check_with_available_oracle(tmp_path, monkeypatch, kind):
+    from emend.type_oracle import FileTypes, TypeBinding, TypeDescriptor
+
+    source = "good\nbad\n"
+    path = tmp_path / "app.py"
+    path.write_text(source)
+    types = FileTypes(str(path), [
+        TypeBinding(name, line, 1, len(name) + 1,
+                    TypeDescriptor.named(typ) if kind == "has_type" else
+                    TypeDescriptor.callable_((), TypeDescriptor.named(typ)),
+                    typ, "reference")
+        for line, (name, typ) in enumerate((("good", "str"), ("bad", "int")), 1)
+    ])
+    types.build_index()
+
+    class Oracle:
+        def is_available(self):
+            return True
+
+        def infer_file(self, _path):
+            return types
+
+    monkeypatch.setattr("emend.type_oracle.create_type_oracle", lambda **_: Oracle())
+    check = TypeCheck("$X:identifier", "str", kind)
+    violations = _run_type_check(check, _type_policy(check), str(path), source, "python", str(tmp_path))
+    assert [(v.line, v.witness) for v in violations] == [(2, ["bad"])]
 
 
 def _write_rules(tmp_path, rules_dict):

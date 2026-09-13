@@ -157,6 +157,45 @@ class _SimpleOracle(TypeOracle):
         pass
 
 
+@pytest.mark.parametrize("source, pattern, positions, expected", [
+    ("sink(sink)\n", "sink($X:type[str])", [(1, 1, 5, "int"), (1, 6, 10, "str")], 1),
+    ("x; sink(x)\n", "sink($X:type[str])", [(1, 1, 2, "int"), (1, 9, 10, "str")], 1),
+    ("sink(\n  x\n)\n", "sink($X:type[str])", [(2, 3, 4, "str")], 1),
+    ("é; sink(x)\n", "sink($X:type[str])", [(1, 10, 11, "str")], 1),
+    ("sink(x, x)\n", "sink($X:type[str], $X)", [(1, 6, 7, "str"), (1, 9, 10, "int")], 0),
+])
+def test_typed_captures_use_actual_occurrences(tmp_path, source, pattern, positions, expected):
+    from emend.transform import find_pattern
+
+    path = tmp_path / "app.py"
+    path.write_text(source)
+    types = _build_file_types(str(path), [
+        TypeBinding("x", line, col, end, TypeDescriptor.named(typ), typ, "reference")
+        for line, col, end, typ in positions
+    ])
+    oracle = _SimpleOracle({str(path): types})
+    assert len(find_pattern(pattern, str(path), type_oracle=oracle)) == expected
+    with pytest.raises(ValueError, match="source matching"):
+        find_pattern(pattern, str(path), source_override="\n" + source, type_oracle=oracle)
+    types.complete = False
+    with pytest.raises(ValueError, match="complete type inference"):
+        find_pattern(pattern, str(path), type_oracle=oracle)
+
+
+@pytest.mark.parametrize("end", [5, None])
+def test_type_constraint_requires_the_whole_capture_span(tmp_path, end):
+    from emend.transform import find_pattern
+
+    path = tmp_path / "app.py"
+    path.write_text("sink(1)\n")
+    types = _build_file_types(str(path), [TypeBinding(
+        "sink", 1, 1, end, TypeDescriptor.callable_((), TypeDescriptor.named("str")),
+        "() -> str", "reference",
+    )])
+    matches = find_pattern("$X:returns[str]", str(path), type_oracle=_SimpleOracle({str(path): types}))
+    assert [m.matched_text for m in matches] == (["sink"] if end else [])
+
+
 def _build_file_types(path: str, bindings: list[TypeBinding]) -> FileTypes:
     """Build and index a FileTypes with the given bindings."""
     ft = FileTypes(path=path)
