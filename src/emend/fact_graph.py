@@ -2527,6 +2527,8 @@ def _compile_sequence_query(
     blocker_locations: dict | None = None,
 ) -> str | None:
     """Join occurrence-local captures and CFG paths without losing their origin."""
+    if errors := check.contract_errors():
+        raise ValueError("; ".join(errors))
     steps = check.sequence
     if len(steps) < 2:
         return None
@@ -2606,29 +2608,43 @@ def _compile_sequence_query(
         for origin in sorted({origins[name] for name in blocker_keys} - {i, i + 1}):
             seeds.append(relation(origin, "_", "_"))
         context = "fp, fq, origin, start_line, endpoint, end_line"
-        # Bind blockers from the same occurrence environment before path recursion.
+        # Initial/final visits cover partial blocks; intermediate visits cover
+        # the whole block, including when a loop revisits an endpoint block.
+        for part, condition in {
+            "any": "true",
+            "start": "block == origin, (line < 0 || line >= start_line)",
+            "end": "block == endpoint, (line < 0 || line <= end_line)",
+            "direct": "block == origin, (line < 0 || (line >= start_line && line <= end_line))",
+        }.items():
+            rules.append(
+                f'blocked_{part}_{i}[{context}, block{suffix}] := '
+                + ", ".join(seeds) + ", "
+                f'blocker_rows_{i}[fp, fq, block, line{blocker_params}]{checks}, {condition}'
+            )
         rules.append(
-            f'blocked_{i}[{context}, block{suffix}] := '
-            + ", ".join(seeds) + ", "
-            f'blocker_rows_{i}[fp, fq, block, line{blocker_params}]{checks}, '
-            '(line < 0 || block != origin || line >= start_line), '
-            '(line < 0 || block != endpoint || line <= end_line)'
-        )
-        rules.append(
-            f'reach_{i}[{context}, origin{suffix}] := ' + ", ".join(seeds)
-            + f', not blocked_{i}[{context}, origin{suffix}]'
+            f'reach_{i}[{context}, target{suffix}] := ' + ", ".join(seeds)
+            + f', *cfg_edge[fp, fq, origin, target, _, _, _], '
+            f'not blocked_start_{i}[{context}, origin{suffix}]'
         )
         rules.append(
             f'reach_{i}[{context}, target{suffix}] := '
             f'reach_{i}[{context}, source{suffix}], '
             f'*cfg_edge[fp, fq, source, target, _, _, _], '
-            f'not blocked_{i}[{context}, source{suffix}], '
-            f'not blocked_{i}[{context}, target{suffix}]'
+            f'not blocked_any_{i}[{context}, source{suffix}]'
         )
-        joins.append(f'reach_{i}[fp, fq, block_{i}, line_{i}, '
-                    f'block_{i + 1}, line_{i + 1}, block_{i + 1}{suffix}]')
+        rules.append(
+            f'ordered_{i}[{context}{suffix}] := '
+            f'reach_{i}[{context}, endpoint{suffix}], '
+            f'not blocked_end_{i}[{context}, endpoint{suffix}]'
+        )
         ordering = ">" if i + 1 in effects else ">="
-        joins.append(f'line_{i + 1} {ordering} line_{i}')
+        rules.append(
+            f'ordered_{i}[{context}{suffix}] := ' + ", ".join(seeds)
+            + f', origin == endpoint, end_line {ordering} start_line, '
+            f'not blocked_direct_{i}[{context}, origin{suffix}]'
+        )
+        joins.append(f'ordered_{i}[fp, fq, block_{i}, line_{i}, '
+                     f'block_{i + 1}, line_{i + 1}{suffix}]')
 
     # A definition capture requires its value to reach the later occurrence.
     # A reference capture (close($FD), for example) is not a definition site.
@@ -2679,6 +2695,8 @@ def compile_sequence_rule(
         Tuple of ``(cozoscript_query, step_data)`` where *step_data* is
         metadata about resolved steps, or ``None`` if no matches found.
     """
+    if errors := check.contract_errors():
+        raise ValueError("; ".join(errors))
     steps = check.sequence
     if not steps or len(steps) < 2:
         return None
@@ -2711,13 +2729,7 @@ def compile_sequence_rule(
                 logger.debug("Could not read %s for sequence resolution", path, exc_info=True)
                 continue
             for pattern in patterns:
-                try:
-                    matches = find_pattern(pattern, str(path), source_override=source)
-                except BUG_EXCEPTIONS:
-                    raise
-                except Exception:
-                    logger.debug("Sequence pattern %s failed in %s", pattern, fp, exc_info=True)
-                    continue
+                matches = find_pattern(pattern, str(path), source_override=source)
                 for match in matches:
                     if match.line is None:
                         continue

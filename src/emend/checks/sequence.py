@@ -43,6 +43,16 @@ class SequenceCheck:
     path_constraints: list[SequencePathConstraint] = field(default_factory=list)
     severity: str = "error"
 
+    def contract_errors(self) -> list[str]:
+        """Reject options the sequence evaluator cannot honor."""
+        adjacent = {(a.bind, b.bind) for a, b in zip(self.sequence, self.sequence[1:])}
+        errors = ["unsupported sequence type_constraint"
+                  for step in self.sequence if step.type_constraint]
+        errors.extend("unsupported sequence path: constraints require consecutive forward steps"
+                      for path in self.path_constraints
+                      if (path.from_step, path.to_step) not in adjacent)
+        return errors
+
 
 def run_sequence_check(
     check: SequenceCheck,

@@ -214,6 +214,7 @@ def validate_policies(policies: list[Policy]) -> list[str]:
                 if not check.cozoscript:
                     errors.append(f"{cprefix}: cozoscript is required")
             elif isinstance(check, SequenceCheck):
+                errors.extend(f"{cprefix}: {error}" for error in check.contract_errors())
                 if not check.name:
                     errors.append(f"{cprefix}: name is required")
                 if len(check.sequence) < 2:
