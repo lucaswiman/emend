@@ -1002,12 +1002,21 @@ def test_type_batch_uses_one_snapshot_and_reuses_linked_worktree_payload(
 
 @pytest.mark.parametrize("extension", ["py", "pyi"])
 @pytest.mark.parametrize("package", [False, True])
-def test_installed_type_dependencies_refresh_and_share_artifacts(tmp_path, monkeypatch, extension, package):
+@pytest.mark.parametrize("configuration", ["environment", "pyrefly.toml", "pyproject.toml"])
+def test_installed_type_dependencies_refresh_and_share_artifacts(tmp_path, monkeypatch, extension, package, configuration):
     main, linked = _linked_worktrees(tmp_path)
+    def dependency_root(root):
+        return (root / ".venv/lib/python3.14/site-packages" if configuration == "environment"
+                else root.parent / f"{root.name}-search")
     for root in (main, linked):
         (root / "target.py").write_text("from dependency import value\nresult = value\n")
         (root / "pyproject.toml").write_text("[tool.emend.environment_lookup]\nenabled=false\n")
-        installed = root / ".venv/lib/python3.14/site-packages"
+        installed = dependency_root(root)
+        if configuration != "environment":
+            (root / configuration).write_text(
+                ("[tool.pyrefly]\n" if configuration == "pyproject.toml" else "")
+                + f'search-path = ["../{installed.name}"]\n'
+            )
         installed.mkdir(parents=True)
         dep = installed / "dependency" if package else installed
         dep.mkdir(exist_ok=True)
@@ -1021,11 +1030,16 @@ def test_installed_type_dependencies_refresh_and_share_artifacts(tmp_path, monke
     target = main / "target.py"
     store = AnalysisStore.open(main)
     initial = store.type_file_identity(target)
+    oracle = _FakeTypeOracle(main)
+    _FakeTypeOracle.calls = 0
+    oracle.infer_file(target, main)
+    oracle.infer_file(target, main)
+    assert _FakeTypeOracle.calls == 1
     linked_store = AnalysisStore.open(linked)
     assert linked_store.type_file_identity(linked / "target.py") == initial
     with sqlite3.connect(store.artifact_path) as db:
         assert db.execute("SELECT count(*) FROM dependency_import_artifact").fetchone()[0] == 2
-    installed = main / ".venv/lib/python3.14/site-packages"
+    installed = dependency_root(main)
     original_read = Path.read_text
     def no_dependency_read(path, *args, **kwargs):
         assert not path.is_relative_to(installed), "unchanged dependencies must not be reread"
@@ -1038,9 +1052,33 @@ def test_installed_type_dependencies_refresh_and_share_artifacts(tmp_path, monke
     dependency = (installed / "dependency" if package else installed) / f"transitive.{extension}"
     dependency.write_text("value: str = 'changed'\n")
     assert store.type_file_identity(target) != initial
+    oracle.infer_file(target, main)
+    assert _FakeTypeOracle.calls == 2
     dependency.write_text("value: int = 1\n")
     assert store.type_file_identity(target) == initial
     dependency.unlink()
+    assert store.type_file_identity(target) != initial
+    dependency.write_text("value: int = 1\n")
+    assert store.type_file_identity(target) == initial
+    if configuration != "environment":
+        config = main / configuration
+        original_config = config.read_text()
+        config.unlink()
+        assert store.type_file_identity(target) != initial
+        config.write_text(original_config)
+        assert store.type_file_identity(target) == initial
+
+
+def test_type_dependencies_keep_language_identity(tmp_path):
+    target, python, typescript = (tmp_path / name for name in ("main.py", "api.py", "api.ts"))
+    target.write_text("from api import value\nresult = value\n")
+    python.write_text("value = 1\n")
+    typescript.write_text("export const value = 1;\n")
+    store = AnalysisStore.open(tmp_path)
+    initial = store.type_file_identity(target)
+    typescript.write_text("export const value = 'changed';\n")
+    assert store.type_file_identity(target) == initial
+    python.write_text("value = 'changed'\n")
     assert store.type_file_identity(target) != initial
 
 

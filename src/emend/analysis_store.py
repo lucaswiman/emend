@@ -1328,15 +1328,15 @@ class AnalysisStore:
 
         revisions = {revision.file_path: revision for revision in snapshot.files}
         module_to_revision = {
-            revision.module_name.replace("::", ".").replace("/", "."): revision
+            (revision.language, revision.module_name.replace("::", ".").replace("/", ".")): revision
             for revision in revisions.values()
         }
 
-        suffix_to_revisions: dict[str, list[FileRevision]] = {}
-        for module, revision in module_to_revision.items():
+        suffix_to_revisions: dict[tuple[str, str], list[FileRevision]] = {}
+        for (language, module), revision in module_to_revision.items():
             parts = module.split(".")
             for index in range(len(parts)):
-                suffix_to_revisions.setdefault(".".join(parts[index:]), []).append(
+                suffix_to_revisions.setdefault((language, ".".join(parts[index:])), []).append(
                     revision
                 )
 
@@ -1369,15 +1369,15 @@ class AnalysisStore:
             if language == "typescript":
                 from emend.emend_core import resolve_node_import
                 local_name = resolve_node_import(name, "")
-            exact = module_to_revision.get(local_name)
+            exact = module_to_revision.get((language, local_name))
             if exact is not None:
                 return exact
-            matches = list(suffix_to_revisions.get(local_name, ()))
+            matches = list(suffix_to_revisions.get((language, local_name), ()))
             parts = (local_name or "").split(".")
             matches.extend(
                 candidate
                 for index in range(1, len(parts))
-                if (candidate := module_to_revision.get(".".join(parts[index:])))
+                if (candidate := module_to_revision.get((language, ".".join(parts[index:]))))
                 is not None
             )
             matches = list({
@@ -1404,6 +1404,22 @@ class AnalysisStore:
                 if result is not None:
                     return result
             return None
+
+        from emend.project_config import pyrefly_search_roots
+        python_search_roots = (pyrefly_search_roots(self.project_root)
+                               if "python" in configs else ())
+
+        @cache
+        def configured_python_revisions(name):
+            candidates = []
+            for root in python_search_roots:
+                base = root.joinpath(*name.split("."))
+                for path in (base.with_suffix(".pyi"), base.with_suffix(".py"),
+                             base / "__init__.pyi", base / "__init__.py"):
+                    revision = external_revision(path, "python", root, name)
+                    if revision is not None:
+                        candidates.append(revision)
+            return candidates
 
         from emend.project_config import load_typescript_config
 
@@ -1479,13 +1495,13 @@ class AnalysisStore:
                         except (ImportError, ValueError):
                             pass
                     name = name.lstrip(".").replace("::", ".").replace("/", ".")
-                    candidates.append(module_revision(name, revision.language))
-                    candidates.extend(module_revision(".".join(name.split(".")[:i]), revision.language)
-                                      for i in range(1, len(name.split("."))))
+                    names = [name, *(".".join(name.split(".")[:i])
+                                     for i in range(1, len(name.split("."))))]
                     if imported_name not in (None, "*"):
-                        candidates.append(module_revision(
-                            f"{name}.{imported_name}", revision.language
-                        ))
+                        names.append(f"{name}.{imported_name}")
+                    for name in names:
+                        candidates.append(module_revision(name, revision.language))
+                        candidates.extend(configured_python_revisions(name))
                 elif name.startswith("."):
                     base = (Path(revision.file_path).parent / name).resolve()
                     # TypeScript commonly imports emitted ``.js`` names whose

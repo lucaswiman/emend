@@ -567,6 +567,24 @@ def _load_project_config(
     return result
 
 
+def pyrefly_search_roots(project_root: Path) -> tuple[Path, ...]:
+    """Project-declared checker roots for conservative dependency observation.
+
+    The standalone config takes precedence over the pyproject table. These
+    candidates augment observation, not the checker's resolution precedence.
+    """
+    standalone = project_root / "pyrefly.toml"
+    path = standalone if standalone.is_file() else project_root / "pyproject.toml"
+    try:
+        config = _load_toml_payload(_read_config_bytes(path), str(path))
+    except OSError:
+        return ()
+    if path != standalone:
+        config = config.get("tool", {}).get("pyrefly", {})
+    roots = config.get("search-path", []) if isinstance(config, dict) else []
+    return tuple((project_root / root).resolve() for root in roots if isinstance(root, str)) if isinstance(roots, list) else ()
+
+
 def load_project_config(project_root: str, language: str = "python") -> dict[str, Any]:
     """Load content-addressed configuration that notices live file changes."""
     from emend.language_registry import config_identity
