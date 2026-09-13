@@ -27,7 +27,7 @@ from emend.symbol_projection import SymbolInfo, _symbol_info_view
 from emend.sqlite_writer import SQLiteWriter
 
 
-EXTRACTION_ARTIFACT_VERSION = "16"
+EXTRACTION_ARTIFACT_VERSION = "17"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 TYPE_RESULT_VERSION = 3  # Language-correct UTF-16 LSP queries, including cached reads.
 logger = logging.getLogger(__name__)

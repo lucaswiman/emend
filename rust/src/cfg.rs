@@ -1177,8 +1177,10 @@ impl<'a> CfgBuilder<'a> {
         }
 
         let mut try_end = None;
+        let mut try_entry = None;
         if let Some(body) = try_body {
             let try_block = self.new_block_from_node(body);
+            try_entry = Some(try_block);
             self.add_edge(current, try_block, EdgeKind::Fallthrough);
             try_end = self.walk_body(body, try_block);
         }
@@ -1186,13 +1188,8 @@ impl<'a> CfgBuilder<'a> {
         let except_target = if !except_clauses.is_empty() {
             let first_except = self.new_block_from_node(except_clauses[0]);
 
-            if let Some(body) = try_body {
-                let try_entry = self.blocks.iter()
-                    .find(|b| b.start_byte == body.start_byte())
-                    .map(|b| b.id);
-                if let Some(te) = try_entry {
-                    self.add_edge(te, first_except, EdgeKind::Exception);
-                }
+            if let Some(te) = try_entry {
+                self.add_edge(te, first_except, EdgeKind::Exception);
             }
 
             let mut prev_handler: Option<BlockId> = None;
@@ -1273,6 +1270,9 @@ impl<'a> CfgBuilder<'a> {
                     if let Some(et) = except_target {
                         self.add_edge(et, fin_block, EdgeKind::Finally);
                     }
+                    if let Some(protected) = except_target.or(try_entry) {
+                        self.add_edge(protected, fin_block, EdgeKind::Exception);
+                    }
                     // If both try_end and except_target are None, all paths
                     // through the try terminated (return/raise/break), but
                     // finally still executes.  Connect from the try entry
@@ -1309,8 +1309,12 @@ impl<'a> CfgBuilder<'a> {
 
         // Try body
         let mut try_end = None;
+        let mut try_entry = None;
+        let mut handler_entry = None;
+        let mut handler_end = None;
         if let Some(body) = node.child_by_field_name(body_field) {
             let try_block = self.new_block_from_node(body);
+            try_entry = Some(try_block);
             self.add_edge(current, try_block, EdgeKind::Fallthrough);
             try_end = self.walk_body(body, try_block);
 
@@ -1318,11 +1322,13 @@ impl<'a> CfgBuilder<'a> {
             if !catch_field.is_empty() {
                 if let Some(handler) = node.child_by_field_name(catch_field) {
                     let handler_block = self.new_block_from_node(handler);
+                    handler_entry = Some(handler_block);
                     self.add_edge(try_block, handler_block, EdgeKind::Exception);
 
                     // Walk handler body
                     if let Some(hbody) = handler.child_by_field_name(body_field) {
                         if let Some(end) = self.walk_body(hbody, handler_block) {
+                            handler_end = Some(end);
                             if finalizer_field.is_empty()
                                 || node.child_by_field_name(finalizer_field).is_none()
                             {
@@ -1352,6 +1358,12 @@ impl<'a> CfgBuilder<'a> {
                 let fin_block = self.new_block_from_node(fin);
                 if let Some(te) = try_end {
                     self.add_edge(te, fin_block, EdgeKind::Finally);
+                }
+                if let Some(end) = handler_end {
+                    self.add_edge(end, fin_block, EdgeKind::Finally);
+                }
+                if let Some(protected) = handler_entry.or(try_entry) {
+                    self.add_edge(protected, fin_block, EdgeKind::Exception);
                 }
                 // Walk finalizer body
                 if let Some(fbody) = fin.child_by_field_name(body_field) {
@@ -1874,11 +1886,23 @@ impl<'a> FlowExtractor<'a> {
         if let Some(path) = self.path(node) {
             return vec![self.emit(node, "use", Some(path), None, None)];
         }
+        if node.kind() == self.lang.pattern_matching.binary_operator
+            || node.kind() == self.lang.pattern_matching.unary_operator {
+            let inputs = self.generic(node);
+            let result = self.emit(node, "evaluate", None, None, None);
+            for input in inputs { self.edge(input, result, "transfer"); }
+            return vec![result];
+        }
         self.generic(node)
     }
 
     fn walk(&mut self, node: tree_sitter::Node) {
         if self.is_function(node) { return; }
+        if self.lang.cfg.throw_nodes.iter().any(|kind| kind == node.kind()) {
+            for child in Self::children(node) { self.expr(child); }
+            self.emit(node, "throw", None, None, None);
+            return;
+        }
         if self.lang.cfg.return_nodes.iter().any(|kind| kind == node.kind()) {
             let value = node.child_by_field_name(&self.lang.pattern_matching.value_field).or_else(|| node.named_child(0));
             let inputs = value.map(|n| self.expr(n)).unwrap_or_default();
@@ -1914,11 +1938,25 @@ impl<'a> FlowExtractor<'a> {
             additions.extend(values.windows(2).map(|p| FlowEdge { from: p[0].1, to: p[1].1, kind: "control".into() }));
         }
         let successors: HashMap<u32, Vec<u32>> = self.cfg.blocks.iter().map(|b| {
-            (b.id.0, self.cfg.successors(b.id).into_iter().map(|id| id.0).collect())
+            (b.id.0, self.cfg.edges.iter().filter(|edge| edge.from == b.id && edge.kind != EdgeKind::Exception)
+             .map(|edge| edge.to.0).collect())
         }).collect();
-        for (&block, values) in &by_block {
-            let Some(&(_, last)) = values.last() else { continue };
-            let mut queue: VecDeque<u32> = successors.get(&block).into_iter().flatten().copied().collect();
+        let mut exits: Vec<(u32, Vec<u32>)> = by_block.iter().filter_map(|(&block, values)| {
+            values.last().map(|&(_, last)| (last, successors.get(&block).cloned().unwrap_or_default()))
+        }).collect();
+        // A throwing evaluation leaves before its result or assignment exists. The
+        // exceptional CFG edge identifies the protected region, not its exit.
+        for edge in self.cfg.edges.iter().filter(|edge| edge.kind == EdgeKind::Exception) {
+            let protected = &self.cfg.blocks[edge.from.0 as usize];
+            for event in &self.events {
+                if matches!(event.role.as_str(), "call" | "throw" | "use" | "evaluate")
+                    && protected.start_byte <= event.start_byte && event.end_byte <= protected.end_byte {
+                    exits.push((event.id, vec![edge.to.0]));
+                }
+            }
+        }
+        for (last, targets) in exits {
+            let mut queue: VecDeque<u32> = targets.into();
             let mut seen = HashSet::new();
             while let Some(next) = queue.pop_front() {
                 if !seen.insert(next) { continue; }
@@ -1934,51 +1972,86 @@ impl<'a> FlowExtractor<'a> {
     fn is_def(event: &FlowEvent) -> bool { matches!(event.role.as_str(), "def" | "param_in" | "mutation") }
 
     fn reaching_edges(&mut self) {
-        let mut block_events: HashMap<u32, Vec<usize>> = HashMap::new();
-        for (i, event) in self.events.iter().enumerate() { block_events.entry(event.block).or_default().push(i); }
-        for values in block_events.values_mut() { values.sort_by_key(|&i| self.events[i].ordinal); }
+        use std::rc::Rc;
+        let indices: HashMap<_, _> = self.events.iter().enumerate().map(|(i, event)| (event.id, i)).collect();
+        let mut successors = vec![Vec::new(); self.events.len()];
+        let mut predecessors = vec![Vec::new(); self.events.len()];
+        for edge in self.edges.iter().filter(|edge| edge.kind == "control") {
+            let (from, to) = (indices[&edge.from], indices[&edge.to]);
+            successors[from].push(to);
+            predecessors[to].push(from);
+        }
+        // Collapse straight-line event chains before dataflow. Exceptional
+        // exits split chains at the evaluation, while large ordinary blocks
+        // still need one state transfer, not one traversal per definition.
+        let mut owner = vec![usize::MAX; self.events.len()];
+        let mut segments = Vec::new();
+        for start in 0..self.events.len() {
+            if owner[start] != usize::MAX { continue; }
+            let mut segment = Vec::new();
+            let mut current = start;
+            while owner[current] == usize::MAX {
+                owner[current] = segments.len();
+                segment.push(current);
+                if successors[current].len() != 1 { break; }
+                let next = successors[current][0];
+                if predecessors[next].len() != 1 { break; }
+                current = next;
+            }
+            segments.push(segment);
+        }
+        let mut incoming_segments = vec![HashSet::new(); segments.len()];
+        for (from, targets) in successors.iter().enumerate() {
+            for &to in targets {
+                if owner[from] != owner[to] || to == segments[owner[to]][0] {
+                    incoming_segments[owner[to]].insert(owner[from]);
+                }
+            }
+        }
         type State = HashMap<String, HashSet<u32>>;
-        let mut incoming: HashMap<u32, State> = HashMap::new();
-        let mut outgoing: HashMap<u32, State> = HashMap::new();
+        // Most evaluation exits do not change bindings; share their state
+        // instead of copying a large environment at every possible throw.
+        let mut incoming = vec![Rc::new(State::new()); segments.len()];
+        let mut outgoing = incoming.clone();
         let mut changed = true;
         while changed {
             changed = false;
-            for block in &self.cfg.blocks {
-                let mut state = State::new();
-                for pred in self.cfg.predecessors(block.id) {
-                    if let Some(out) = outgoing.get(&pred.0) {
-                        for (name, defs) in out { state.entry(name.clone()).or_default().extend(defs); }
+            for (index, segment) in segments.iter().enumerate() {
+                let mut state = incoming_segments[index].iter().next()
+                    .map(|&pred| outgoing[pred].clone()).unwrap_or_else(|| Rc::new(State::new()));
+                for &pred in &incoming_segments[index] {
+                    if !Rc::ptr_eq(&state, &outgoing[pred]) {
+                        for (name, defs) in outgoing[pred].iter() {
+                            Rc::make_mut(&mut state).entry(name.clone()).or_default().extend(defs);
+                        }
                     }
                 }
-                incoming.insert(block.id.0, state.clone());
-                for &i in block_events.get(&block.id.0).into_iter().flatten() {
+                incoming[index] = state.clone();
+                for &i in segment {
                     let event = &self.events[i];
                     if Self::is_def(event) {
-                        if let Some(name) = Self::binding(event) { state.insert(name.into(), HashSet::from([event.id])); }
+                        if let Some(name) = Self::binding(event) { Rc::make_mut(&mut state).insert(name.into(), HashSet::from([event.id])); }
                     }
                 }
-                if outgoing.get(&block.id.0) != Some(&state) { outgoing.insert(block.id.0, state); changed = true; }
+                if !Rc::ptr_eq(&outgoing[index], &state) && outgoing[index] != state {
+                    outgoing[index] = state; changed = true;
+                }
             }
         }
         let mut additions = Vec::new();
-        for block in &self.cfg.blocks {
-            let mut state = incoming.remove(&block.id.0).unwrap_or_default();
-            for &i in block_events.get(&block.id.0).into_iter().flatten() {
+        for (segment, mut state) in segments.iter().zip(incoming) {
+            for &i in segment {
                 let event = &self.events[i];
-                let name = Self::binding(event).map(str::to_string);
-                if event.role == "use" || event.role == "mutation" {
-                    let mut bindings = Vec::new();
-                    if let Some(name) = &name { bindings.push(name.as_str()); }
-                    if let Some(root) = event.var.as_deref() {
-                        if !bindings.contains(&root) { bindings.push(root); }
-                    }
-                    for binding in bindings {
-                        for &def in state.get(binding).into_iter().flatten() {
+                if matches!(event.role.as_str(), "use" | "mutation") {
+                    for name in [Self::binding(event), event.var.as_deref()].into_iter().flatten() {
+                        for &def in state.get(name).into_iter().flatten() {
                             additions.push(FlowEdge { from: def, to: event.id, kind: "reaching".into() });
                         }
                     }
                 }
-                if Self::is_def(event) { if let Some(name) = name { state.insert(name, HashSet::from([event.id])); } }
+                if Self::is_def(event) {
+                    if let Some(name) = Self::binding(event) { Rc::make_mut(&mut state).insert(name.into(), HashSet::from([event.id])); }
+                }
             }
         }
         self.edges.extend(additions);
