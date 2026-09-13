@@ -699,7 +699,7 @@ def test_editor_reindex_builds_cold_and_large_updates(tmp_path, background, monk
             with monkeypatch.context() as patch:
                 patch.setattr("emend.transform.index.ensure_search_index", unavailable)
                 assert engine.start_background_reindex()
-                engine._index_thread.join(timeout=10)
+                engine._index_thread.join(timeout=60)
                 assert not engine.is_indexing and not engine.check_index_complete()
         for name, expected in [("initial", 1), ("updated", 1), ("added", 11)]:
             if name == "updated":
@@ -709,7 +709,8 @@ def test_editor_reindex_builds_cold_and_large_updates(tmp_path, background, monk
                     (sources / f"new_{index}.{extension}").write_text(template.format("added"))
             if background:
                 assert engine.start_background_reindex()
-                engine._index_thread.join(timeout=10)
+                # Completion contract, not a latency benchmark on busy CI hosts.
+                engine._index_thread.join(timeout=60)
                 assert not engine.is_indexing
                 assert engine.check_index_complete()
                 engine.finalize_reindex()

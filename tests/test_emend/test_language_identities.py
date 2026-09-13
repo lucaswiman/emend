@@ -89,7 +89,7 @@ def test_selector_calls_deadcode_and_cascade_are_language_scoped(tmp_path, suffi
 def test_configured_namespace_survives_serialization_and_later_facts(tmp_path, reverse):
     config = tmp_path / "languages/python/config.toml"
     config.parent.mkdir(parents=True)
-    config.write_text((Path(__file__).parents[2] / "languages/python/config.toml").read_text().replace(
+    config.write_text((Path(__file__).parents[2] / "src/emend/languages/python/config.toml").read_text().replace(
         'file_extensions = ["py", "pyi"]', 'file_extensions = ["py", "pyi", "special"]'))
     (tmp_path / "api.special").write_text("def common():\n    return 1\n")
     (tmp_path / "main.py").write_text("from api import common\nvalue = common()\n")

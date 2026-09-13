@@ -2,9 +2,10 @@ VENV := .venv
 PYTHON := $(VENV)/bin/python
 TESTS ?=
 
-.PHONY: venv test test-ci test-mcp deadcode docs docs-html benchmark clean
+.PHONY: venv test test-ci test-mcp test-package deadcode docs docs-html benchmark clean
 
 RUST_SOURCES := $(wildcard rust/src/*.rs)
+LANGUAGE_CONFIGS := $(wildcard src/emend/languages/*/config.toml)
 
 # Use local caches for sandboxed environments
 export CARGO_HOME := $(CURDIR)/.cargo-cache
@@ -18,7 +19,7 @@ $(VENV)/bin/activate:
 	touch $(VENV)/bin/activate
 
 # Rebuild Rust extension when source files change
-$(VENV)/lib/emend_core: pyproject.toml $(RUST_SOURCES) rust/Cargo.toml | $(VENV)/bin/activate
+$(VENV)/lib/emend_core: pyproject.toml $(RUST_SOURCES) $(LANGUAGE_CONFIGS) rust/Cargo.toml | $(VENV)/bin/activate
 	$(VENV)/bin/maturin develop --extras dev
 	@mkdir -p $(@D) && touch $@
 
@@ -32,6 +33,12 @@ test-ci: $(VENV)/bin/activate $(VENV)/lib/emend_core
 	cargo test --manifest-path rust/Cargo.toml
 	$(VENV)/bin/pytest -n 8 --tb=short $(if $(TESTS),$(TESTS),tests/)
 
+test-package: $(VENV)/lib/emend_core
+	@set -e; package_dir=$$(mktemp -d); \
+	$(VENV)/bin/maturin build --out "$$package_dir"; \
+	$(VENV)/bin/maturin sdist --out "$$package_dir"; \
+	$(PYTHON) scripts/package_smoke.py "$$package_dir"/*.whl "$$package_dir"/*.tar.gz
+
 PYTHON_VERSION ?= 3.14t
 MCP_VENV := .venv-mcp
 
@@ -40,7 +47,7 @@ $(MCP_VENV)/bin/activate:
 	uv pip install --python $(MCP_VENV) maturin
 	@touch $@
 
-$(MCP_VENV)/lib/emend_core: pyproject.toml $(RUST_SOURCES) rust/Cargo.toml | $(MCP_VENV)/bin/activate
+$(MCP_VENV)/lib/emend_core: pyproject.toml $(RUST_SOURCES) $(LANGUAGE_CONFIGS) rust/Cargo.toml | $(MCP_VENV)/bin/activate
 	VIRTUAL_ENV=$(CURDIR)/$(MCP_VENV) PATH=$(CURDIR)/$(MCP_VENV)/bin:$$PATH \
 		$(MCP_VENV)/bin/maturin develop --extras dev,mcp
 	@mkdir -p $(@D) && touch $@

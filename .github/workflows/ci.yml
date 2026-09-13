@@ -28,6 +28,9 @@ jobs:
       - name: Check for dead code
         run: make deadcode
 
+      - name: Check wheel and source distribution
+        run: make test-package
+
   test-mcp:
     runs-on: ubuntu-latest
     steps:
