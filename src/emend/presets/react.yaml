@@ -31,5 +31,5 @@ sinks:
     message: "XSS: user input assigned to innerHTML"
 
 sanitizers:
-  - {pattern: "DOMPurify.sanitize($X)", label: user_input}
-  - {pattern: "encodeURIComponent($X)", label: user_input}
+  - {pattern: "DOMPurify.sanitize($X)", label: user_input, effect: returns}
+  - {pattern: "encodeURIComponent($X)", label: user_input, effect: returns}

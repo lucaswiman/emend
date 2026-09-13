@@ -85,7 +85,7 @@ def _config_from_rules(
         ) for endpoint in rule.sinks)
         sanitizers.extend(TraceSanitizer(
             endpoint.pattern, rule.label, rule.quantifier,
-            endpoint.type_constraint, rule.rule_id,
+            endpoint.type_constraint, rule.rule_id, effect=endpoint.effect,
         ) for endpoint in rule.sanitizers)
         scope_sanitizers.extend(TraceScopeSanitizer(
             endpoint.pattern, rule.label, rule.rule_id,
@@ -125,7 +125,7 @@ def _config_from_trace_model(
     config.sanitizers.extend(
         TraceSanitizer(
             item.endpoint.pattern, item.label, item.quantifier,
-            item.endpoint.type_constraint,
+            item.endpoint.type_constraint, effect=item.endpoint.effect,
         )
         for item in trace.sanitizers
     )

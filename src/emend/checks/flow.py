@@ -52,6 +52,7 @@ class FlowSanitizer:
     quantifier: str = "all_paths"
     type_constraint: str = ""
     rule_id: str = ""
+    effect: str = ""
 
 
 @dataclass(frozen=True)
@@ -134,7 +135,7 @@ class CompiledFlowConfig:
                     type_constraint=sink.type_constraint,
                 ),),
                 sanitizers=tuple(CompiledEndpoint(
-                    s.pattern, type_constraint=s.type_constraint,
+                    s.pattern, effect=s.effect, type_constraint=s.type_constraint,
                 ) for s in sanitizers),
                 scope_sanitizers=tuple(CompiledEndpoint(s.pattern)
                                        for s in scope_sanitizers),
@@ -472,7 +473,26 @@ def _is_sanitized(
     value_edges: frozenset[str],
     control_edges: frozenset[str],
     max_call_depth: int | None,
+    return_sanitizers: list[_EndpointMatch],
 ) -> bool:
+    # Pure-return sanitizers clean the returned generation, never their input.
+    # In particular, evaluating escape(x) must not clean a later use of x.
+    # Return and validation coverage remain separate: mixed branch coverage
+    # can conservatively warn without control-conditioned value edges.
+    outputs = frozenset(match.node for match in return_sanitizers)
+    if source.node in outputs:
+        return True
+    if outputs and (
+        any(_can_reach(source.node, node, value_adjacency, events, value_edges,
+                       max_call_depth=max_call_depth)
+            and _can_reach(node, sink.node, value_adjacency, events, value_edges,
+                           max_call_depth=max_call_depth)
+            for node in outputs)
+        if quantifier == "some_path" else
+        not _can_reach(source.node, sink.node, value_adjacency, events, value_edges,
+                       blocked=outputs, max_call_depth=max_call_depth)
+    ):
+        return True
     # Value sanitizers only affect the generation which reaches their exact
     # argument occurrence. Scope sanitizers apply to every value in the scope.
     # A source pattern can wrap a sanitizer (for example
@@ -777,6 +797,10 @@ def evaluate_compiled_flow(
 ) -> list[EvaluatedFlow]:
     """Evaluate compiled rules over exact occurrence and control facts."""
     all_rules = tuple(rules)
+    for rule in all_rules:
+        for endpoint in rule.sanitizers:
+            if endpoint.effect not in {"", "returns"}:
+                raise ValueError(f"Unknown sanitizer effect {endpoint.effect!r}; expected 'returns' or no effect")
     if not paths or not all_rules:
         return []
     overrides = {str(Path(path).resolve()): text
@@ -926,10 +950,18 @@ def evaluate_compiled_flow(
         ]
         sanitizers = [
             match for endpoint in rule.sanitizers
+            if endpoint.effect != "returns"
             for match in _type_filter(_resolve_endpoints(
                 endpoint, "sanitizer", rule_pairs, rule_events,
                 actual_to_stored, language,
                 match_cache,
+            ), endpoint, graph)
+        ]
+        return_sanitizers = [
+            match for endpoint in rule.sanitizers if endpoint.effect == "returns"
+            for match in _type_filter(_resolve_endpoints(
+                endpoint, "source", rule_pairs, rule_events,
+                actual_to_stored, language, match_cache,
             ), endpoint, graph)
         ]
         scope_sanitizers = [
@@ -999,6 +1031,7 @@ def evaluate_compiled_flow(
                     value_adjacency, control_adjacency, all_events,
                     value_edges, control_edges,
                     max_call_depth,
+                    return_sanitizers,
                 ):
                     continue
                 key = (rule.rule_id, source.span.file_path, source.span.start_byte,

@@ -43,8 +43,8 @@ sinks:
     message: "Command injection: user input in exec()"
 
 sanitizers:
-  - {pattern: "escape($X)", label: user_input}
-  - {pattern: "sanitize($X)", label: user_input}
-  - {pattern: "DOMPurify.sanitize($X)", label: user_input}
-  - {pattern: "validator.escape($X)", label: user_input}
-  - {pattern: "encodeURIComponent($X)", label: user_input}
+  - {pattern: "escape($X)", label: user_input, effect: returns}
+  - {pattern: "sanitize($X)", label: user_input, effect: returns}
+  - {pattern: "DOMPurify.sanitize($X)", label: user_input, effect: returns}
+  - {pattern: "validator.escape($X)", label: user_input, effect: returns}
+  - {pattern: "encodeURIComponent($X)", label: user_input, effect: returns}

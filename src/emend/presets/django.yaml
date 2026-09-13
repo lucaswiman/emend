@@ -45,8 +45,8 @@ sinks:
     message: "XSS: check format_html() arguments"
 
 sanitizers:
-  - {pattern: "escape($X)", label: user_input}
-  - {pattern: "conditional_escape($X)", label: user_input}
-  - {pattern: "int($X)", label: user_input}
-  - {pattern: "float($X)", label: user_input}
-  - {pattern: "slugify($X)", label: user_input}
+  - {pattern: "escape($X)", label: user_input, effect: returns}
+  - {pattern: "conditional_escape($X)", label: user_input, effect: returns}
+  - {pattern: "int($X)", label: user_input, effect: returns}
+  - {pattern: "float($X)", label: user_input, effect: returns}
+  - {pattern: "slugify($X)", label: user_input, effect: returns}

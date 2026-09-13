@@ -31,8 +31,8 @@ sinks:
     message: "Path traversal: file path in .write()"
 
 sanitizers:
-  - {pattern: "$X.parse::<i32>()", label: user_input}
-  - {pattern: "$X.parse::<u32>()", label: user_input}
-  - {pattern: "$X.parse::<i64>()", label: user_input}
-  - {pattern: "$X.parse::<u64>()", label: user_input}
-  - {pattern: "$X.parse::<f64>()", label: user_input}
+  - {pattern: "$X.parse::<i32>()", label: user_input, effect: returns}
+  - {pattern: "$X.parse::<u32>()", label: user_input, effect: returns}
+  - {pattern: "$X.parse::<i64>()", label: user_input, effect: returns}
+  - {pattern: "$X.parse::<u64>()", label: user_input, effect: returns}
+  - {pattern: "$X.parse::<f64>()", label: user_input, effect: returns}
