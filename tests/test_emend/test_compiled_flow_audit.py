@@ -42,6 +42,35 @@ def _run(tmp_path: Path, text: str, config, graph=None):
     )
 
 
+@pytest.mark.parametrize("extension", ["py", "ts"])
+@pytest.mark.parametrize("statement,effect,reports", [
+    ("clean(x)", "", True),
+    ("x = clean(x)", "returns", True),
+    ("x = risky()", "", True),
+    ("x = 0; risky()", "", False),
+    ("mapping[key]", "", True),
+    ("obj.attribute", "", True),
+    ("1 / divisor", "", True),
+    ("1 / 0", "", True),
+    ("x = mapping[key]", "", True),
+    ("throw", "", True),
+])
+@pytest.mark.parametrize("boundary", ["except", "finally"])
+def test_exception_paths_keep_pre_call_values(tmp_path, extension, statement, effect, reports, boundary):
+    if extension == "py":
+        statement = "raise ValueError()" if statement == "throw" else statement
+        tail = "except Exception:\n        pass\n    sink(x)" if boundary == "except" else "finally:\n        sink(x)"
+        source = f"def f():\n    x = source()\n    try:\n        {statement}\n    {tail}\n"
+    else:
+        statement = "throw new Error()" if statement == "throw" else statement
+        tail = "catch(e) {} sink(x);" if boundary == "except" else "finally { sink(x); }"
+        source = f"function f() {{ let x = source(); try {{ {statement}; }} {tail} }}\n"
+    path = tmp_path / f"app.{extension}"
+    path.write_text(source)
+    config = _rule(sanitizers=[FlowSanitizer("clean($X)", "value", effect=effect)])
+    assert bool(evaluate_flow_config(config, [str(path)], project_path=str(tmp_path))) is reports
+
+
 @pytest.mark.parametrize(
     ("statement", "reports"),
     [

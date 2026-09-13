@@ -258,6 +258,11 @@ class _EndpointMatch:
     node: tuple[str, int]
     span: _PatternSpan
     variable: str
+    completion: tuple[str, int] | None = None
+
+    @property
+    def control_node(self) -> tuple[str, int]:
+        return self.completion or self.node
 
 
 def _pattern_spans(
@@ -371,9 +376,13 @@ def _resolve_endpoints(
             captured_value = capture[7] if capture is not None else next(
                 (item[7] for item in captures), "",
             )
+            completion = next((row for row in events_by_actual.get(actual, ())
+                               if row.role == "call_result" and row.call_id == event.call_id), None) \
+                if purpose in {"sanitizer", "scope"} and event.call_id is not None else None
             matches.append(_EndpointMatch(
                 node, span,
                 event.access_path or event.var or captured_value or span.text,
+                (node[0], completion.event_id) if completion is not None else None,
             ))
     return matches
 
@@ -525,11 +534,11 @@ def _is_sanitized(
     relevant.extend(scope_sanitizers)
     on_a_path = [sanitizer for sanitizer in relevant if (
         _can_reach(
-            source.node, sanitizer.node, control_adjacency, events, control_edges,
+            source.node, sanitizer.control_node, control_adjacency, events, control_edges,
             max_call_depth=max_call_depth,
         )
         and _can_reach(
-            sanitizer.node, sink.node, control_adjacency, events, control_edges,
+            sanitizer.control_node, sink.node, control_adjacency, events, control_edges,
             max_call_depth=max_call_depth,
         )
     )]
@@ -541,7 +550,7 @@ def _is_sanitized(
     # the source-to-sink execution path unreachable.
     return not _can_reach(
         source.node, sink.node, control_adjacency, events, control_edges,
-        blocked=frozenset(sanitizer.node for sanitizer in on_a_path),
+        blocked=frozenset(sanitizer.control_node for sanitizer in on_a_path),
         max_call_depth=max_call_depth,
     )
 
