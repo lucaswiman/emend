@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.5.3
+
+- Added `--diff [RANGE]` to analysis commands and checks. Without a range,
+  use staged changes if present, otherwise changes since the PR/default-branch
+  merge base. Reports retain analysis context and unchanged duplicate partners.
+- `dupes -v` shows matched source; `dupes --near` now accepts `--min-lines`.
+- Source discovery now skips `static/` and Cargo `target/`. Index progress
+  covers all analyzed languages, and slow files no longer leave workers idle.
+- Fixed impact analysis with nested project paths. Diff selection handles Git
+  presentation settings, unstaged line shifts, and non-UTF-8 patch content;
+  checks retain finding spans so body-only edits remain reportable.
+
 ## 0.5.2
 
 - Linux wheels for free-threaded Python 3.13 and 3.14 now support glibc 2.17+
