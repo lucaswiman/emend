@@ -29,6 +29,7 @@ class DeadSymbol:
     root_causes: tuple[str, ...] = ()
     dependents: list[DeadSymbol] = field(default_factory=list)
     qualified_name: str = ""
+    end_line: int | None = None
 
 
 @dataclass
@@ -62,7 +63,7 @@ def dead_code_result_details(
             "unreachable code",
         )
     if isinstance(result, DeadModule):
-        return result.module_name, 1, result.file_path, result.reason
+        return result.module_name, 0, result.file_path, result.reason
     return result.name, result.line, result.selector, result.reason
 
 
@@ -1324,6 +1325,7 @@ def find_dead_code(
             name=sym.name,
             kind=sym.kind,
             line=sym.line,
+            end_line=sym.end_line,
             selector=f"{abs_fp}::{local_names[sym.file_path, sym.qualified_name]}",
             qualified_name=sym.qualified_name,
             reason="no references found",

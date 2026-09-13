@@ -86,5 +86,6 @@ def run_duplicate_code_check(
                 message=msg,
                 file_path=member.file,
                 line=member.start_line,
+                end_line=member.end_line,
             ))
     return violations

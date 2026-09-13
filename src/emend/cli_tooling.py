@@ -40,7 +40,11 @@ def index_cmd(
 ):
     """Pre-build caches for faster cross-project operations.
 
-    Parses every Python file in the project and builds:
+    Builds project facts for all supported source languages, plus Python search
+    and type caches. Dependency and generated-output directories (venv,
+    node_modules, static, build, dist, target, and dot-directories) are skipped.
+
+    Caches include:
     - Parse cache (speeds up all pattern operations)
     - Qualified-name index (speeds up refs, rename, callers)
     - Symbol index (instant symbol lookup, typeahead, file outline)
@@ -95,7 +99,17 @@ def index_cmd(
     total = None
 
     def _progress(phase: str, file_path: str) -> None:
-        nonlocal n_done
+        nonlocal n_done, total
+        if phase == "total":
+            total = int(file_path)
+            print(f"  {total} files to analyze", file=sys.stderr)
+            return
+        if phase == "start":
+            if verbose:
+                print(f"  Starting: {file_path}", file=sys.stderr)
+            elif sys.stderr.isatty():
+                print(f"\r  [{n_done}/{total}] Starting: {file_path}\033[K", end="", file=sys.stderr)
+            return
         if phase == "phase":
             # File progress cannot represent batch type inference or the
             # project-wide indexes built afterward.  Announce those phases so
@@ -104,23 +118,17 @@ def index_cmd(
                 print("", file=sys.stderr)
             print(f"  {file_path}...", file=sys.stderr)
             return
+        if phase != "index":
+            return
         n_done += 1
         if verbose >= 1:
-            print(f"  {file_path}", file=sys.stderr)
+            print(f"  [{n_done}/{total}] Completed: {file_path}", file=sys.stderr)
         elif total and sys.stderr.isatty():
-            pct = n_done * 100 // total
-            # Display progress in terms of file_count (total includes multiple phases per file)
-            display_done = min(n_done * file_count // total, file_count)
-            print(f"\r  [{pct:3d}%] {display_done}/{file_count} files indexed", end="", file=sys.stderr)
+            print(f"\r  [{n_done}/{total}] files analyzed\033[K", end="", file=sys.stderr)
 
-    # Quick count for progress bar
-    from emend.transform import _collect_source_files_scandir
     from pathlib import Path as _Path
     scan_root = str(_Path(path).resolve())
-    file_count = len(_collect_source_files_scandir(scan_root))
-    # Callback is called twice per file (index + types phases)
-    total = file_count * 2
-    print(f"Indexing {file_count} source files in {scan_root}...", file=sys.stderr)
+    print(f"Indexing source files in {scan_root}...", file=sys.stderr)
 
     from emend.type_oracle import TypeEngineUnavailableError
     try:
@@ -159,7 +167,8 @@ def index_cmd(
             type_detail += f" ({engine_name})"
         detail += f", {type_detail}"
     print(
-        f"Indexed {stats['files']} files in {elapsed:.1f}s ({detail})",
+        f"Analyzed {total if total is not None else stats['files']} files "
+        f"in {elapsed:.1f}s ({detail})",
         file=sys.stderr,
     )
 

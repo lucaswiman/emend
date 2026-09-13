@@ -36,6 +36,38 @@ scan and replacement:
    emend --language typescript edit replace '$X == $Y' '$X === $Y' generated.py --apply
 
 
+Diff-scoped analysis
+--------------------
+
+All ``analyze`` commands, plus ``lint``, ``policy`` and ``check``, accept
+``--diff [RANGE]``. Put a bare ``--diff`` after positional arguments:
+
+.. code-block:: bash
+
+   emend analyze deadcode . --diff
+   emend analyze dupes . --diff main..HEAD -v --min-lines 8
+   emend check . --diff
+
+Without a range, staged changes take precedence. Otherwise emend compares HEAD
+to its merge base with the current PR's base (when ``gh`` is installed and the
+PR can be resolved), or the repository's default branch. Base refs must be
+available locally; emend does not fetch or modify Git state. An explicit range
+overrides automatic selection.
+Combined merge diffs are not supported; select an explicit parent-to-merge range.
+
+Analysis runs on the current working tree, preserving unchanged project context.
+Reports select changed lines or overlapping symbol/function spans; duplicate
+clusters retain unchanged partners. File-level facts match changed files.
+``impact`` instead uses changed symbols as roots and reports their dependents.
+Deleted files have no current findings, but can still seed impact analysis.
+An empty diff reports no selected findings. ``--diff`` cannot be combined with
+``--fix``; it is a report filter, not authorization to edit other findings.
+
+``dupes -v`` includes source excerpts (full function diffs for ``--near``).
+``--min-lines`` works for exact, sequence, and near matches; without the option,
+the existing defaults remain three lines for exact/sequence and one for near.
+
+
 find
 ----
 
@@ -261,6 +293,12 @@ tool
 ----
 
 Operational and debugging commands.
+
+Project source discovery skips dot-directories (including ``.venv``), ``venv``,
+``node_modules``, ``static``, ``build``, ``dist``, and Cargo's ``target`` directory.
+Index progress counts all files analyzed for project facts, including non-Python
+sources. Use ``emend tool index -v`` to log file starts and completions; subsequent
+type-analysis and database phases are reported separately.
 
 .. code-block:: text
 

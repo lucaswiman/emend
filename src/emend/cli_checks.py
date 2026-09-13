@@ -3,9 +3,10 @@ from typing import Annotated, Optional
 
 import typer
 
-from emend.cli_base import JsonFlag, _state, resolve_file_scopes, resolve_files
+from emend.cli_base import DiffOption, JsonFlag, _state, resolve_file_scopes, resolve_files
 from emend.checks.rules_config import resolve_rules_path
 from emend.cli_output import emit_json
+from emend.git_diff import DiffSelection
 
 def lint_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to lint")],
@@ -21,6 +22,7 @@ def lint_cmd(
         Optional[str],
         typer.Option("--rule", help="Run only a specific rule by name")
     ] = None,
+    diff: DiffOption = None,
 ):
     """Lint files using unified rules from a YAML config.
 
@@ -35,6 +37,10 @@ def lint_cmd(
     """
     try:
         from emend.checks import run_checks
+
+        if diff is not None and fix:
+            raise ValueError("--diff is a report filter and cannot be combined with --fix")
+        selection = DiffSelection.load(diff, path)
 
         config_path = resolve_rules_path(config)
         if not config_path.exists():
@@ -55,6 +61,8 @@ def lint_cmd(
             project_path=path,
         )
 
+        if selection is not None:
+            violations = selection.filter(violations)
         for v in violations:
             print(f"{v.file_path}:{v.line}:{v.col}: [{v.rule_name}] {v.message}")
 
@@ -76,6 +84,7 @@ def policy_cmd(
     config: Annotated[Optional[str], typer.Option("--config", help="Path to rules.yaml")] = None,
     policy_name: Annotated[Optional[str], typer.Option("--policy", "-p", help="Run only a specific policy")] = None,
     json_output: JsonFlag = False,
+    diff: DiffOption = None,
 ):
     """Run policy checks against source code.
 
@@ -111,6 +120,9 @@ def policy_cmd(
             project_path=path,
         )
 
+        selection = DiffSelection.load(diff, path)
+        if selection is not None:
+            violations = selection.filter(violations)
         if json_output:
             import json as _json
             data = [
@@ -179,6 +191,7 @@ def check_cmd(
     kind: Annotated[Optional[str], typer.Option("--kind", help="Restrict to one rule kind: match, flow, deadcode, type")] = None,
     fix: Annotated[bool, typer.Option("--fix", help="Apply auto-fixes for match rules")] = False,
     json_output: JsonFlag = False,
+    diff: DiffOption = None,
 ):
     """Run unified project rules from ``.emend/rules.yaml``."""
     try:
@@ -188,6 +201,9 @@ def check_cmd(
         resolved, _ = resolve_file_scopes(paths or ["."], language=_lang)
         file_paths = [str(f) for f in resolved]
         project_path = paths[0] if paths else "."
+        if diff is not None and fix:
+            raise ValueError("--diff is a report filter and cannot be combined with --fix")
+        selection = DiffSelection.load(diff, project_path)
         violations = run_checks(
             file_paths,
             config=config,
@@ -198,6 +214,8 @@ def check_cmd(
             project_path=project_path,
         )
 
+        if selection is not None:
+            violations = selection.filter(violations)
         if json_output:
             emit_json([
                 {

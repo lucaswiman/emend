@@ -34,6 +34,7 @@ def run_deadcode_check(
         violations.append(PolicyViolation(
             file_path=ds.file_path,
             line=line,
+            end_line=getattr(ds, "end_line", None),
             col=0,
             policy_name=policy.name,
             check_name="deadcode",

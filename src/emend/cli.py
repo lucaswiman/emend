@@ -17,7 +17,7 @@ from emend.cli_analysis import (
     trace_cmd,
     types_cmd,
 )
-from emend.cli_base import analyze_app, app, edit_app, tool_app
+from emend.cli_base import DiffCommand, analyze_app, app, edit_app, tool_app
 from emend.cli_checks import check_cmd, lint_cmd, policy_cmd
 from emend.cli_edit import (
     add,
@@ -148,9 +148,10 @@ _COMMANDS: list[_CmdEntry] = [
 app.add_typer(map_app, name="map")
 
 for _entry in _COMMANDS:
-    _entry.subapp.command(_entry.name, hidden=_entry.hidden)(_entry.fn)
+    _options = {"cls": DiffCommand} if "diff" in _entry.fn.__annotations__ else {}
+    _entry.subapp.command(_entry.name, hidden=_entry.hidden, **_options)(_entry.fn)
     for _alias in _entry.aliases:
-        _entry.subapp.command(_alias, hidden=True)(_entry.fn)
+        _entry.subapp.command(_alias, hidden=True, **_options)(_entry.fn)
 
 
 def main():

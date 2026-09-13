@@ -48,6 +48,7 @@ def run_structural_check(
         violations.append(PolicyViolation(
             file_path=file_path,
             line=m.line or 0,
+            end_line=m.end_line,
             col=m.col or 0,
             policy_name=policy.name,
             check_name=f"structural:{check.pattern}",

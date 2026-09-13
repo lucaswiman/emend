@@ -14,3 +14,4 @@ class PolicyViolation:
     severity: str
     message: str
     witness: list[str] = field(default_factory=list)
+    end_line: int | None = None
