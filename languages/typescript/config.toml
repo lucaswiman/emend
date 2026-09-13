@@ -94,6 +94,7 @@ module_field = "source"
 name_field = "import_clause"
 # Node.js resolution strategy
 resolution = "node"
+module_loader_calls = ["import", "require"]
 dotted_name = "identifier"
 aliased_import = "import_alias"
 identifier = "identifier"

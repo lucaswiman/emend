@@ -39,6 +39,73 @@ NOQA_PATTERN: str = r'noqa\b(?:\s*:\s*(.*))?'
 # ABCs
 # ---------------------------------------------------------------------------
 
+def relocate_relative_imports(source: str, old_path: str, new_path: str, project_root: str) -> str:
+    """Keep outbound import targets stable when a module changes packages."""
+    from pathlib import Path
+    import os
+    from emend import emend_core
+    from emend.language_registry import detect_language, load_config
+    from emend.project_config import module_name_for_file
+
+    old, new = Path(old_path), Path(new_path)
+    language = detect_language(old_path)
+    language_config = load_config(language)
+    config = language_config.get("imports", {})
+    resolution = config.get("resolution")
+    if resolution not in {"python", "node"} or old.parent == new.parent:
+        return source
+    tree = emend_core.parse_source(source, old.suffix.lstrip("."))
+    transform = emend_core.PyFileTransform(source)
+    pattern = language_config["pattern_matching"]
+    builtin_calls = set()
+    if config.get("module_loader_calls"):
+        resolver = emend_core.PyScopeResolver(project_root, old.suffix.lstrip("."))
+        resolver.index_file(str(old), source)
+        builtin_calls = {start for qn, _, _, start, _, kind, _ in resolver.references_in_file(str(old))
+                         if kind == "call" and qn.startswith("builtins.")}
+    data = source.encode()
+    nodes = [tree.root]
+    while nodes:
+        node = nodes.pop()
+        nodes.extend(node.children())
+        module = None
+        if node.kind in {config.get("import_from"), config.get("import_statement"),
+                         language_config.get("exports", {}).get("export_statement")}:
+            module = node.child_by_field_name(config["module_field"])
+        elif node.kind == pattern.get("call"):
+            function = node.child_by_field_name(pattern["func_field"])
+            if function is not None and function.text() in config.get("module_loader_calls", ()):
+                if function.kind == pattern["identifier"] and function.start_byte not in builtin_calls:
+                    continue
+                arguments = node.child_by_field_name(pattern["args_field"])
+                args = arguments.named_children() if arguments is not None else []
+                if not args or args[0].kind != pattern["string"]:
+                    raise ValueError("Cannot relocate a computed module import")
+                module = args[0]
+        if module is None:
+            continue
+        spelling = data[module.start_byte:module.end_byte].decode()
+        if resolution == "node" and "\\" in spelling:
+            raise ValueError("Cannot relocate an escaped module specifier")
+        if resolution == "python" and spelling.startswith("."):
+            owner = module_name_for_file(old, project_root, language=language)
+            package = owner if old.stem == "__init__" else owner.rpartition(".")[0]
+            level = len(spelling) - len(spelling.lstrip("."))
+            parts = package.split(".")
+            if level > len(parts):
+                raise ValueError(f"Relative import escapes source package: {spelling}")
+            target = ".".join(parts[:len(parts) - level + 1] + [spelling[level:]]).rstrip(".")
+        elif resolution == "node" and spelling[1:-1].startswith("."):
+            relative = os.path.relpath(old.parent / spelling[1:-1], new.parent).replace(os.sep, "/")
+            if not relative.startswith("."):
+                relative = "./" + relative
+            target = spelling[0] + relative + spelling[-1]
+        else:
+            continue
+        transform.replace_range(module.start_byte, module.end_byte, target)
+    return transform.apply()
+
+
 class ImportHandler(ABC):
     """Abstract interface for import extraction and manipulation."""
 

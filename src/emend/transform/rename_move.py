@@ -32,6 +32,10 @@ def _publish_edits(edits: dict[str, tuple[str, str]], apply: bool) -> dict[str, 
 
 
 def _validate_module_destination(source: str, destination: Path) -> None:
+    from emend.language_registry import detect_language, load_config
+    init_file = load_config(detect_language(source)).get("imports", {}).get("python_options", {}).get("init_file")
+    if init_file and Path(source).stem == Path(init_file).stem:
+        raise ValueError("Relocate the package, not its __init__ module")
     if destination.exists() or destination.is_symlink():
         raise ValueError(f"Destination already exists: {destination}")
     if not Path(source).is_file():
@@ -329,7 +333,7 @@ def _split_or_retarget_import(
             return name
 
         moved_line = (
-            f"from {dest_module} import "
+            (f"from {dest_module} import " if dest_module else "import ")
             + ", ".join(_alias_str(n, a) for n, a in moved_aliases)
         )
 
@@ -651,8 +655,16 @@ def _rename_module_references(
         project_path=project_root,
         language=language,
     ):
+        original = content
+        old_parent, _, old_leaf = old_module.rpartition(sep)
+        new_parent = new_module.rpartition(sep)[0]
+        if language == "python" and old_parent != new_parent:
+            content = _split_or_retarget_import(
+                content, py_file, old_parent, new_parent, old_leaf, resolver, project_root,
+            ) or content
+            resolver.index_file(py_file, content)
         transform = _rust.PyFileTransform(content)
-        changed = False
+        changed = content != original
 
         old_bare_mod = old_module.rsplit(sep, 1)[-1]
         new_bare_mod = new_module.rsplit(sep, 1)[-1]
@@ -704,7 +716,9 @@ def _rename_module_references(
                 if resolved_qn == old_module:
                     if qn.startswith(".") and resolved_qn != qn:
                         # Relative import: preserve leading dots, replace only the module name.
-                        if src_text.startswith("."):
+                        if old_parent != new_parent:
+                            new_relative = new_module
+                        elif src_text.startswith("."):
                             # Text includes dots (e.g. ``from .models import VALUE``).
                             dot_count = len(qn) - len(qn.lstrip("."))
                             new_relative = "." * dot_count + new_bare_mod
@@ -731,12 +745,15 @@ def _rename_module_references(
                                 transform.replace_range(offset, offset + len(old_bare_mod_bytes), new_bare_mod)
                                 changed = True
 
-            elif kind in ("read", "write"):
+            elif kind in ("read", "write", "call"):
                 # Attribute access through a module binding, e.g. ``models.VALUE``
                 # after ``from . import models``.  The bare module name in the
                 # source text must be updated to match the new module name.
                 if resolved_qn == old_module and src_text == old_bare_mod:
                     transform.replace_range(offset, end_offset, new_bare_mod)
+                    changed = True
+                elif resolved_qn.startswith(old_module + sep) and src_text.startswith(old_module + sep):
+                    transform.replace_range(offset, offset + len(old_module_bytes), new_module)
                     changed = True
 
         # Check if string literals might contain the old module name.
@@ -758,13 +775,13 @@ def _rename_module_references(
         else:
             continue
 
-        if final_content == content:
+        if final_content == original:
             continue
 
-        diff = _generate_diff(py_file, content, final_content)
+        diff = _generate_diff(py_file, original, final_content)
         diffs[py_file] = diff
 
-        pending[py_file] = content, final_content
+        pending[py_file] = original, final_content
 
     # Third pass: string-literal replacements in files that the structural pre-filter
     # may have excluded (e.g. files with importlib.import_module("pkg.models") but no
@@ -823,6 +840,9 @@ def move_module(
     import os
     from .project_iter import _find_project_root, _file_to_module
 
+    if Path(source_path).is_symlink():
+        raise ValueError("Cannot relocate a symbolic-link module")
+    source_path = str(Path(source_path).resolve())
     project_root = _find_project_root(project_path or source_path)
     old_module = _file_to_module(source_path, project_root)
 
@@ -847,8 +867,13 @@ def move_module(
     from emend.language_registry import detect_language
     language = detect_language(source_path) or "python"
     edits = {}
-    diffs = _rename_module_references(project_root, old_module, new_module, False, language=language, edits=edits)
-    _publish_edits(edits, apply)
+    _rename_module_references(project_root, old_module, new_module, False, language=language, edits=edits)
+    from emend.language_plugins import relocate_relative_imports
+    from emend.edit_session import read_source
+    original = read_source(source_path)
+    original, updated = edits.get(source_path, (original, original))
+    edits[source_path] = original, relocate_relative_imports(updated, source_path, str(new_path), project_root)
+    diffs = _publish_edits(edits, apply)
 
     if apply:
         dest_dir.mkdir(parents=True, exist_ok=True)
