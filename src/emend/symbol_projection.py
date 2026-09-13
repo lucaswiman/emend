@@ -18,6 +18,8 @@ class SymbolProjection:
     line: int = 0
     end_line: int = 0
     col_offset: int = 0
+    start_byte: int | None = None
+    end_byte: int | None = None
     signature: str | None = None
     type_annotation: str | None = None
     returns: str | None = None
@@ -60,6 +62,7 @@ class SymbolProjection:
             [child.nested(None if max_depth is None else max_depth - 1)
              for child in self.children if child.kind not in ("variable", "reference")]
             if max_depth is None or max_depth > 0 else [],
+            start_byte=self.start_byte, end_byte=self.end_byte,
         )
 
 

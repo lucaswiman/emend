@@ -11,6 +11,20 @@ from emend.cli import app
 runner = CliRunner()
 
 
+@pytest.mark.parametrize('extensions', [('tsx', 'tsx'), ('tsx', 'ts')])
+def test_multifile_replace_preserves_file_dialects(tmp_path, extensions):
+    from emend.transform.project_iter import find_pattern_in_project
+
+    paths = [tmp_path / f'file{i}.{ext}' for i, ext in enumerate(extensions)]
+    for path in paths:
+        path.write_text('const f = () => <div>{print(1)}</div>;\n' if path.suffix == '.tsx'
+                        else 'function f() { print(1); }\n')
+    assert len(find_pattern_in_project('print($X)', [str(p) for p in paths], language='typescript')) == 2
+    result = runner.invoke(app, ['--language', 'typescript', 'replace', 'print($X)', 'log($X)', str(tmp_path), '--apply'])
+    assert result.exit_code == 0, result.output
+    assert all('log(1)' in path.read_text() and 'print(1)' not in path.read_text() for path in paths)
+
+
 def test_parse_where_rejects_empty_value():
     from emend.cli_base import parse_where_clause
 
