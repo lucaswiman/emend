@@ -429,8 +429,9 @@ def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
         code = ''.join(lines[start_idx:end_idx + 1])
 
         if dedent:
-            import textwrap
-            code = textwrap.dedent(code)
+            prefix = next((line[:len(line) - len(line.lstrip(" \t"))]
+                           for line in code.splitlines() if line.strip()), "")
+            code = _indent_template(code, prefix, selector.language, selector.extension, dedent=True)
 
         return code
 
@@ -448,11 +449,9 @@ def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
     prefix = data[line_start:sym.start_byte]
     code = ((prefix if not prefix.strip() else b'') + data[sym.start_byte:sym.end_byte]).decode()
 
-    # Symbol source is always dedented (the `dedent` flag only applies to
-    # line-based selectors above): raw lines come from a potentially indented
-    # context (e.g. a method in a class), so we normalise to column zero.
-    import textwrap
-    code = textwrap.dedent(code)
+    # Relocate structural indentation without changing literal payloads.
+    code = _indent_template(code, prefix.decode() if not prefix.strip() else "",
+                            selector.language, selector.extension, dedent=True)
 
     # Ensure it ends with exactly one newline to match expected test behavior
     if not code.endswith("\n"):
@@ -750,16 +749,11 @@ def _copy_symbol_content(
         FileNotFoundError: If source file doesn't exist
         ValueError: If symbol not found
     """
-    import textwrap
     from emend.language_registry import detect_language
     from emend.language_plugins import load_plugin
 
     # Get source code of the symbol
-    source = get_symbol_source(selector)
-
-    # Dedent if requested
-    if dedent:
-        source = textwrap.dedent(source)
+    source = get_symbol_source(selector, dedent=dedent)
 
     # Read destination file (create if doesn't exist)
     dest_path = Path(dest_file)
@@ -882,9 +876,9 @@ def _substitute_metavars(
     return replacement_code.replace(_EMPTY_ELLIPSIS, "")
 
 
-def _indent_template(template: str, indent: str, language: str, extension: str) -> str:
-    """Indent template lines, not string contents or later opaque captures."""
-    if not indent or "\n" not in template:
+def _indent_template(template: str, indent: str, language: str, extension: str, *, dedent: bool = False) -> str:
+    """Adjust structural indentation, not string contents or opaque captures."""
+    if not indent:
         return template
     from emend.language_registry import get_extensions, load_config
 
@@ -902,11 +896,15 @@ def _indent_template(template: str, indent: str, language: str, extension: str) 
             nodes.extend(node.children())
     data = template.encode()
     transform = _rust.PyFileTransform(template)
-    for offset, byte in enumerate(data):
-        if byte == 10 and offset + 1 < len(data) and not any(
-            start <= offset < end for start, end in protected
-        ):
-            transform.replace_range(offset + 1, offset + 1, indent)
+    starts = ([0] if dedent else []) + [offset + 1 for offset, byte in enumerate(data) if byte == 10 and offset + 1 < len(data)]
+    for offset in starts:
+        if any(start < offset < end for start, end in protected):
+            continue
+        if dedent:
+            if data[offset:].startswith(indent.encode()):
+                transform.replace_range(offset, offset + len(indent.encode()), "")
+        else:
+            transform.replace_range(offset, offset, indent)
     return transform.apply()
 
 
