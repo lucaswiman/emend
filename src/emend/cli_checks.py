@@ -3,10 +3,10 @@ from typing import Annotated, Optional
 
 import typer
 
-from emend.cli_base import JsonFlag, _state, resolve_file_scopes, resolve_files
+from emend.cli_base import DiffOption, JsonFlag, _state, resolve_file_scopes, resolve_files
 from emend.checks.rules_config import resolve_rules_path
 from emend.cli_output import emit_json
-from emend.git_diff import DiffOption, DiffSelection
+from emend.git_diff import DiffSelection
 
 def lint_cmd(
     path: Annotated[str, typer.Argument(help="File or directory to lint")],

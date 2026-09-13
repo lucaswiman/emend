@@ -1,17 +1,16 @@
 """Impact analysis: find what code is affected by changes."""
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 import logging
-import json
-import re
 import subprocess
 
 if TYPE_CHECKING:
     from ..component_selector import ExtendedSelector
 
 from emend.errors import BUG_EXCEPTIONS
+from emend.git_diff import _parse_diff, read_diff
 
 logger = logging.getLogger(__name__)
 
@@ -67,43 +66,6 @@ def impact_projection(
     return data
 
 
-@dataclass
-class _DiffFile:
-    paths: list[str | None] = field(default_factory=lambda: [None, None])
-    blobs: list[str] = field(default_factory=lambda: ["", ""])
-    lines: list[list[int]] = field(default_factory=lambda: [[], []])
-    hunks: list[tuple[int, int, int, int]] = field(default_factory=list)
-
-
-def _parse_diff(diff_text: str) -> list[_DiffFile]:
-    """Keep both coordinate spaces and blob identities of a Git patch."""
-    files: list[_DiffFile] = []
-    in_hunk = False
-    for line in diff_text.splitlines():
-        if line.startswith("diff --git "):
-            files.append(_DiffFile())
-            in_hunk = False
-        elif files:
-            current = files[-1]
-            if match := re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line):
-                in_hunk = True
-                old, old_count, new, new_count = match.groups()
-                current.hunks.append((int(old), int(old_count or 1), int(new), int(new_count or 1)))
-                for side in (0, 1):
-                    start, count = match.groups()[side * 2:side * 2 + 2]
-                    current.lines[side].extend(range(int(start), int(start) + int(count or 1)))
-            elif in_hunk:
-                continue
-            elif line.startswith("index "):
-                current.blobs = line.split()[1].split("..")
-            elif line.startswith(("--- ", "+++ ")):
-                path = line[4:].removesuffix("\t")
-                if path.startswith('"'):
-                    path = json.loads(path)
-                current.paths[line.startswith("+++")] = None if path == "/dev/null" else path[2:]
-    return files
-
-
 def _parse_diff_to_changed_files(diff_text: str) -> list[tuple[str, list[int]]]:
     """Compatibility projection of changed lines in the new version only."""
     return [(f.paths[1], f.lines[1]) for f in _parse_diff(diff_text) if f.paths[1] is not None]
@@ -124,16 +86,7 @@ def _parse_diff_to_selectors(
     Returns:
         List of selector strings for symbols touched by the diff.
     """
-    result = subprocess.run(
-        ['git', '-c', 'core.quotepath=false', 'diff', '--no-ext-diff', '--no-textconv',
-         '--no-renames', '--full-index', '-U0', diff_spec, '--'],
-        capture_output=True, text=True, timeout=30,
-        cwd=project_path,
-    )
-    if result.returncode != 0:
-        raise ValueError(
-            f"git diff failed (exit {result.returncode}): {result.stderr.strip()}"
-        )
+    changes = read_diff(project_path, diff_spec)
 
     from emend.ast_utils import find_nested_definitions, find_symbol_by_line
     from emend.language_registry import is_source_file
@@ -143,7 +96,7 @@ def _parse_diff_to_selectors(
     selectors: list[str] = []
     seen: set[str] = set()
 
-    for changed in _parse_diff(result.stdout):
+    for changed in changes:
         for side, file_rel in enumerate(changed.paths):
             if file_rel is None or not changed.lines[side] or not is_source_file(file_rel):
                 continue

@@ -7,6 +7,7 @@ import typer
 
 from emend.cli_base import (
     JsonFlag,
+    DiffOption,
     _reject_file_glob,
     _state,
     cli_error_handler,
@@ -27,7 +28,7 @@ from emend.transform import (
 )
 from emend.transform.impact import IMPACT_OUTPUTS, impact_projection
 from emend.cli_output import emit_json
-from emend.git_diff import DiffOption, DiffSelection, resolve_diff
+from emend.git_diff import DiffSelection, resolve_diff
 
 logger = logging.getLogger("emend.cli.analysis")
 
@@ -267,7 +268,8 @@ def dsl_debug_cmd(
         selection = DiffSelection.load(diff, project or path)
         if selection is not None:
             all_symbols = [s for s in all_symbols if selection.matches(s.host_file, s.host_line)]
-            links = [link for link in links if link.dsl_symbol in all_symbols]
+            selected = {id(symbol) for symbol in all_symbols}
+            links = [link for link in links if id(link.dsl_symbol) in selected]
         output = format_symbols(all_symbols, links=links if resolve else None, json_output=json_output)
         if output:
             print(output, end='')
@@ -835,13 +837,13 @@ def facts_cmd(
             if transitive:
                 callers = graph.transitive_callers(symbol, max_depth=max_depth)
                 if selection is not None:
-                    callers = set(callers) & {s.qualified_name for s in selection.filter(graph.symbols(), relative_to=project)}
+                    callers = set(callers) & {s.qualified_name for s in selection.filter(graph.symbols(), relative_to=graph.snapshot.project_root)}
                 extra = {"symbol": symbol, "transitive_callers": sorted(callers)}
             else:
                 from_calls = graph.calls_from(symbol)
                 to_calls = graph.calls_to(symbol)
                 if selection is not None:
-                    from_calls, to_calls = (selection.filter(rows, relative_to=project)
+                    from_calls, to_calls = (selection.filter(rows, relative_to=graph.snapshot.project_root)
                                            for rows in (from_calls, to_calls))
                 extra = {
                     "calls_from": [dataclasses.asdict(c) for c in from_calls[:limit]],
@@ -869,7 +871,7 @@ def facts_cmd(
             raise typer.Exit(2)
 
         if selection is not None:
-            results = selection.filter(results, relative_to=project)
+            results = selection.filter(results, relative_to=graph.snapshot.project_root)
         if extra:
             if json_output:
                 emit_json(extra)

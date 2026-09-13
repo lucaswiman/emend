@@ -1,42 +1,63 @@
 """Shared Git change selection for analysis reports, not analysis inputs."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from bisect import bisect_left
 from pathlib import Path
 import shutil
 import subprocess
-from typing import Annotated, Optional
-
-import typer
-from typer.core import TyperCommand
-
-
-DiffOption = Annotated[Optional[str], typer.Option(
-    "--diff", metavar="[RANGE]",
-    help="Report changes: staged if present, otherwise PR/default-base...HEAD; optionally supply a Git range.",
-)]
-
-
-class DiffCommand(TyperCommand):
-    """Allow a bare --diff while retaining Typer's ordinary string option."""
-
-    def parse_args(self, ctx, args):
-        normalized = []
-        for index, arg in enumerate(args):
-            if arg == "--":
-                normalized.extend(args[index:])
-                break
-            if arg == "--diff" and (index + 1 == len(args) or args[index + 1].startswith("-")):
-                arg = "--diff=auto"
-            normalized.append(arg)
-        return super().parse_args(ctx, normalized)
+import json
+import re
 
 
 def _run(root, *args, required=True):
     result = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=30)
     if required and result.returncode:
         raise ValueError(result.stderr.strip() or "Git command failed")
-    return result.stdout.strip() if result.returncode == 0 else None
+    return result.stdout.removesuffix("\n") if result.returncode == 0 else None
+
+
+@dataclass
+class _DiffFile:
+    paths: list[str | None] = field(default_factory=lambda: [None, None])
+    blobs: list[str] = field(default_factory=lambda: ["", ""])
+    lines: list[list[int]] = field(default_factory=lambda: [[], []])
+    hunks: list[tuple[int, int, int, int]] = field(default_factory=list)
+
+
+def _parse_diff(diff_text: str) -> list[_DiffFile]:
+    """Keep both coordinate spaces and blob identities of a Git patch."""
+    files: list[_DiffFile] = []
+    in_hunk = False
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            files.append(_DiffFile())
+            in_hunk = False
+        elif files:
+            current = files[-1]
+            if match := re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line):
+                in_hunk = True
+                hunk = tuple(int(value) if value is not None else 1 for value in match.groups())
+                current.hunks.append(hunk)
+                for side in (0, 1):
+                    start, count = hunk[side * 2:side * 2 + 2]
+                    current.lines[side].extend(range(start, start + count))
+            elif in_hunk:
+                continue
+            elif line.startswith("index "):
+                current.blobs = line.split()[1].split("..")
+            elif line.startswith(("--- ", "+++ ")):
+                path = line[4:].removesuffix("\t")
+                if path.startswith('"'):
+                    path = json.loads(path)
+                current.paths[line.startswith("+++")] = None if path == "/dev/null" else path[2:]
+    return files
+
+
+def read_diff(root, *revisions):
+    """Read machine-format hunks independently of Git presentation settings."""
+    return _parse_diff(_run(root, "-c", "core.quotepath=false", "diff", "--no-ext-diff",
+                           "--no-textconv", "--no-renames", "--full-index", "--no-color", "-U0",
+                           "--src-prefix=a/", "--dst-prefix=b/", "--inter-hunk-context=0", *revisions, "--"))
 
 
 def _gh(root, *args):
@@ -58,6 +79,13 @@ def resolve_diff(spec, path="."):
     if spec != "auto":
         if spec.startswith("-"):
             raise ValueError("Expected a Git revision or range, not an option")
+        if ".." not in spec:
+            revisions = _run(root, "rev-parse", "--revs-only", "--no-flags", spec).splitlines()
+            if len(revisions) > 2:
+                raise ValueError("Combined merge diffs are unsupported; provide a two-commit range")
+            if len(revisions) == 2:
+                left, right = revisions
+                spec = f"{right[1:]}..{left}" if right.startswith("^") else f"{left}..{right}"
         return root, spec
     if _run(root, "diff", "--cached", "--name-only", "--"):
         return root, "--cached"
@@ -93,25 +121,20 @@ def _map_lines(lines, hunks):
 class DiffSelection:
     root: Path
     lines: dict[str, list[int]]
+    _paths: dict[str, str] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     @classmethod
     def load(cls, spec, path="."):
         if spec is None:
             return None
-        from emend.transform.impact import _parse_diff
-
         root, revision = resolve_diff(spec, path)
-        def patch(*revisions):
-            return _parse_diff(_run(root, "-c", "core.quotepath=false", "diff", "--no-ext-diff",
-                                   "--no-textconv", "--no-renames", "--full-index", "-U0", *revisions, "--"))
-
-        selected = patch(revision)
+        selected = read_diff(root, revision)
         # A single revision already compares against the working tree. Staged
         # diffs and ranges need one batched translation from their right side.
         edits = {}
         if selected and (revision == "--cached" or ".." in revision):
             target = [] if revision == "--cached" else [revision.rsplit("..", 1)[1] or "HEAD"]
-            edits = {item.paths[0]: item.hunks for item in patch(*target)}
+            edits = {item.paths[0]: item.hunks for item in read_diff(root, *target)}
         lines = {}
         for item in selected:
             if item.paths[1] is None:
@@ -123,9 +146,10 @@ class DiffSelection:
         return cls(root, lines)
 
     def matches(self, path, line=None, end_line=None):
-        path = Path(path)
-        absolute = str((path if path.is_absolute() else self.root / path).resolve())
-        changed = self.lines.get(absolute)
+        path = str(path)
+        if path not in self._paths:
+            self._paths[path] = str((self.root / path).resolve())
+        changed = self.lines.get(self._paths[path])
         if changed is None:
             return False
         if line is None or line <= 0:
@@ -134,6 +158,8 @@ class DiffSelection:
         return index < len(changed) and changed[index] <= (end_line or line)
 
     def filter(self, values, *, relative_to=None):
+        if relative_to is not None:
+            relative_to = Path(relative_to).resolve()
         selected = []
         for value in values:
             path = getattr(value, "file_path", getattr(value, "importing_file", ""))

@@ -59,6 +59,9 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
     for language, config, path, (content, tree, qn_at, def_loc, symbols) in _parsed_inputs(files):
         source_lines = content.splitlines(keepends=True)
         for node in _function_nodes(tree.root, config["function_nodes"]):
+            line = node.start_point[0]
+            if node.end_point[0] - line + 1 < min_lines:
+                continue
             body = node.child_by_field_name("body")
             if body is None:
                 continue
@@ -82,9 +85,6 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
                 tokens.extend(_with_blocks(statement, iter(part), config))
             if len(tokens) < 32:
                 continue
-            line = node.start_point[0]
-            if node.end_point[0] - line + 1 < min_lines:
-                continue
             symbol = _find_containing_symbol(line, symbols)
             if not symbol and (name := node.child_by_field_name(config["name_field"])) is not None:
                 symbol = name.text()
@@ -97,7 +97,7 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
                 "tokens": tuple(tokens),
                 "source": source_lines[line:node.end_point[0] + 1],
                 "path": path, "start": node.start_byte, "end": node.end_byte,
-                "line": line + 1, "end_line": node.end_point[0] + 1,
+                "selected": location_filter is None or location_filter(path, line + 1, node.end_point[0] + 1),
                 "language": language,
             })
 
@@ -122,9 +122,7 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
             # Nested functions share text with their enclosing function.
             if a["path"] == b["path"] and max(a["start"], b["start"]) < min(a["end"], b["end"]):
                 continue
-            if location_filter is not None and not any(
-                location_filter(f["path"], f["line"], f["end_line"]) for f in (a, b)
-            ):
+            if not (a["selected"] or b["selected"]):
                 continue
             matcher = SequenceMatcher(None, a["tokens"], b["tokens"], autojunk=False)
             if matcher.quick_ratio() < min_similarity or matcher.ratio() < min_similarity:

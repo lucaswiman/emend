@@ -53,6 +53,7 @@ to its merge base with the current PR's base (when ``gh`` is installed and the
 PR can be resolved), or the repository's default branch. Base refs must be
 available locally; emend does not fetch or modify Git state. An explicit range
 overrides automatic selection.
+Combined merge diffs are not supported; select an explicit parent-to-merge range.
 
 Analysis runs on the current working tree, preserving unchanged project context.
 Reports select changed lines or overlapping symbol/function spans; duplicate

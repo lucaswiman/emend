@@ -9,6 +9,7 @@ from typing import Annotated, Optional
 
 import click
 import typer
+from typer.core import TyperCommand
 from lark.exceptions import LarkError
 
 from emend.component_selector import parse_extended_selector, parse_selector
@@ -20,6 +21,25 @@ from emend.component_selector import parse_extended_selector, parse_selector
 # ``typer.Option`` inline.
 ApplyFlag = Annotated[bool, typer.Option("--apply", help="Apply changes (default is dry-run)")]
 JsonFlag = Annotated[bool, typer.Option("--json", help="Output as JSON")]
+DiffOption = Annotated[Optional[str], typer.Option(
+    "--diff", metavar="[RANGE]",
+    help="Report changes: staged if present, otherwise PR/default-base...HEAD; optionally supply a Git range.",
+)]
+
+
+class DiffCommand(TyperCommand):
+    """Allow a bare --diff while retaining Typer's ordinary string option."""
+
+    def parse_args(self, ctx, args):
+        normalized = []
+        for index, arg in enumerate(args):
+            if arg == "--":
+                normalized.extend(args[index:])
+                break
+            if arg == "--diff" and (index + 1 == len(args) or args[index + 1].startswith("-")):
+                arg = "--diff=auto"
+            normalized.append(arg)
+        return super().parse_args(ctx, normalized)
 
 
 @contextmanager

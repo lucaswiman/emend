@@ -17,7 +17,7 @@ from emend.cli_analysis import (
     trace_cmd,
     types_cmd,
 )
-from emend.cli_base import analyze_app, app, edit_app, tool_app
+from emend.cli_base import DiffCommand, analyze_app, app, edit_app, tool_app
 from emend.cli_checks import check_cmd, lint_cmd, policy_cmd
 from emend.cli_edit import (
     add,
@@ -46,7 +46,6 @@ from emend.cli_map import (
 )
 from emend.cli_tooling import editor_search_cmd, editor_server_cmd, index_cmd, mcp_cmd
 from emend.errors import BUG_EXCEPTIONS
-from emend.git_diff import DiffCommand
 
 
 @dataclass
