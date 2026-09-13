@@ -25,6 +25,10 @@ node = "function_declaration"
 kind = "function"
 
 [[scoping.scope_creators]]
+node = "function_signature"
+kind = "function"
+
+[[scoping.scope_creators]]
 node = "arrow_function"
 kind = "function"
 
@@ -107,6 +111,8 @@ private_prefix = "_"
 
 [symbols]
 function_node = "function_declaration"
+additional_function_nodes = ["function_signature"]
+definition_wrappers = ["export_statement", "ambient_declaration"]
 class_node = "class_declaration"
 # TypeScript has no decorated_definition wrapper; decorators are direct children
 decorated_node = ""

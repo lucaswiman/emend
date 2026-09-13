@@ -591,6 +591,8 @@ impl StatementsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SymbolsSection {
     #[serde(default)] pub function_node: Option<String>,
+    #[serde(default)] pub additional_function_nodes: Vec<String>,
+    #[serde(default)] pub definition_wrappers: Vec<String>,
     #[serde(default)] pub class_node: Option<String>,
     /// Wrapper node around decorated defs (Python: "decorated_definition"; empty = no wrapper).
     #[serde(default)] pub decorated_node: Option<String>,
@@ -633,6 +635,9 @@ pub struct SymbolsSection {
 impl SymbolsSection {
     pub fn function_node(&self) -> &str {
         self.function_node.as_deref().unwrap_or("function_definition")
+    }
+    pub fn is_function_node(&self, kind: &str) -> bool {
+        kind == self.function_node() || self.additional_function_nodes.iter().any(|node| node == kind)
     }
     pub fn class_node(&self) -> &str {
         self.class_node.as_deref().unwrap_or("class_definition")
@@ -738,6 +743,8 @@ impl SymbolsSection {
     pub fn python_default() -> Self {
         SymbolsSection {
             function_node: Some("function_definition".to_string()),
+            additional_function_nodes: Vec::new(),
+            definition_wrappers: Vec::new(),
             class_node: Some("class_definition".to_string()),
             decorated_node: Some("decorated_definition".to_string()),
             definition_field: Some("definition".to_string()),
@@ -1418,6 +1425,7 @@ pub struct ScopeResolver {
     pub module_root: PathBuf,
     pub project_root: PathBuf,
     pub root_module_file: Option<PathBuf>,
+    infer_source_root: bool,
 }
 
 impl FileScope {
@@ -1583,7 +1591,9 @@ impl FileScope {
 
 impl ScopeResolver {
     pub fn new(config: LanguageConfig, project_root: PathBuf) -> Self {
-        Self::new_with_module_root(config, project_root.clone(), project_root, None)
+        let mut resolver = Self::new_with_module_root(config, project_root.clone(), project_root, None);
+        resolver.infer_source_root = true;
+        resolver
     }
 
     pub fn new_with_module_root(
@@ -1599,6 +1609,7 @@ impl ScopeResolver {
             module_root,
             project_root,
             root_module_file,
+            infer_source_root: false,
         }
     }
 
@@ -1613,6 +1624,7 @@ impl ScopeResolver {
             separator,
             &self.config.imports.resolution,
             &self.config.language.file_extensions,
+            self.infer_source_root,
         )
     }
 
@@ -1725,6 +1737,7 @@ impl ScopeResolver {
                 root, &self.module_root, separator,
                 &self.config.imports.resolution,
                 &self.config.language.file_extensions,
+                self.infer_source_root,
             )
         });
         let mut ctx = BuildContext::new(
@@ -3943,6 +3956,7 @@ impl ScopeResolver {
                 let is_def_name = node.parent().map_or(false, |p| {
                     let pk = p.kind();
                     (pk == config.bindings.definitions.function_def
+                        || config.symbols.is_function_node(pk)
                         || pk == config.bindings.definitions.class_def)
                         && p.child_by_field_name(def_name_field)
                             .map_or(false, |f| f.id() == node.id())
@@ -4151,6 +4165,7 @@ fn derive_module_path(
     separator: &str,
     strategy: &str,
     extensions: &[String],
+    infer_source_root: bool,
 ) -> String {
     let relative = file_path
         .strip_prefix(project_root)
@@ -4163,7 +4178,7 @@ fn derive_module_path(
     
     // Strategy-specific pre-processing
     let parts = match strategy {
-        "python" => {
+        "python" if infer_source_root => {
             // Python: skip leading "src"
             parts.into_iter().skip_while(|&c| c == "src").collect()
         }
@@ -4769,27 +4784,35 @@ class MyClass:
 
     #[test]
     fn test_derive_module_path() {
+        let project = PathBuf::from("/project");
+        let path = project.join("src/thing.py");
+        let explicit = ScopeResolver::new_with_module_root(
+            LanguageConfig::python_default(), project.clone(), project.clone(), None,
+        );
+        assert_eq!(explicit.module_name_for_file(&path), "src.thing");
+        assert_eq!(ScopeResolver::new(LanguageConfig::python_default(), project)
+            .module_name_for_file(&path), "thing");
         let py_exts = vec!["py".to_string(), "pyi".to_string()];
         assert_eq!(
-            derive_module_path(Path::new("/project/src/mypackage/module.py"), Path::new("/project"), ".", "python", &py_exts),
+            derive_module_path(Path::new("/project/src/mypackage/module.py"), Path::new("/project"), ".", "python", &py_exts, true),
             "mypackage.module"
         );
         assert_eq!(
-            derive_module_path(Path::new("/project/mypackage/__init__.py"), Path::new("/project"), ".", "python", &py_exts),
+            derive_module_path(Path::new("/project/mypackage/__init__.py"), Path::new("/project"), ".", "python", &py_exts, true),
             "mypackage"
         );
         assert_eq!(
-            derive_module_path(Path::new("/project/src/pkg/sub/file.py"), Path::new("/project"), ".", "python", &py_exts),
+            derive_module_path(Path::new("/project/src/pkg/sub/file.py"), Path::new("/project"), ".", "python", &py_exts, true),
             "pkg.sub.file"
         );
 
         let ts_exts = vec!["ts".to_string(), "tsx".to_string(), "js".to_string()];
         assert_eq!(
-            derive_module_path(Path::new("/project/src/components/Button.tsx"), Path::new("/project"), "/", "node", &ts_exts),
+            derive_module_path(Path::new("/project/src/components/Button.tsx"), Path::new("/project"), "/", "node", &ts_exts, true),
             "src/components/Button"
         );
         assert_eq!(
-            derive_module_path(Path::new("/project/src/utils/index.ts"), Path::new("/project"), "/", "node", &ts_exts),
+            derive_module_path(Path::new("/project/src/utils/index.ts"), Path::new("/project"), "/", "node", &ts_exts, true),
             "src/utils"
         );
     }
@@ -5113,7 +5136,7 @@ def handler():
     #[test]
     fn canonical_imports_preserve_module_identity() {
         for (path, expected) in [("library/index.d.ts", "library"), ("library/types.d.ts", "library/types")] {
-            assert_eq!(derive_module_path(Path::new(path), Path::new(""), "/", "node", &["ts".into()]), expected);
+            assert_eq!(derive_module_path(Path::new(path), Path::new(""), "/", "node", &["ts".into()], true), expected);
             assert_eq!(resolve_node_import(&format!("./{path}"), "consumer").as_deref(), Some(expected));
         }
         assert_eq!(resolve_node_import("react", "consumer").as_deref(), Some("<external>/react"));

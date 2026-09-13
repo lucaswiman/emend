@@ -291,12 +291,11 @@ pub fn find_node_by_path<'a>(
         cfg: &crate::scope::SymbolsSection,
     ) -> Option<tree_sitter::Node<'a>> {
         let kind = node.kind();
-        let fn_node = cfg.function_node();
         let cls_node = cfg.class_node();
         let dec_node = cfg.decorated_node();
         let method_node = cfg.method_node();
 
-        if kind == fn_node || kind == cls_node || method_node.map_or(false, |m| kind == m) {
+        if cfg.is_function_node(kind) || kind == cls_node || method_node.map_or(false, |m| kind == m) {
             if let Some(name_node) = node.child_by_field_name(cfg.name_field()) {
                 let name = node_text(name_node, source);
                 current_path.push(name.to_string());
@@ -693,7 +692,6 @@ fn collect_from_body(
     cfg: &crate::scope::SymbolsSection,
 ) -> Vec<RustSymbol> {
     let mut symbols: Vec<RustSymbol> = Vec::new();
-    let fn_node_kind = cfg.function_node();
     let cls_node_kind = cfg.class_node();
     let dec_node_kind = cfg.decorated_node();
     let method_node_kind = cfg.method_node();
@@ -707,7 +705,7 @@ fn collect_from_body(
         // --- Decorated wrapper (Python: decorated_definition) ---
         let is_decorated_wrapper = !dec_node_kind.is_empty() && kind == dec_node_kind;
         // --- Direct function/method node ---
-        let is_func = kind == fn_node_kind
+        let is_func = cfg.is_function_node(kind)
             || method_node_kind.map_or(false, |m| kind == m);
         // --- Direct class node ---
         let is_class = kind == cls_node_kind;
@@ -718,7 +716,7 @@ fn collect_from_body(
             let inner = child.child_by_field_name(cfg.definition_field()).unwrap_or(child);
             let inner_kind = inner.kind();
 
-            if inner_kind == fn_node_kind || method_node_kind.map_or(false, |m| inner_kind == m) {
+            if cfg.is_function_node(inner_kind) || method_node_kind.map_or(false, |m| inner_kind == m) {
                 emit_function(inner, child, source, depth, max_depth, path, selector_path,
                     defined_names_stack, in_class, decorators, decorator_line_start, cfg, &mut symbols);
             } else if inner_kind == cls_node_kind {
@@ -748,10 +746,8 @@ fn collect_from_body(
                     &owner_path, selector_path, defined_names_stack, true, cfg);
                 symbols.append(&mut inner);
             }
-        } else if kind == "export_statement" {
-            // TypeScript: `export function foo()`, `export class Bar`, etc.
-            // The export_statement wraps the actual definition; recurse into it
-            // so that the inner function/class is discovered.
+        } else if cfg.definition_wrappers.iter().any(|wrapper| wrapper == kind) {
+            // Transparent declaration wrappers do not introduce a lexical scope.
             let mut inner = collect_from_body(child, source, depth, max_depth, path,
                 selector_path, defined_names_stack, in_class, cfg);
             symbols.append(&mut inner);
@@ -1215,6 +1211,7 @@ class Animal {
     constructor(public name: string) {}
     speak(): void {}
 }
+export declare function installedFunction(name: string): number;
 "#;
         let syms = collect_symbols_from_source(source, usize::MAX, &None, "ts");
         let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
@@ -1226,6 +1223,19 @@ class Animal {
 
         let class_sym = syms.iter().find(|s| s.name == "Animal").unwrap();
         assert_eq!(class_sym.kind, "class");
+        let declared = syms.iter().find(|s| s.name == "installedFunction")
+            .expect("ambient function declarations are symbols");
+        assert_eq!(declared.kind, "function");
+        let tree = crate::pattern::parse_by_extension(source, "ts").unwrap();
+        assert!(find_node_by_path(tree.root_node(), source.as_bytes(),
+            &["installedFunction".into()], &crate::scope::config_for_ext("ts").symbols).is_some());
+        let path = std::path::Path::new("/project/library/index.d.ts");
+        let mut resolver = crate::scope::ScopeResolver::new(
+            crate::scope::config_for_ext("ts").clone(), "/project".into(),
+        );
+        resolver.index_file(path, source, &tree);
+        assert!(resolver.get_symbols(path).iter().any(|symbol|
+            symbol.name == "library/installedFunction" && symbol.kind == "function"));
     }
 
     #[test]

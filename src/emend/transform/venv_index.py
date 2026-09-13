@@ -9,37 +9,29 @@ from __future__ import annotations
 from pathlib import Path
 import hashlib
 import logging
-import os
 
 from emend.errors import BUG_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
 
-def _scan_venv_files(site_packages: Path) -> dict[str, tuple[int, int, int, int, int]]:
+def _scan_venv_files(site_packages: Path, language="python") -> dict[str, tuple[int, int, int, int, int]]:
     """Discover indexable files and return identities without reading contents."""
-    from emend.analysis_store import AnalysisStore
-    from emend.file_collection import collect_source_files_scandir
+    from emend.file_collection import collect_source_files_scandir, source_file_identities
 
-    found = {}
     files = collect_source_files_scandir(
         str(site_packages),
-        language="python",
+        language=language,
         skip_dirs=["__pycache__", "*.dist-info", "*.egg-info"],
     )
-    for path in files:
-        try:
-            stat = os.stat(path)
-        except OSError:
-            continue
-        found[path] = AnalysisStore._stat_identity(stat)
-    return found
+    return source_file_identities(files)
 
 
-def _venv_db_path(project_root: str) -> Path:
+def _venv_db_path(project_root: str, language="python") -> Path:
     """Return the path to the venv-specific parse cache DB."""
     from .cache import _cache_db_dir
-    return _cache_db_dir(project_root) / "parse_venv.db"
+    name = "parse_venv.db" if language == "python" else f"parse_environment_{language}.db"
+    return _cache_db_dir(project_root) / name
 
 
 def _ensure_venv_index(project_root: str, language: str = "python") -> Path | None:
@@ -55,12 +47,15 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
     from .cache import _initialize_cache_connection
 
     from emend.project_config import resolve_environment_path
+    from emend.analysis_store import EXTRACTION_ARTIFACT_VERSION
+    from emend.language_registry import config_identity
 
     site_packages = resolve_environment_path(project_root, language)
     if site_packages is None:
         return None
+    context = repr((EXTRACTION_ARTIFACT_VERSION, config_identity(language)))
 
-    db_path = _venv_db_path(project_root)
+    db_path = _venv_db_path(project_root, language)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     if not site_packages.is_dir():
@@ -83,17 +78,18 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
         )
         conn.execute("CREATE TABLE IF NOT EXISTS venv_meta "
                      "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        current = _scan_venv_files(site_packages)
+        current = _scan_venv_files(site_packages, language)
         previous = {
             row[0]: tuple(row[1:6])
             for row in conn.execute(
                 "SELECT path, device, inode, size, mtime_ns, ctime_ns FROM venv_files"
             )
         }
-        row = conn.execute(
-            "SELECT value FROM venv_meta WHERE key = 'environment_path'"
-        ).fetchone()
-        environment_changed = row is None or row[0] != str(site_packages)
+        metadata = dict(conn.execute("SELECT key, value FROM venv_meta"))
+        environment_changed = (
+            metadata.get("environment_path") != str(site_packages)
+            or metadata.get("context") != context
+        )
         changed = [Path(path) for path, identity in current.items()
                    if environment_changed or previous.get(path) != identity]
         removed = (
@@ -104,7 +100,7 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
         if environment_changed or changed or removed:
             _update_venv_index(
                 conn, site_packages, changed, removed, current, project_root,
-                reset=environment_changed,
+                reset=environment_changed, language=language, context=context,
             )
         conn.close()
         return db_path
@@ -119,17 +115,22 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
 
 
 def _update_venv_index(
-    conn, sp: Path, changed, removed, current, project_root, *, reset=False
+    conn, sp: Path, changed, removed, current, project_root, *, context, reset=False, language="python"
 ) -> None:
     """Apply one inventory delta atomically."""
     from emend.analysis_store import AnalysisStore
     from emend.symbol_projection import _symbol_info_view
+    from emend.language_registry import get_extensions, get_module_separator
+    from emend import emend_core
 
     changed = list(changed)
     removed = list(removed)
     sym_rows: list[tuple] = []
     indexed_files = []
     store = AnalysisStore.open(project_root)
+    resolver = emend_core.PyScopeResolver(
+        str(sp), get_extensions(language)[0], module_root=str(sp)
+    )
     for fpath in changed:
         try:
             content = fpath.read_text(errors="replace")
@@ -152,17 +153,13 @@ def _update_venv_index(
         indexed_files.append((str(fpath), *current[str(fpath)], content_hash))
 
         # Compute module_qn from path relative to site-packages
-        rel = fpath.relative_to(sp)
-        module_parts = list(rel.parts[:-1])
-        stem = rel.stem
-        if stem != "__init__":
-            module_parts.append(stem)
-        module_qn = ".".join(module_parts)
+        separator = get_module_separator(language)
+        module_qn = resolver.module_name_for_file(str(fpath))
 
         for sym in symbols:
             parts = sym.path.split("::", 1)
             dotted = parts[1] if len(parts) > 1 else sym.name
-            m_qn = f"{module_qn}.{dotted}" if module_qn else dotted
+            m_qn = f"{module_qn}{separator}{dotted}" if module_qn else dotted
             sig = None
             if sym.parameters:
                 ret_str = f" -> {sym.returns}" if sym.returns else ""
@@ -211,9 +208,9 @@ def _update_venv_index(
                 "(path, device, inode, size, mtime_ns, ctime_ns, content_hash) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)", indexed_files,
             )
-        conn.execute(
-            "INSERT OR REPLACE INTO venv_meta VALUES ('environment_path', ?)",
-            (str(sp),),
+        conn.executemany(
+            "INSERT OR REPLACE INTO venv_meta VALUES (?, ?)",
+            (("environment_path", str(sp)), ("context", context)),
         )
     logger.info(
         "Venv index: updated %d symbols from %d changed files; removed %d files",
@@ -275,7 +272,9 @@ def lookup_venv_symbol(
             conditions.append(
                 "(qualified_name = ? OR module_qn = ? OR module_qn LIKE ?)"
             )
-            params.extend([qualified_name, qualified_name, qualified_name + ".%"])
+            from emend.language_registry import get_module_separator
+            params.extend([qualified_name, qualified_name,
+                           qualified_name + get_module_separator(language) + "%"])
 
         where = " AND ".join(conditions) if conditions else "1=1"
         query = (

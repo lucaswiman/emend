@@ -748,6 +748,7 @@ def query_symbol_index(
             qualified_name=qualified_name,
             kind=kind,
             limit=limit,
+            language=language,
         )
         if venv_results:
             return venv_results

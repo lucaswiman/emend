@@ -592,7 +592,9 @@ def get_environment_lookup_config(project_root: str, language: str = "python") -
     )
 
 
-def resolve_environment_path(project_root: str, language: str = "python") -> Path | None:
+def resolve_environment_path(
+    project_root: str, language: str = "python", *, require_enabled: bool = True
+) -> Path | None:
     """Find the first existing environment path directory.
 
     For Python: Returns the ``site-packages`` path inside the first matching venv,
@@ -601,7 +603,7 @@ def resolve_environment_path(project_root: str, language: str = "python") -> Pat
     For other languages, returns the first matching environment directory.
     """
     cfg = get_environment_lookup_config(project_root, language)
-    if not cfg.enabled:
+    if require_enabled and not cfg.enabled:
         return None
 
     root = Path(project_root)
