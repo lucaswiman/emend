@@ -728,7 +728,12 @@ def test_editor_pattern_mixed_languages_share_limit(tmp_path):
 @pytest.mark.parametrize("background", [False, True])
 @pytest.mark.parametrize("extension,template", [("py", "def {}():\n    pass\n"), ("rs", "fn {}() {{}}\n")])
 def test_editor_reindex_builds_cold_and_large_updates(tmp_path, background, monkeypatch, extension, template):
-    (tmp_path / f"first.{extension}").write_text(template.format("initial"))
+    sources = tmp_path / "src"
+    sources.mkdir()
+    if extension == "rs":
+        (tmp_path / "Cargo.toml").write_text('[package]\nname="example"\nversion="0.1.0"\n')
+    first = sources / ("lib.rs" if extension == "rs" else "first.py")
+    first.write_text(template.format("initial"))
     with _engine(tmp_path) as engine:
         if background:
             def unavailable(_):
@@ -738,10 +743,12 @@ def test_editor_reindex_builds_cold_and_large_updates(tmp_path, background, monk
                 assert engine.start_background_reindex()
                 engine._index_thread.join(timeout=10)
                 assert not engine.is_indexing and not engine.check_index_complete()
-        for name, expected in [("initial", 1), ("added", 11)]:
+        for name, expected in [("initial", 1), ("updated", 1), ("added", 11)]:
+            if name == "updated":
+                first.write_text(template.format("updated"))
             if name == "added":
                 for index in range(expected):
-                    (tmp_path / f"new_{index}.{extension}").write_text(template.format("added"))
+                    (sources / f"new_{index}.{extension}").write_text(template.format("added"))
             if background:
                 assert engine.start_background_reindex()
                 engine._index_thread.join(timeout=10)
@@ -751,6 +758,10 @@ def test_editor_reindex_builds_cold_and_large_updates(tmp_path, background, monk
             else:
                 assert engine.reindex().items[0]["fresh"]
             assert len(engine.search_symbols(name).items) == expected
+            rows = engine._get_conn().execute("SELECT module_qn FROM symbol_index").fetchall()
+            assert {row[0] for row in rows} == {
+                symbol.qualified_name for symbol in engine._store.query_facts().symbols()
+            }
 
 
 class TestGrepSearch:
