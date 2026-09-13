@@ -338,6 +338,15 @@ def find_pattern(
 
 def remove_symbol(
 selector: ExtendedSelector, apply: bool = False) -> str:
+    """Remove a symbol, returning a diff; only write when apply is requested."""
+    from .components import _generate_diff
+    original, updated = _remove_symbol_content(selector)
+    if apply:
+        Path(selector.file_path).write_text(updated)
+    return _generate_diff(selector.file_path, original, updated)
+
+
+def _remove_symbol_content(selector: ExtendedSelector) -> tuple[str, str]:
     """Remove a symbol (function, class) from a file.
 
     Args:
@@ -379,15 +388,7 @@ selector: ExtendedSelector, apply: bool = False) -> str:
     new_lines = lines[:start_idx] + lines[end_idx:]
     new_code = "".join(new_lines)
 
-    # Generate diff
-    from .components import _generate_diff
-    diff = _generate_diff(selector.file_path, source_code, new_code)
-
-    # Apply changes if requested
-    if apply:
-        file_path.write_text(new_code)
-
-    return diff
+    return source_code, new_code
 
 
 def get_symbol_source(selector: ExtendedSelector, dedent: bool = False) -> str:
@@ -709,6 +710,27 @@ def copy_symbol(
     project_path: str | None = None,
     apply: bool = False,
 ) -> str:
+    """Copy a symbol with optional dependencies; preview unless apply is set."""
+    from .components import _generate_diff
+    original, updated = _copy_symbol_content(
+        selector, dest_file, position, dedent, include_imports,
+        source_module, project_path,
+    )
+    if apply:
+        Path(dest_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest_file).write_text(updated)
+    return _generate_diff(dest_file, original, updated)
+
+
+def _copy_symbol_content(
+    selector: ExtendedSelector,
+    dest_file: str,
+    position: str = "end",
+    dedent: bool = False,
+    include_imports: bool = False,
+    source_module: str | None = None,
+    project_path: str | None = None,
+) -> tuple[str, str]:
     """Copy a symbol from one location to another.
 
     Args:
@@ -781,16 +803,7 @@ def copy_symbol(
                 )
                 new_content = imp + "\n" + new_content
 
-    # Generate diff
-    from .components import _generate_diff
-    diff = _generate_diff(dest_file, dest_content, new_content)
-
-    # Apply changes if requested
-    if apply:
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        dest_path.write_text(new_content)
-
-    return diff
+    return dest_content, new_content
 
 
 def _is_valid_replacement(code: str, language: str = "python", extension: str | None = None, *, fragment: bool = True) -> bool:

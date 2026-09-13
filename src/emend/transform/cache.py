@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Parse/index cache version remains shared with ``index.py``.  FactGraph has
 # its own marker because its Cozo relation shape can change independently.
-_SCHEMA_VERSION = "8"
+_SCHEMA_VERSION = "9"
 
 
 def _initialize_cache_connection(conn: sqlite3.Connection) -> None:

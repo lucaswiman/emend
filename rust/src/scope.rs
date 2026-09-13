@@ -1349,7 +1349,7 @@ impl<'a> BuildContext<'a> {
         byte_offset: usize,
         line: usize,
         binding: ImportBinding,
-    ) {
+    ) -> &mut ScopedImportBinding {
         let raw_binding = binding.clone();
         let raw_module_path = raw_binding.module_path.clone();
         let mut canonical_binding = binding;
@@ -1397,6 +1397,7 @@ impl<'a> BuildContext<'a> {
             raw_module_path,
             binding: canonical_binding,
         });
+        self.scoped_imports.last_mut().unwrap()
     }
 }
 
@@ -2408,7 +2409,30 @@ impl ScopeResolver {
         Some(format!("{root_text}{separator}{}", node_text(leaf, source)))
     }
 
-    /// Resolve a simple identifier to its qualified name.
+    fn visible_scope_ids<'a>(
+        &'a self, start: ScopeId, scopes: &'a [Scope], scope_index: &'a HashMap<ScopeId, usize>,
+    ) -> impl Iterator<Item = ScopeId> + 'a {
+        let mut current = Some(start);
+        std::iter::from_fn(move || {
+            while let Some(id) = current {
+                let scope = &scopes[*scope_index.get(&id)?];
+                current = scope.parent;
+                if id != start {
+                    if let Some(rule) = self.config.scoping.rules.get(&scope.kind) {
+                        if rule.is_closure_boundary && !rule.names_visible_to_inner {
+                            if rule.continue_outer_lookup { continue; }
+                            current = None;
+                            return None;
+                        }
+                    }
+                }
+                return Some(id);
+            }
+            None
+        })
+    }
+
+    /// Resolve an import through the same lexical boundaries as local names.
     fn visible_import<'a>(
         &self,
         name: &str,
@@ -2418,14 +2442,7 @@ impl ScopeResolver {
         scope_index: &HashMap<ScopeId, usize>,
         imports: &'a [ScopedImportBinding],
     ) -> Option<&'a ScopedImportBinding> {
-        let mut ancestors = Vec::new();
-        let mut current = Some(scope_id);
-        while let Some(id) = current {
-            ancestors.push(id);
-            current = scope_index
-                .get(&id)
-                .and_then(|index| scopes[*index].parent);
-        }
+        let ancestors: Vec<_> = self.visible_scope_ids(scope_id, scopes, scope_index).collect();
         imports
             .iter()
             .filter(|import| {
@@ -2664,8 +2681,7 @@ impl ScopeResolver {
         scopes: &[Scope],
         scope_index: &HashMap<ScopeId, usize>,
     ) -> Option<String> {
-        let mut current = Some(start_scope);
-        while let Some(sid) = current {
+        for sid in self.visible_scope_ids(start_scope, scopes, scope_index) {
             let idx = *scope_index.get(&sid)?;
             let scope = &scopes[idx];
 
@@ -2698,18 +2714,6 @@ impl ScopeResolver {
                 }
             }
 
-            // Check closure boundary
-            if let Some(rule) = self.config.scoping.rules.get(&scope.kind) {
-                if rule.is_closure_boundary && !rule.names_visible_to_inner {
-                    if rule.continue_outer_lookup {
-                        current = scope.parent;
-                        continue;
-                    }
-                    break;
-                }
-            }
-
-            current = scope.parent;
         }
         None
     }
@@ -3264,12 +3268,17 @@ impl ScopeResolver {
                     (local, text)
                 };
 
-                ctx.add_import(scope_id, byte_offset, line, ImportBinding {
+                let imported = ctx.add_import(scope_id, byte_offset, line, ImportBinding {
                     local_name,
                     module_path,
                     imported_name: None,
                     is_star: false,
                 });
+                // A plain dotted import loads the full module but binds its
+                // root package; an explicit alias binds the full module.
+                if !is_aliased {
+                    imported.binding.module_path = imported.binding.local_name.clone();
+                }
             });
         } else if is_from_import {
             let module_node = node

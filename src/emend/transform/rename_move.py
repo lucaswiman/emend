@@ -12,6 +12,37 @@ from emend.errors import BUG_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
+
+def _publish_edits(edits: dict[str, tuple[str, str]], apply: bool) -> dict[str, str]:
+    """Render and optionally publish a fully computed set of file edits."""
+    from .components import _generate_diff
+    diffs = {path: _generate_diff(path, before, after)
+             for path, (before, after) in edits.items() if before != after}
+    for path in diffs:
+        _validate_parent_directory(Path(path))
+        from emend import emend_core
+        if not emend_core.validate_syntax(edits[path][1], Path(path).suffix.lstrip("."), fragment=False):
+            raise ValueError(f"Planned edit would produce invalid syntax: {path}")
+    if apply:
+        for path in diffs:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text(edits[path][1])
+    return diffs
+
+
+def _validate_module_destination(source: str, destination: Path) -> None:
+    if destination.exists() or destination.is_symlink():
+        raise ValueError(f"Destination already exists: {destination}")
+    if not Path(source).is_file():
+        raise FileNotFoundError(source)
+    _validate_parent_directory(destination)
+
+
+def _validate_parent_directory(destination: Path) -> None:
+    ancestor = next(parent for parent in destination.absolute().parents if parent.exists())
+    if not ancestor.is_dir():
+        raise ValueError(f"Destination parent is not a directory: {ancestor}")
+
 def rename_symbol(
     selector: ExtendedSelector,
     new_name: str,
@@ -172,13 +203,16 @@ def move_symbol(
     Raises:
         ValueError: If symbol not found
     """
-    from .project_iter import _file_to_module, _find_project_root, _normalize_module_qn, _files_importing_module, visit_project_ts
-    from .patterns import copy_symbol, remove_symbol
-    from .components import _generate_diff
-    diffs = {}
+    from .project_iter import _file_to_module, _find_project_root
+    from .patterns import _copy_symbol_content, _remove_symbol_content
+    edits = {}
     symbol_name = selector.symbol_path[-1] if selector.symbol_path else None
     if not symbol_name:
         raise ValueError("Symbol path is required for move_symbol")
+    if Path(selector.file_path).resolve() == Path(dest_file).resolve():
+        raise ValueError("Source and destination must be different files")
+    project_path = project_path or _find_project_root(selector.file_path)
+    _validate_parent_directory(Path(dest_file).absolute())
 
     # Compute source module name so that locally-defined symbols referenced by
     # the moved symbol get ``from source_module import Name`` statements added
@@ -186,10 +220,8 @@ def move_symbol(
     source_module = _file_to_module(selector.file_path, project_path)
 
     from emend.ast_utils import find_nested_definitions, find_symbol_by_path
-    source_symbol = find_symbol_by_path(
-        find_nested_definitions(selector.file_path, ext=selector.extension),
-        selector.symbol_path,
-    )
+    source_symbols = find_nested_definitions(selector.file_path, ext=selector.extension)
+    source_symbol = find_symbol_by_path(source_symbols, selector.symbol_path)
     moved_definition_range = (
         (source_symbol.line_start, source_symbol.line_end)
         if source_symbol is not None else None
@@ -200,36 +232,35 @@ def move_symbol(
     # moved symbol (e.g. calls, type annotations).  After removal the name
     # becomes unresolved and the resolver can no longer see it.
     source_has_other_refs = _source_has_remaining_refs(
-        selector.file_path, symbol_name, project_path, moved_definition_range,
+        selector.file_path, ".".join(selector.symbol_path), project_path, moved_definition_range,
     )
+    if len(selector.symbol_path) > 1 and source_has_other_refs and find_symbol_by_path(source_symbols, [symbol_name]):
+        raise ValueError(f"Moving nested symbol would shadow existing binding: {symbol_name}")
 
     # Step 1: Copy symbol to destination (include_imports=True so the moved
     # symbol carries its own import dependencies into the destination file,
     # fixing issue #138 Bug 2).
-    copy_diff = copy_symbol(
+    edits[dest_file] = _copy_symbol_content(
         selector, dest_file, position=position, dedent=dedent,
         include_imports=True, source_module=source_module,
-        project_path=project_path, apply=apply,
+        project_path=project_path,
     )
-    diffs[dest_file] = copy_diff
 
     # Step 2: Remove from source
-    remove_diff = remove_symbol(selector, apply=apply)
-    diffs[selector.file_path] = remove_diff
+    edits[selector.file_path] = _remove_symbol_content(selector)
 
     # Step 3: Update imports if requested
     if update_imports:
-        import_diffs = _update_imports_for_move(
+        _update_imports_for_move(
             selector.file_path,
             dest_file,
             symbol_name,
             project_path,
-            apply=apply,
+            edits=edits,
+            symbol_path=".".join(selector.symbol_path),
             source_has_other_refs=source_has_other_refs,
         )
-        diffs.update(import_diffs)
-
-    return diffs
+    return _publish_edits(edits, apply)
 
 
 def _source_has_remaining_refs(
@@ -262,17 +293,20 @@ def _source_has_remaining_refs(
     resolved = str(source_path.resolve())
     resolver.index_file(resolved, content)
 
-    target_suffix = f".{symbol_name}"
-    return any(
-        kind in ("read", "write", "call")
+    target_module = resolver.module_name_for_file(resolved)
+    target_qn = f"{target_module}.{symbol_name}" if target_module else symbol_name
+    references = [
+        (start, end) for qn, line, _col, start, end, kind, _ann
+        in resolver.references_in_file(resolved)
+        if qn == target_qn and kind in ("read", "write", "call")
         and not (
             moved_definition_range is not None
             and moved_definition_range[0] <= line <= moved_definition_range[1]
         )
-        for qn, line, _col, _off, _end, kind, _ann
-        in resolver.references_in_file(resolved)
-        if qn.endswith(target_suffix) or qn == symbol_name
-    )
+    ]
+    if "." in symbol_name and any(b"." in content.encode()[start:end] for start, end in references):
+        raise ValueError("Cannot safely move a referenced class member")
+    return bool(references)
 
 
 def _split_or_retarget_import(
@@ -282,6 +316,7 @@ def _split_or_retarget_import(
     dest_module: str,
     symbol_name: str,
     resolver: object = None,
+    project_root: str | None = None,
 ) -> str | None:
     """Rewrite ``from source_module import ...`` statements for a symbol move.
 
@@ -299,24 +334,23 @@ def _split_or_retarget_import(
     """
     structured_imports = resolver.structured_imports_in_file(py_file)
 
-    original_content = content
-    lines = content.splitlines(keepends=True)
+    from emend import emend_core as _rust
+    transform = _rust.PyFileTransform(content)
 
-    # Precompute cumulative line offsets for O(1) lookup per import.
-    line_offsets = [0]
-    for line in lines:
-        line_offsets.append(line_offsets[-1] + len(line))
-
-    # Collect (stmt_start_byte, stmt_end_byte, replacement_text) tuples;
-    # applied in reverse order to preserve earlier byte offsets.
+    # Retain node spans: whole-line replacement would remove sibling statements.
     replacements: list[tuple[int, int, str]] = []
 
     for imp in structured_imports:
         if imp["is_plain"]:
             continue
-        if imp["module"] != source_module:
-            continue
+        module = imp["module"]
         if imp["level"]:
+            from .project_iter import _find_project_root
+            module = _resolve_relative_import_qn(
+                "." * imp["level"] + module, py_file,
+                project_root or _find_project_root(py_file), ".",
+            )
+        if module != source_module:
             continue
 
         names = imp["names"]
@@ -331,38 +365,28 @@ def _split_or_retarget_import(
                 return f"{name} as {alias}"
             return name
 
-        # Preserve the indentation of the original import statement.
-        # start_line is 0-indexed.
-        start_line = imp["start_line"]
-        orig_line = lines[start_line] if start_line < len(lines) else ""
-        indent = orig_line[: len(orig_line) - len(orig_line.lstrip())]
-
         moved_line = (
-            f"{indent}from {dest_module} import "
+            f"from {dest_module} import "
             + ", ".join(_alias_str(n, a) for n, a in moved_aliases)
         )
 
         if remaining_aliases:
             remaining_line = (
-                f"{indent}from {source_module} import "
+                f"from {source_module} import "
                 + ", ".join(_alias_str(n, a) for n, a in remaining_aliases)
             )
-            replacement = moved_line + "\n" + remaining_line
+            replacement = moved_line + "; " + remaining_line
         else:
             replacement = moved_line
 
-        stmt_start = line_offsets[imp["start_line"]]
-        stmt_end = line_offsets[imp["end_line"] + 1]
-        replacements.append((stmt_start, stmt_end, replacement + "\n"))
+        replacements.append((imp["start_byte"], imp["end_byte"], replacement))
 
     if not replacements:
         return None
 
-    replacements.sort(key=lambda x: x[0], reverse=True)
     for start, end, repl in replacements:
-        content = content[:start] + repl + content[end:]
-
-    return content if content != original_content else None
+        transform.replace_range(start, end, repl)
+    return transform.apply()
 
 
 def _update_imports_for_move(
@@ -370,14 +394,13 @@ def _update_imports_for_move(
     dest_file: str,
     symbol_name: str,
     project_path: str | None,
-    apply: bool,
+    edits: dict[str, tuple[str, str]],
     source_has_other_refs: bool = False,
-) -> dict[str, str]:
+    symbol_path: str | None = None,
+) -> None:
     """Update imports across project when a symbol moves."""
     from emend import emend_core as _rust
     from .project_iter import _file_to_module, _find_project_root, visit_project_ts
-    from .components import _generate_diff
-    diffs = {}
 
     # Get module names
     source_module = _file_to_module(source_file, project_path)
@@ -388,20 +411,42 @@ def _update_imports_for_move(
     resolved_dest = str(Path(dest_file).resolve())
     proj_root = _find_project_root(project_path or source_file)
 
-    target_qn = f"{source_module}.{symbol_name}"
+    symbol_path = symbol_path or symbol_name
+    target_qn = f"{source_module}.{symbol_path}"
     from emend.language_registry import detect_language
     language = detect_language(source_file) or "python"
 
+    if Path(dest_file).exists():
+        from emend.project_config import module_resolution_context
+        module_root, crate_root = module_resolution_context(proj_root, language, file_path=dest_file)
+        resolver = _rust.PyScopeResolver(
+            proj_root, Path(dest_file).suffix.lstrip("."), str(module_root),
+            str(crate_root) if crate_root else None,
+        )
+        resolver.index_file(resolved_dest, Path(dest_file).read_text())
+        collisions = any(name == symbol_name
+                         for scope, _start, _end, bindings in resolver.scopes_in_file(resolved_dest)
+                         if scope == "Module" for name, *_ in bindings)
+        depends_on_source = any(
+            (qn if not qn.startswith(".") else _resolve_relative_import_qn(qn, dest_file, proj_root)) == target_qn
+            for qn, *_ in resolver.references_in_file(resolved_dest)
+        )
+        if collisions or depends_on_source:
+            raise ValueError(f"Destination already binds or references moved symbol: {symbol_name}")
+
     for py_file, content, resolver in visit_project_ts(
-        name_hint=symbol_name,
+        name_hint="",  # Wildcard consumers contain no token for the moved name.
         project_path=proj_root,
         language=language,
     ):
         resolved_py = str(Path(py_file).resolve())
         if resolved_py == resolved_source or resolved_py == resolved_dest:
             continue
-
-        changed = False
+        for _name, module, _imported, star in resolver.imports_in_file(py_file):
+            resolved_module = (_resolve_relative_import_qn(module, py_file, proj_root)
+                               if module.startswith(".") else module)
+            if star and resolved_module == source_module:
+                raise ValueError(f"Cannot safely move through wildcard import: {py_file}")
 
         # Use tree-sitter to handle multi-name imports correctly.
         # When the consumer has 'from source_mod import A, B' and only A is
@@ -410,53 +455,47 @@ def _update_imports_for_move(
         new_content = _split_or_retarget_import(
             content, py_file, source_module, dest_module, symbol_name,
             resolver=resolver,
-        )
-        if new_content is not None and new_content != content:
-            changed = True
-        else:
-            # Fallback: handle dotted 'import source_module.symbol_name' style
-            # that the AST splitter does not cover.
-            transform = _rust.PyFileTransform(content)
-
-            references = resolver.references_in_file(py_file)
-
-            # offset/end_offset are BYTE offsets; slice/index the encoded bytes.
-            content_bytes = content.encode('utf-8')
-            source_module_bytes = source_module.encode('utf-8')
-
-            for i, (qn, line, col, offset, end_offset, kind, _ann) in enumerate(references):
-                if kind != "import":
-                    continue
-
-                if qn == target_qn:
-                    # Only handle 'import source_module.symbol_name' (dotted)
-                    # style; 'from source_module import ...' is handled above.
-                    if content_bytes[offset : offset + len(source_module_bytes)] == source_module_bytes:
-                        transform.replace_range(
-                            offset, offset + len(source_module_bytes), dest_module
-                        )
-                        changed = True
-
-            if changed:
-                new_content = transform.apply()
-            else:
-                new_content = None
-
-        if not changed or new_content is None or new_content == content:
+            project_root=proj_root,
+        ) if symbol_path == symbol_name else None
+        new_content = new_content or content
+        resolver.index_file(py_file, new_content)
+        transform = _rust.PyFileTransform(new_content)
+        # Use a fresh binding, in the same import scopes as the original.
+        # A global destination import can shadow locals or make lazy imports eager.
+        identifiers = {name for name, *_ in _rust.collect_identifier_positions(new_content)}
+        alias = Path(dest_file).stem
+        while alias in identifiers:
+            alias += "_"
+        qualified = False
+        for qn, _line, _col, start, end, kind, _ann in resolver.references_in_file(py_file):
+            if qn == target_qn and kind != "import":
+                text = new_content.encode("utf-8")[start:end].decode("utf-8")
+                if "." in text:
+                    if symbol_path != symbol_name:
+                        raise ValueError("Cannot safely move a referenced class member")
+                    transform.replace_range(start, end, f"{alias}.{symbol_name}")
+                    qualified = True
+        if qualified:
+            imports = resolver.structured_imports_in_file(py_file)
+            import_sites = [imp["end_byte"] for imp in imports if imp["is_plain"]
+                            and any(name == source_module or source_module.startswith(name + ".")
+                                    for name, _ in imp["names"])]
+            if not import_sites:
+                raise ValueError(f"Cannot safely move qualified references in {py_file}")
+            for end in import_sites:
+                transform.replace_range(end, end, f"; import {dest_module} as {alias}")
+            new_content = transform.apply()
+        if new_content == content:
             continue
 
-        diff = _generate_diff(py_file, content, new_content)
-        diffs[py_file] = diff
-
-        if apply:
-            Path(py_file).write_text(new_content)
+        edits[py_file] = content, new_content
 
     # If the source file has read/write/call references to the moved symbol
     # (detected by the caller via tree-sitter scope resolver on pre-removal
     # content), add an import so the source file doesn't break at runtime.
     if source_has_other_refs and dest_module:
         try:
-            source_content = Path(source_file).read_text()
+            source_content = edits[source_file][1]
         except FileNotFoundError:
             source_content = None
 
@@ -477,12 +516,7 @@ def _update_imports_for_move(
                 new_source_content = None
 
             if new_source_content and new_source_content != source_content:
-                diff = _generate_diff(source_file, source_content, new_source_content)
-                diffs[source_file] = diff
-                if apply:
-                    Path(source_file).write_text(new_source_content)
-
-    return diffs
+                edits[source_file] = edits[source_file][0], new_source_content
 
 
 def _resolve_relative_import_qn(
@@ -634,6 +668,7 @@ def _rename_module_references(
     new_module: str,
     apply: bool,
     language: str = "python",
+    edits: dict[str, tuple[str, str]] | None = None,
 ) -> dict[str, str]:
     """Update all imports from old_module to new_module across the project."""
     from emend import emend_core as _rust
@@ -641,6 +676,7 @@ def _rename_module_references(
     from .project_iter import visit_project_ts
     from .components import _generate_diff
     diffs = {}
+    pending = {} if edits is None else edits
 
     sep = get_module_separator(language)
 
@@ -765,8 +801,7 @@ def _rename_module_references(
         diff = _generate_diff(py_file, content, final_content)
         diffs[py_file] = diff
 
-        if apply:
-            Path(py_file).write_text(final_content)
+        pending[py_file] = content, final_content
 
     # Third pass: string-literal replacements in files that the structural pre-filter
     # may have excluded (e.g. files with importlib.import_module("pkg.models") but no
@@ -797,9 +832,10 @@ def _rename_module_references(
             continue
         diff = _generate_diff(py_file, content, final_content)
         diffs[py_file] = diff
-        if apply:
-            Path(py_file).write_text(final_content)
+        pending[py_file] = content, final_content
 
+    if apply:
+        _publish_edits(pending, True)
     return diffs
 
 
@@ -841,12 +877,15 @@ def move_module(
 
     # New file location
     new_path = dest_dir / Path(source_path).name
+    _validate_module_destination(source_path, new_path)
     new_module = _file_to_module(str(new_path), project_root)
 
     # Update all imports across project
     from emend.language_registry import detect_language
     language = detect_language(source_path) or "python"
-    diffs = _rename_module_references(project_root, old_module, new_module, apply, language=language)
+    edits = {}
+    diffs = _rename_module_references(project_root, old_module, new_module, False, language=language, edits=edits)
+    _publish_edits(edits, apply)
 
     if apply:
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -885,12 +924,13 @@ def rename_module(
 
     parts = old_module.rsplit(sep, 1)
     new_module = f"{parts[0]}{sep}{new_name}" if len(parts) > 1 else new_name
-
-    diffs = _rename_module_references(project_root, old_module, new_module, apply, language=language)
-
     ext = Path(file_path).suffix
+    new_path = Path(file_path).parent / f"{new_name}{ext}"
+    _validate_module_destination(file_path, new_path)
+    edits = {}
+    diffs = _rename_module_references(project_root, old_module, new_module, False, language=language, edits=edits)
+    _publish_edits(edits, apply)
     if apply:
-        new_path = Path(file_path).parent / f"{new_name}{ext}"
         Path(file_path).rename(new_path)
         return {}
 
