@@ -507,6 +507,31 @@ To enable free-threaded speedups, install emend with a free-threaded Python:
 
    uv tool install --python 3.14t emend
 
+Fact identities and language boundaries
+--------------------------------------
+
+Qualified names remain human-readable (for example, ``api.common``), but are
+not globally unique: Python and TypeScript can both define that name.
+FactGraph schema 11 stores symbols by ``(qualified_name, file_path)`` and
+records each file's effective configured language in ``file_namespace``.
+JavaScript and TypeScript share a namespace; Rust and Python do not.
+This metadata survives incremental updates and JSON serialization, including
+project-configured file extensions.
+
+Built-in call, reference, dead-code and impact queries keep recursive edges
+within a language namespace. File selectors supply that namespace; bare-name
+read-only queries aggregate namespaces without connecting them. Destructive
+cascade planning rejects ambiguous names. Same-language module-resolution
+ambiguities are not resolved by this language boundary.
+
+Custom CozoScript queries intentionally see all stored facts. Join
+``file_namespace[file_path, namespace]`` explicitly when relating names across
+files. ``decorator_on`` now has columns ``symbol_qn, decorator, file_path``;
+``func_summary`` has ``func_qn, param_name, file_path, flows_to_return,
+flows_to_sink, sink_label``. Public metadata constructors accept a trailing
+``file_path``; omitting it requires an unambiguous definition owner. Existing
+persistent fact caches rebuild automatically after the schema change.
+
 Build system
 ------------
 

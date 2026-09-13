@@ -38,6 +38,9 @@ def _extract_file_facts(
         revision.language,
         config.payload,
     )
+    extracted["rows"]["file_namespace"] = [[stored_path, config.language]]
+    for row in extracted["rows"]["dec"]:
+        row.append(stored_path)
     return ExtractedFile(
         revision=revision,
         qnames=frozenset(extracted["qnames"]),

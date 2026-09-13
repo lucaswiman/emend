@@ -295,7 +295,7 @@ def _project_summaries(
     allowed = _INTRA_VALUE_EDGES | _CALL_EDGES | frozenset({_OPAQUE_CALL_EDGE})
     summaries: dict[str, FunctionSummary] = {}
     symbols = graph.symbols()
-    symbols_by_qn = {symbol.qualified_name: symbol for symbol in symbols}
+    symbols_by_qn = {(symbol.file_path, symbol.qualified_name): symbol for symbol in symbols}
 
     def summary_name(event: Any, actual: str) -> str:
         candidates = [
@@ -308,8 +308,8 @@ def _project_summaries(
         symbol = min(candidates, key=lambda item: item.end_line - item.line)
         names = [symbol.name]
         parent = symbol.parent
-        while parent in symbols_by_qn:
-            owner = symbols_by_qn[parent]
+        while (event.file_path, parent) in symbols_by_qn:
+            owner = symbols_by_qn[event.file_path, parent]
             names.append(owner.name)
             parent = owner.parent
         return "::".join(reversed(names))

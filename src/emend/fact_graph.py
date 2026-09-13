@@ -36,6 +36,7 @@ from emend.analysis_snapshot import (
     ExportedSymbolFact,
     Fact,
     FileRevision,
+    FileNamespaceFact,
     FlowEdgeFact,
     FlowEventFact,
     FuncSummaryFact,
@@ -53,7 +54,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-FACT_GRAPH_SCHEMA_VERSION = "10"
+FACT_GRAPH_SCHEMA_VERSION = "11"
 _FACT_INSERT_BATCH_SIZE = 25_000
 
 
@@ -80,9 +81,9 @@ def _create_cozo_client(db_path: str | None = None) -> Any:
 
 _SCHEMA_INIT = """\
 {:create symbol {
-    qualified_name: String
+    qualified_name: String,
+    file_path: String
     =>
-    file_path: String,
     name: String,
     kind: String,
     line: Int,
@@ -253,7 +254,8 @@ _SCHEMA_INIT = """\
 
 {:create decorator_on {
     symbol_qn: String,
-    decorator: String
+    decorator: String,
+    file_path: String
 }}
 
 {:create source_loc {
@@ -269,7 +271,8 @@ _SCHEMA_INIT = """\
 
 {:create func_summary {
     func_qn: String,
-    param_name: String
+    param_name: String,
+    file_path: String
     =>
     flows_to_return: Bool default false,
     flows_to_sink: Bool default false,
@@ -296,6 +299,8 @@ _SCHEMA_INIT = """\
     origin: String,
     version: Int default -1
 }}
+
+{:create file_namespace {file_path: String => namespace: String}}
 
 {:create ref_by_block {
     file_path: String,
@@ -684,11 +689,28 @@ class FactGraph:
         schema: str,
         rows: list[list[Any]],
         operations: list[tuple[str, dict[str, Any]]] | None = None,
+        *, register_namespace: bool = True,
     ) -> None:
         """Run ``?[<cols>] <- $rows :put <relation> {<schema>}``.
 
         Caller is responsible for skipping empty inserts.
         """
+        columns = [column.strip() for column in cols.split(",")]
+        if register_namespace and relation != "file_namespace" and "file_path" in columns:
+            from emend.language_registry import detect_language
+
+            index = columns.index("file_path")
+            seed = (
+                "candidate[file_path, namespace] <- $rows\n"
+                "?[file_path, namespace] := candidate[file_path, namespace], "
+                "not *file_namespace[file_path, _] :put file_namespace {file_path => namespace}",
+                {"rows": [[path, detect_language(path) or ""]
+                          for path in sorted({r[index] for r in rows})]},
+            )
+            if operations is None:
+                self._client.run(*seed)
+            else:
+                operations.append(seed)
         query = f"?[{cols}] <- $rows :put {relation} {{{schema}}}"
         for start in range(0, len(rows), _FACT_INSERT_BATCH_SIZE):
             operation = (query, {"rows": rows[start : start + _FACT_INSERT_BATCH_SIZE]})
@@ -702,6 +724,81 @@ class FactGraph:
         if operations:
             self._client.run_transaction(operations)
 
+    def namespace_for_file(self, file_path: str) -> str:
+        """Resolve a source file's language namespace without changing its QNs."""
+        rows = self._client.run(
+            "?[ns] := *file_namespace[fp, ns], fp in $paths",
+            {"paths": [file_path, self.stored_path(file_path)]},
+        )["rows"]
+        if rows:
+            return rows[0][0]
+        from emend.language_registry import detect_language
+        return detect_language(file_path) or ""
+
+    def add_file_namespace(self, fact: FileNamespaceFact) -> None:
+        self._put_batch("file_namespace", "file_path, namespace", "file_path => namespace",
+                        [[fact.file_path, fact.namespace]])
+
+    def _run_namespaced(self, query, params=None, *, namespace=None):
+        """Evaluate explicit query-local views in each requested namespace.
+
+        Bare-QN read APIs aggregate namespace-local answers. Recursive joins
+        never combine edges from distinct languages. Raw run_query remains
+        an unspecialized interface over the complete stored relations.
+        """
+        relations = {
+            "symbol": "qn, fp, name, kind, line, end_line, parent",
+            "call": "caller, callee, fp, line, col, fq, bid",
+            "call_by_callee": "callee, caller, fp, line, col, fq, bid",
+            "reference": "qn, fp, line, col, kind, fq, bid",
+            "decorator_on": "qn, dec, fp",
+            "func_summary": "fq, pn, fp, ftr, fts, sl",
+            "exported_symbol": "fp, qn",
+            "ref_by_block": "fp, fq, bid, qn",
+            "method_call": "fp, fq, receiver, method, bid, line",
+            "noncall_private_member_ref": "fp, fq, bid, name",
+            "module_level_ref": "qn, fp, line",
+            "cfg_block": "fp, fq, bid, ie, ix",
+        }
+        views = "".join(
+            f"scope_{name}[{columns}] := *{name}[{columns}], "
+            "*file_namespace[fp, $namespace]\n"
+            for name, columns in relations.items() if f"scope_{name}[" in query
+        )
+        if not views:
+            return self._client.run(query, params or {})
+        namespaces = ([namespace] if namespace is not None else
+                      [row[0] for row in self._client.run(
+                          "?[ns] := *file_namespace[_, ns]"
+                      )["rows"]])
+        result = {"headers": [], "rows": []}
+        for current in namespaces:
+            part = self._client.run(views + query, {**(params or {}), "namespace": current})
+            result["headers"] = part["headers"]
+            result["rows"].extend(part["rows"])
+        return result
+
+    def _symbol_owner(self, qn: str, file_path: str) -> str:
+        """Legacy bare-QN writes require an unambiguous definition owner."""
+        if file_path:
+            return file_path
+        rows = self._client.run("?[fp] := *symbol[$qn, fp, _, _, _, _, _]", {"qn": qn})["rows"]
+        if len(rows) > 1:
+            raise ValueError(f"Ambiguous symbol {qn!r}; provide file_path")
+        return rows[0][0] if rows else ""
+
+    def require_unambiguous_symbols(self, qnames, *, namespace=None) -> None:
+        """Reject ambiguous bare names before building a destructive plan."""
+        seen = set()
+        for symbol in self.symbols():
+            qn = symbol.qualified_name
+            if qn not in qnames or (namespace is not None and
+                                   self.namespace_for_file(symbol.file_path) != namespace):
+                continue
+            if qn in seen:
+                raise ValueError(f"Ambiguous symbol {qn!r}; cannot plan a cascade")
+            seen.add(qn)
+
 
     def add_symbols_batch(self, facts: list[SymbolFact]) -> None:
         """Bulk-insert symbol facts."""
@@ -709,7 +806,7 @@ class FactGraph:
             return
         rows = [[f.qualified_name, f.file_path, f.name, f.kind, f.line, f.end_line, f.parent or ""] for f in facts]
         cols = "qualified_name, file_path, name, kind, line, end_line, parent"
-        self._put_batch("symbol", cols, "qualified_name => file_path, name, kind, line, end_line, parent", rows)
+        self._put_batch("symbol", cols, "qualified_name, file_path => name, kind, line, end_line, parent", rows)
 
     def add_calls_batch(self, facts: list[CallFact]) -> None:
         """Bulk-insert call facts."""
@@ -823,8 +920,8 @@ class FactGraph:
         """Bulk-insert decorator-on facts."""
         if not facts:
             return
-        rows = [[f.symbol_qn, f.decorator] for f in facts]
-        self._put_batch("decorator_on", "symbol_qn, decorator", "symbol_qn, decorator", rows)
+        rows = [[f.symbol_qn, f.decorator, self._symbol_owner(f.symbol_qn, f.file_path)] for f in facts]
+        self._put_batch("decorator_on", "symbol_qn, decorator, file_path", "symbol_qn, decorator, file_path", rows)
 
     def add_source_loc(self, fact: SourceLocFact) -> None:
         """Add a source location fact."""
@@ -850,11 +947,12 @@ class FactGraph:
         """Bulk-insert function summary facts."""
         if not facts:
             return
-        rows = [[f.func_qn, f.param_name, f.flows_to_return, f.flows_to_sink, f.sink_label] for f in facts]
+        rows = [[f.func_qn, f.param_name, self._symbol_owner(f.func_qn, f.file_path),
+                 f.flows_to_return, f.flows_to_sink, f.sink_label] for f in facts]
         self._put_batch(
             "func_summary",
-            "func_qn, param_name, flows_to_return, flows_to_sink, sink_label",
-            "func_qn, param_name => flows_to_return, flows_to_sink, sink_label",
+            "func_qn, param_name, file_path, flows_to_return, flows_to_sink, sink_label",
+            "func_qn, param_name, file_path => flows_to_return, flows_to_sink, sink_label",
             rows,
         )
 
@@ -943,12 +1041,12 @@ class FactGraph:
             for r in result["rows"]
         ]
 
-    def calls_from(self, caller_qn: str) -> list[CallFact]:
+    def calls_from(self, caller_qn: str, *, namespace: str | None = None) -> list[CallFact]:
         """Return all calls made by *caller_qn*."""
-        result = self._client.run(
+        result = self._run_namespaced(
             "?[caller, callee, fp, line, col, fq, bid] := "
-            "caller = $qn, *call[$qn, callee, fp, line, col, fq, bid]",
-            {"qn": caller_qn},
+            "caller = $qn, scope_call[$qn, callee, fp, line, col, fq, bid]",
+            {"qn": caller_qn}, namespace=namespace,
         )
         return [
             CallFact(caller_qn=r[0], callee_qn=r[1], file_path=r[2], line=r[3],
@@ -956,12 +1054,12 @@ class FactGraph:
             for r in result["rows"]
         ]
 
-    def calls_to(self, callee_qn: str) -> list[CallFact]:
+    def calls_to(self, callee_qn: str, *, namespace: str | None = None) -> list[CallFact]:
         """Return all call sites that invoke *callee_qn*."""
-        result = self._client.run(
+        result = self._run_namespaced(
             "?[caller, callee, fp, line, col, fq, bid] := "
-            "callee = $qn, *call_by_callee[$qn, caller, fp, line, col, fq, bid]",
-            {"qn": callee_qn},
+            "callee = $qn, scope_call_by_callee[$qn, caller, fp, line, col, fq, bid]",
+            {"qn": callee_qn}, namespace=namespace,
         )
         return [
             CallFact(caller_qn=r[0], callee_qn=r[1], file_path=r[2], line=r[3],
@@ -969,12 +1067,12 @@ class FactGraph:
             for r in result["rows"]
         ]
 
-    def references_to(self, symbol_qn: str) -> list[ReferenceFact]:
+    def references_to(self, symbol_qn: str, *, namespace: str | None = None) -> list[ReferenceFact]:
         """Return all references to *symbol_qn*."""
-        result = self._client.run(
+        result = self._run_namespaced(
             "?[qn, fp, line, col, kind, fq, bid] := "
-            "qn = $qn, *reference[$qn, fp, line, col, kind, fq, bid]",
-            {"qn": symbol_qn},
+            "qn = $qn, scope_reference[$qn, fp, line, col, kind, fq, bid]",
+            {"qn": symbol_qn}, namespace=namespace,
         )
         return [
             ReferenceFact(symbol_qn=r[0], file_path=r[1], line=r[2], col=r[3],
@@ -1230,10 +1328,10 @@ class FactGraph:
     def decorators_on(self, symbol_qn: str) -> list[DecoratorOnFact]:
         """Return all decorators on a symbol."""
         result = self._client.run(
-            "?[sqn, dec] := *decorator_on[sqn, dec], sqn == $qn",
+            "?[sqn, dec, fp] := *decorator_on[sqn, dec, fp], sqn == $qn",
             {"qn": symbol_qn},
         )
-        return [DecoratorOnFact(symbol_qn=r[0], decorator=r[1]) for r in result["rows"]]
+        return [DecoratorOnFact(symbol_qn=r[0], decorator=r[1], file_path=r[2]) for r in result["rows"]]
 
     def source_locs(self, loc_id: str | None = None, loc_kind: str | None = None) -> list[SourceLocFact]:
         """Query source locations."""
@@ -1255,16 +1353,16 @@ class FactGraph:
 
     def func_summaries(self, func_qn: str | None = None) -> list[FuncSummaryFact]:
         """Query function summary facts."""
-        clauses = ["*func_summary[fq, pn, ftr, fts, sl]"]
+        clauses = ["*func_summary[fq, pn, fp, ftr, fts, sl]"]
         params: dict[str, Any] = {}
         if func_qn is not None:
             clauses.append("fq == $func_qn")
             params["func_qn"] = func_qn
-        query = "?[fq, pn, ftr, fts, sl] := " + ", ".join(clauses)
+        query = "?[fq, pn, ftr, fts, sl, fp] := " + ", ".join(clauses)
         result = self._client.run(query, params)
         return [
             FuncSummaryFact(func_qn=r[0], param_name=r[1], flows_to_return=r[2],
-                           flows_to_sink=r[3], sink_label=r[4])
+                           flows_to_sink=r[3], sink_label=r[4], file_path=r[5])
             for r in result["rows"]
         ]
 
@@ -1307,9 +1405,9 @@ class FactGraph:
 
     def transitive_callers(self, symbol_qn: str) -> set[str]:
         """Compute the transitive set of callers of *symbol_qn* via Datalog."""
-        result = self._client.run(
-            "reaches[a] := *call_by_callee[$qn, a, _, _, _, _, _]\n"
-            "reaches[a] := reaches[mid], *call_by_callee[mid, a, _, _, _, _, _]\n"
+        result = self._run_namespaced(
+            "reaches[a] := scope_call_by_callee[$qn, a, _, _, _, _, _]\n"
+            "reaches[a] := reaches[mid], scope_call_by_callee[mid, a, _, _, _, _, _]\n"
             "?[a] := reaches[a]",
             {"qn": symbol_qn},
         )
@@ -1317,9 +1415,9 @@ class FactGraph:
 
     def transitive_callees(self, symbol_qn: str) -> set[str]:
         """Compute the transitive set of callees of *symbol_qn* via Datalog."""
-        result = self._client.run(
-            "reaches[b] := *call[$qn, b, _, _, _, _, _]\n"
-            "reaches[b] := reaches[mid], *call[mid, b, _, _, _, _, _]\n"
+        result = self._run_namespaced(
+            "reaches[b] := scope_call[$qn, b, _, _, _, _, _]\n"
+            "reaches[b] := reaches[mid], scope_call[mid, b, _, _, _, _, _]\n"
             "?[b] := reaches[b]",
             {"qn": symbol_qn},
         )
@@ -1360,10 +1458,10 @@ class FactGraph:
         Returns top-level symbols (functions, classes) that have no
         incoming references and are not entry points.
         """
-        result = self._client.run(
-            "has_ref[qn] := *reference[qn, _, _, _, _, _, _]\n"
+        result = self._run_namespaced(
+            "has_ref[qn] := scope_reference[qn, _, _, _, _, _, _]\n"
             "dead[qn, fp, name, kind, line, end_line, parent] := "
-            "*symbol[qn, fp, name, kind, line, end_line, parent], "
+            "scope_symbol[qn, fp, name, kind, line, end_line, parent], "
             "not has_ref[qn]\n"
             "?[fp, name, qn, kind, line, end_line, parent] := "
             "dead[qn, fp, name, kind, line, end_line, parent]"
@@ -1391,22 +1489,23 @@ class FactGraph:
         )
         return rules + (
             'entry_point[qn] := seed_ep_qn[qn]\n'
-            'entry_point[qn] := *symbol[qn, _, name, _, _, _, _], '
+            'entry_point[qn] := scope_symbol[qn, _, name, _, _, _, _], '
             'starts_with(name, "__"), ends_with(name, "__")\n'
-            'entry_point[qn] := *exported_symbol[_, qn]\n'
+            'entry_point[qn] := scope_exported_symbol[_, qn]\n'
         ) + "".join(
             f'entry_point[qn] := {source}, {relation}[value], {condition}\n'
             for kind, source, condition in (
-                ("prefix", '*symbol[qn, _, name, _, _, _, _]', 'starts_with(name, value)'),
-                ("name", '*symbol[qn, _, name, _, _, _, _]', 'name == value'),
-                ("decorator", '*decorator_on[qn, dec]', 'lowercase(dec) == lowercase(value)'),
+                ("prefix", 'scope_symbol[qn, _, name, _, _, _, _]', 'starts_with(name, value)'),
+                ("name", 'scope_symbol[qn, _, name, _, _, _, _]', 'name == value'),
+                ("decorator", 'scope_decorator_on[qn, dec, _]', 'lowercase(dec) == lowercase(value)'),
             )
             for relation in (f"*entry_point_{kind}", f"seed_ep_{kind}")
         )
 
-    def entry_point_qualified_names(self, **options) -> set[str]:
-        return {row[0] for row in self._client.run(
-            self._entry_point_rules(**options) + '?[qn] := entry_point[qn]'
+    def entry_point_qualified_names(self, *, namespace=None, **options) -> set[str]:
+        return {row[0] for row in self._run_namespaced(
+            self._entry_point_rules(**options) + '?[qn] := entry_point[qn]',
+            namespace=namespace,
         )["rows"]}
 
     def dead_code_unified(
@@ -1419,6 +1518,7 @@ class FactGraph:
         entry_point_prefixes: list[str] | None = None,
         entry_point_qualified_names: list[str] | None = None,
         include_transitive: bool = False,
+        namespace: str | None = None,
     ) -> tuple[list[DeadSymbolFact], list[CfgBlockFact]]:
         """Unified dead code detection via Datalog.
 
@@ -1448,10 +1548,10 @@ class FactGraph:
         excluded_files = set(exclude_reference_files or [])
         if exclude_reference_paths or exclude_reference_segments:
             paths = [Path(path) for path in exclude_reference_paths or []]
-            rows = self._client.run(
-                '?[fp] := *reference[_, fp, _, _, _, _, _]\n'
-                '?[fp] := *method_call[fp, _, _, _, _, _]\n'
-                '?[fp] := *noncall_private_member_ref[fp, _, _, _]'
+            rows = self._run_namespaced(
+                '?[fp] := scope_reference[_, fp, _, _, _, _, _]\n'
+                '?[fp] := scope_method_call[fp, _, _, _, _, _]\n'
+                '?[fp] := scope_noncall_private_member_ref[fp, _, _, _]'
             )["rows"]
             excluded_files.update(fp for (fp,) in rows if
                 any(Path(fp).is_relative_to(path) for path in paths)
@@ -1468,7 +1568,7 @@ class FactGraph:
             # (ref_by_block keyed on (fp, fq, bid, sq) joins efficiently with
             # reachable_block keyed on (fp, fq, bid))
             "reference_edge[fq, sq] := "
-            "*ref_by_block[fp, fq, bid, sq], "
+            "scope_ref_by_block[fp, fq, bid, sq], "
             "*reachable_block[fp, fq, bid], "
             f"sq != fq{excl_clauses}\n"
 
@@ -1476,22 +1576,22 @@ class FactGraph:
             # same-named private method, including calls through local aliases.
             # Exact member names avoid suffix collisions.
             "live_private_method_name[fq, method_name] := "
-            "*method_call[fp, fq, _, method_name, bid, _], "
+            "scope_method_call[fp, fq, _, method_name, bid, _], "
             "*reachable_block[fp, fq, bid]"
             f"{excl_clauses}\n"
 
             'live_private_method_name[fq, method_name] := '
-            '*method_call[fp, fq, _, method_name, _, _], fq == "<module>"'
+            'scope_method_call[fp, fq, _, method_name, _, _], fq == "<module>"'
             f"{excl_clauses}\n"
 
             # Non-call uses such as ``callbacks = [self._helper]`` join on a
             # materialized member name, avoiding a suffix-based cross product.
             "live_private_method_name[fq, method_name] := "
-            "*noncall_private_member_ref[fp, fq, bid, method_name], "
+            "scope_noncall_private_member_ref[fp, fq, bid, method_name], "
             f"*reachable_block[fp, fq, bid]{excl_clauses}\n"
 
             "private_method[method_name, target_qn] := "
-            "*symbol[target_qn, _, method_name, method_kind, _, _, _], "
+            "scope_symbol[target_qn, _, method_name, method_kind, _, _, _], "
             'method_kind in ["method", "async_method"], '
             'starts_with(method_name, "_"), not starts_with(method_name, "__")\n'
             "method_count[name, count(qn)] := private_method[name, qn]\n"
@@ -1506,8 +1606,8 @@ class FactGraph:
             # Live references: from module level (no function context)
             # Exclude self-references where the reference is the symbol's own definition
             'external_ref[sq] := '
-            '*module_level_ref[sq, ref_fp, ref_line], '
-            '*symbol[sq, sym_fp, _, _, sym_line, _, _], '
+            'scope_module_level_ref[sq, ref_fp, ref_line], '
+            'scope_symbol[sq, sym_fp, _, _, sym_line, _, _], '
             f'not (ref_fp == sym_fp, ref_line == sym_line){excl_clauses_ref}\n'
 
             'live_ref[qn] := reference_edge[_, qn]\n'
@@ -1521,7 +1621,7 @@ class FactGraph:
 
             # Dead top-level symbols.
             "eligible[qn, fp, name, kind, line, end_line, parent] := "
-            "*symbol[qn, fp, name, kind, line, end_line, parent], "
+            "scope_symbol[qn, fp, name, kind, line, end_line, parent], "
             'parent == "", '
             "not entry_point[qn]\n"
 
@@ -1529,7 +1629,7 @@ class FactGraph:
             # because frameworks, protocols, and subclasses commonly invoke
             # them without a statically visible reference.
             "eligible[qn, fp, name, kind, line, end_line, parent] := "
-            "*symbol[qn, fp, name, kind, line, end_line, parent], "
+            "scope_symbol[qn, fp, name, kind, line, end_line, parent], "
             'parent != "", '
             'kind in ["method", "async_method"], '
             'starts_with(name, "_"), not starts_with(name, "__"), '
@@ -1564,7 +1664,7 @@ class FactGraph:
             "reported[qn, roots], eligible[qn, fp, name, kind, line, end_line, parent]"
         )
 
-        result = self._client.run(query)
+        result = self._run_namespaced(query, namespace=namespace)
         dead_symbols = [
             DeadSymbolFact(
                 file_path=r[0], name=r[1], qualified_name=r[2],
@@ -1578,17 +1678,17 @@ class FactGraph:
         # Query for unreachable blocks (non-exit blocks not reachable from entry)
         unreachable_query = (
             "unreachable[fp, fq, bid] := "
-            "*cfg_block[fp, fq, bid, _, is_exit], "
+            "scope_cfg_block[fp, fq, bid, _, is_exit], "
             "is_exit == false, "
             "not *reachable_block[fp, fq, bid]\n"
 
             "?[fp, fq, bid, ie, ix] := "
             "unreachable[fp, fq, bid], "
-            "*cfg_block[fp, fq, bid, ie, ix]"
+            "scope_cfg_block[fp, fq, bid, ie, ix]"
         )
 
         try:
-            unreachable_result = self._client.run(unreachable_query)
+            unreachable_result = self._run_namespaced(unreachable_query, namespace=namespace)
         except Exception:
             logger.debug("Unreachable block query failed", exc_info=True)
             return dead_symbols, []
@@ -1674,12 +1774,12 @@ class FactGraph:
         # This avoids unbounded recursion and respects max_depth exactly.
         rules = [f"changed[x] <- [{seed_rows}]\n"]
         rules.append(
-            "layer_0[caller] := changed[callee], *call_by_callee[callee, caller, _, _, _, _, _]\n"
+            "layer_0[caller] := changed[callee], scope_call_by_callee[callee, caller, _, _, _, _, _]\n"
         )
         for i in range(1, max_depth):
             rules.append(
                 f"layer_{i}[caller] := layer_{i - 1}[mid], "
-                f"*call_by_callee[mid, caller, _, _, _, _, _]\n"
+                f"scope_call_by_callee[mid, caller, _, _, _, _, _]\n"
             )
         # Union all layers into impacted_node
         for i in range(max_depth):
@@ -1688,20 +1788,20 @@ class FactGraph:
         # callees that are either changed or themselves impacted.
         rules.append(
             "edge[caller, callee] := impacted_node[caller], "
-            "*call[caller, callee, _, _, _, _, _], changed[callee]\n"
+            "scope_call[caller, callee, _, _, _, _, _], changed[callee]\n"
         )
         if max_depth > 1:
             # Inner edges: caller in layer_N calls mid in layer_(N-1)
             for i in range(1, max_depth):
                 rules.append(
                     f"edge[caller, mid] := layer_{i}[caller], "
-                    f"*call[caller, mid, _, _, _, _, _], layer_{i - 1}[mid]\n"
+                    f"scope_call[caller, mid, _, _, _, _, _], layer_{i - 1}[mid]\n"
                 )
         rules.append(
             "?[caller, callee] := edge[caller, callee], not changed[caller]"
         )
         query = "".join(rules)
-        result = self._client.run(query)
+        result = self._run_namespaced(query)
         edges = [(r[0], r[1]) for r in result["rows"]]
         impacted = {r[0] for r in result["rows"]}
         return {"impacted": impacted, "edges": edges}
@@ -1712,6 +1812,7 @@ class FactGraph:
         self,
         initial_deletes: set[str],
         exclude_entry_points: bool = True,
+        *, namespace: str | None = None,
     ) -> list[SymbolFact]:
         """Find symbols that become dead after deleting *initial_deletes*.
 
@@ -1730,26 +1831,29 @@ class FactGraph:
         if not initial_deletes:
             return []
 
+        self.require_unambiguous_symbols(initial_deletes, namespace=namespace)
+
         # Seed the delete set using CozoDB inline relation syntax
         seed_rows = ", ".join(f'["{qn}"]' for qn in initial_deletes)
         query = (
             f"to_delete[x] <- [{seed_rows}]\n"
             # A symbol has an external caller if called by something NOT
             # in the delete set.
-            "has_external_caller[qn] := *call_by_callee[qn, caller, _, _, _, _, _], "
+            "has_external_caller[qn] := scope_call_by_callee[qn, caller, _, _, _, _, _], "
             "not to_delete[caller]\n"
             # Cascade targets: callees of deleted symbols with no external callers,
             # excluding the initial deletes themselves.
-            "callee_of_deleted[qn] := *call_by_callee[qn, caller, _, _, _, _, _], to_delete[caller]\n"
+            "callee_of_deleted[qn] := scope_call_by_callee[qn, caller, _, _, _, _, _], to_delete[caller]\n"
             "cascade[qn] := callee_of_deleted[qn], "
             "not has_external_caller[qn], "
             "not to_delete[qn]\n"
             # Return full symbol info for cascade targets
             "?[fp, name, qn, kind, line, end_line, parent] := "
             "cascade[qn], "
-            "*symbol[qn, fp, name, kind, line, end_line, parent]"
+            "scope_symbol[qn, fp, name, kind, line, end_line, parent]"
         )
-        result = self._client.run(query)
+        result = self._run_namespaced(query, namespace=namespace)
+        self.require_unambiguous_symbols({r[2] for r in result["rows"]}, namespace=namespace)
         return [
             SymbolFact(
                 file_path=r[0], name=r[1], qualified_name=r[2],
@@ -1785,23 +1889,23 @@ class FactGraph:
             # reference facts (which don't).
             query = (
                 f"excluded[x] <- [{seed_rows}]\n"
-                "alive[qn] := *call_by_callee[qn, caller, _, _, _, _, _], not excluded[caller]\n"
+                "alive[qn] := scope_call_by_callee[qn, caller, _, _, _, _, _], not excluded[caller]\n"
                 "dead[qn, fp, name, kind, line, end_line, parent] := "
-                "*symbol[qn, fp, name, kind, line, end_line, parent], "
+                "scope_symbol[qn, fp, name, kind, line, end_line, parent], "
                 "not alive[qn]\n"
                 "?[fp, name, qn, kind, line, end_line, parent] := "
                 "dead[qn, fp, name, kind, line, end_line, parent]"
             )
         else:
             query = (
-                'has_ref[qn] := *reference[qn, _, _, _, _, _, _]\n'
+                'has_ref[qn] := scope_reference[qn, _, _, _, _, _, _]\n'
                 'dead[qn, fp, name, kind, line, end_line, parent] := '
-                '*symbol[qn, fp, name, kind, line, end_line, parent], '
+                'scope_symbol[qn, fp, name, kind, line, end_line, parent], '
                 'not has_ref[qn]\n'
                 '?[fp, name, qn, kind, line, end_line, parent] := '
                 'dead[qn, fp, name, kind, line, end_line, parent]'
             )
-        result = self._client.run(query)
+        result = self._run_namespaced(query)
         facts = [
             SymbolFact(
                 file_path=r[0], name=r[1], qualified_name=r[2],
@@ -1824,12 +1928,13 @@ class FactGraph:
         calls_only: bool = False,
         include_definition: bool = True,
         include_imports: bool = True,
+        namespace: str | None = None,
     ) -> list[ReferenceFact]:
         """Find all references to *symbol_qn* via Datalog query.
 
         Replaces Python file traversal in find_references().
         """
-        clauses = ["*reference[$qn, fp, line, col, kind, fq, bid]"]
+        clauses = ["scope_reference[$qn, fp, line, col, kind, fq, bid]"]
         params: dict[str, Any] = {"qn": symbol_qn}
 
         # Kind filtering
@@ -1846,7 +1951,7 @@ class FactGraph:
             clauses.append('kind != "import"')
 
         query = "?[fp, line, col, kind, fq, bid] := " + ", ".join(clauses)
-        result = self._client.run(query, params)
+        result = self._run_namespaced(query, params, namespace=namespace)
         return [
             ReferenceFact(
                 symbol_qn=symbol_qn, file_path=r[0], line=r[1], col=r[2],
@@ -1855,24 +1960,24 @@ class FactGraph:
             for r in result["rows"]
         ]
 
-    def callers_datalog(self, symbol_qn: str) -> list[CallFact]:
+    def callers_datalog(self, symbol_qn: str, *, namespace: str | None = None) -> list[CallFact]:
         """Find all callers of *symbol_qn* via Datalog query.
 
         Replaces Python file traversal in find_callers().
         """
-        return self.calls_to(symbol_qn)
+        return self.calls_to(symbol_qn, namespace=namespace)
 
-    def callees_datalog(self, func_qn: str) -> list[CallFact]:
+    def callees_datalog(self, func_qn: str, *, namespace: str | None = None) -> list[CallFact]:
         """Find all callees of *func_qn* via Datalog query.
 
         Uses caller_qn on call facts to find what a function calls.
         Replaces Python line-range filtering in find_callees().
         """
-        result = self._client.run(
+        result = self._run_namespaced(
             "?[caller_qn, callee_qn, fp, line, col, fq, bid] := "
             "caller_qn = $fqn, "
-            "*call[$fqn, callee_qn, fp, line, col, fq, bid]",
-            {"fqn": func_qn},
+            "scope_call[$fqn, callee_qn, fp, line, col, fq, bid]",
+            {"fqn": func_qn}, namespace=namespace,
         )
         return [
             CallFact(
@@ -1929,6 +2034,7 @@ class FactGraph:
             self._all_exported_symbols,
             self._all_flow_events,
             self._all_flow_edges,
+            self._all_file_namespaces,
         ]
 
     def query(self, predicate: Callable[[Fact], bool]) -> list[Fact]:
@@ -2054,8 +2160,8 @@ class FactGraph:
 
     def _all_decorator_on(self) -> list[DecoratorOnFact]:
         return self._query_all(
-            "decorator_on", "sqn, dec",
-            lambda r: DecoratorOnFact(symbol_qn=r[0], decorator=r[1]),
+            "decorator_on", "sqn, dec, fp",
+            lambda r: DecoratorOnFact(symbol_qn=r[0], decorator=r[1], file_path=r[2]),
         )
 
     def _all_source_locs(self) -> list[SourceLocFact]:
@@ -2067,9 +2173,10 @@ class FactGraph:
 
     def _all_func_summaries(self) -> list[FuncSummaryFact]:
         return self._query_all(
-            "func_summary", "fq, pn, ftr, fts, sl",
+            "func_summary", "fq, pn, ftr, fts, sl, fp",
             lambda r: FuncSummaryFact(func_qn=r[0], param_name=r[1], flows_to_return=r[2],
-                                      flows_to_sink=r[3], sink_label=r[4]),
+                                      flows_to_sink=r[3], sink_label=r[4], file_path=r[5]),
+            relation_cols="fq, pn, fp, ftr, fts, sl",
         )
 
     def _all_entry_point_decorators(self) -> list[EntryPointDecoratorFact]:
@@ -2091,6 +2198,9 @@ class FactGraph:
         )
 
     # -- Serialization ----------------------------------------------------
+
+    def _all_file_namespaces(self) -> list[FileNamespaceFact]:
+        return self._query_all("file_namespace", "fp, ns", lambda r: FileNamespaceFact(*r))
 
     def to_json(self) -> str:
         """Serialize the entire fact graph to a JSON string."""
@@ -2127,6 +2237,7 @@ class FactGraph:
             "EntryPointDecoratorFact": (EntryPointDecoratorFact, graph.add_entry_point_decorator),
             "EntryPointNameFact": (EntryPointNameFact, graph.add_entry_point_name),
             "ExportedSymbolFact": (ExportedSymbolFact, graph.add_exported_symbol),
+            "FileNamespaceFact": (FileNamespaceFact, graph.add_file_namespace),
         }
 
         for entry in json.loads(json_str):
@@ -2162,16 +2273,15 @@ class FactGraph:
         # and `:rm relation { }` match the actual column names in the
         # stored relation schema.
         for query in (
-            # decorator_on/func_summary join through symbol — remove first
-            "?[symbol_qn, decorator] := *decorator_on[symbol_qn, decorator], "
-            "*symbol[symbol_qn, file_path, _, _, _, _, _], "
-            "file_path in $fps  :rm decorator_on {symbol_qn, decorator}",
-            "?[func_qn, param_name] := *func_summary[func_qn, param_name, _, _, _], "
-            "*symbol[func_qn, file_path, _, _, _, _, _], "
-            "file_path in $fps  :rm func_summary {func_qn, param_name => }",
-            # symbol
-            "?[qualified_name] := *symbol[qualified_name, file_path, _, _, _, _, _], "
-            "file_path in $fps  :rm symbol {qualified_name => }",
+            # All definition metadata has explicit file ownership.
+            "?[symbol_qn, decorator, file_path] := *decorator_on[symbol_qn, decorator, file_path], "
+            "file_path in $fps :rm decorator_on {symbol_qn, decorator, file_path}",
+            "?[func_qn, param_name, file_path] := *func_summary[func_qn, param_name, file_path, _, _, _], "
+            "file_path in $fps :rm func_summary {func_qn, param_name, file_path => }",
+            "?[qualified_name, file_path] := *symbol[qualified_name, file_path, _, _, _, _, _], "
+            "file_path in $fps :rm symbol {qualified_name, file_path => }",
+            "?[file_path] := *file_namespace[file_path, _], "
+            "file_path in $fps :rm file_namespace {file_path => }",
             # search_symbol
             "?[file_path, module_qualified_name] := "
             "*search_symbol[file_path, module_qualified_name, _, _, _, _, _, _, _, _, _, _], "
@@ -2276,7 +2386,7 @@ class FactGraph:
     ) -> None:
         """Insert the language-neutral rows returned by the canonical extractor."""
         specs = {
-            "fg_sym": ("symbol", "qualified_name, file_path, name, kind, line, end_line, parent", "qualified_name => file_path, name, kind, line, end_line, parent"),
+            "fg_sym": ("symbol", "qualified_name, file_path, name, kind, line, end_line, parent", "qualified_name, file_path => name, kind, line, end_line, parent"),
             "search_sym": (
                 "search_symbol",
                 "file_path, module_qualified_name, name, qualified_name, kind, "
@@ -2284,7 +2394,7 @@ class FactGraph:
                 "file_path, module_qualified_name => name, qualified_name, kind, "
                 "line, end_line, depth, parent, signature, returns, decorators",
             ),
-            "dec": ("decorator_on", "symbol_qn, decorator", "symbol_qn, decorator"),
+            "dec": ("decorator_on", "symbol_qn, decorator, file_path", "symbol_qn, decorator, file_path"),
             "fg_refs": ("reference", "symbol_qn, file_path, line, col, ref_kind, func_qn, block_id", "symbol_qn, file_path, line, col => ref_kind, func_qn, block_id"),
             "calls": ("call", "caller_qn, callee_qn, file_path, line, col, func_qn, block_id", "caller_qn, callee_qn, file_path, line, col => func_qn, block_id"),
             "calls_by_callee": ("call_by_callee", "callee_qn, caller_qn, file_path, line, col, func_qn, block_id", "callee_qn, caller_qn, file_path, line, col => func_qn, block_id"),
@@ -2315,21 +2425,18 @@ class FactGraph:
                 "reachable_block", "file_path, func_qn, block_id",
                 "file_path, func_qn, block_id",
             ),
+            "file_namespace": ("file_namespace", "file_path, namespace", "file_path => namespace"),
         }
         rows: dict[str, list[list[Any]]] = {key: [] for key in specs}
         for extracted in extracted_files:
             for key in specs:
                 rows[key].extend(extracted.rows.get(key, []))
 
-        # Unlike the other relations, symbol's key does not contain file_path.
-        # Preserve the former per-file :put behavior: a later file wins if two
-        # module mappings produce the same qualified name.
-        rows["fg_sym"] = list({row[0]: row for row in rows["fg_sym"]}.values())
         for key, (relation, cols, schema) in specs.items():
             relation_rows = rows.get(key, [])
             if relation_rows:
                 self._put_batch(
-                    relation, cols, schema, relation_rows, operations
+                    relation, cols, schema, relation_rows, operations, register_namespace=False,
                 )
 
     def replace_extracted(

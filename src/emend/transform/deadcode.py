@@ -971,6 +971,7 @@ def _typed_decorator_entry_points(
     graph,
     project_root: str,
     type_methods: dict[str, set[str] | frozenset[str]],
+    namespace: str | None = None,
 ) -> set[str]:
     """Resolve decorated entry points by receiver type without inferring types.
 
@@ -983,8 +984,7 @@ def _typed_decorator_entry_points(
 
     try:
         decorator_rows = graph._client.run(
-            "?[qn, fp, dec] := *decorator_on[qn, dec], "
-            "*symbol[qn, fp, _, _, _, _, _]"
+            "?[qn, fp, dec] := *decorator_on[qn, dec, fp]"
         )["rows"]
     except Exception:
         logger.debug("Typed decorator fact query failed", exc_info=True)
@@ -995,6 +995,8 @@ def _typed_decorator_entry_points(
     }
     decorated_by_file: dict[str, list[tuple[str, str]]] = {}
     for qn, file_path, decorator in decorator_rows:
+        if namespace is not None and graph.namespace_for_file(file_path) != namespace:
+            continue
         if "." not in decorator or decorator.rsplit(".", 1)[-1] not in registered_methods:
             continue
         decorated_by_file.setdefault(file_path, []).append((qn, decorator))
@@ -1155,7 +1157,7 @@ def _has_deadcode_noqa(fp: str, line: int, cache: dict) -> bool:
     return line in cache[fp] and (cache[fp][line] is None or "deadcode" in cache[fp][line])
 
 
-def _project_entry_point_options(graph, project_root, decorators=None, names=None) -> dict:
+def _project_entry_point_options(graph, project_root, decorators=None, names=None, *, namespace=None) -> dict:
     """Shared configured and discovered entry points for reporting and deletion."""
     from emend.file_collection import detect_project_languages
     all_decorators = list(decorators or [])
@@ -1163,7 +1165,7 @@ def _project_entry_point_options(graph, project_root, decorators=None, names=Non
     all_names = list(names or [])
     prefixes = []
     type_methods = {}
-    for language in detect_project_languages(project_root) or ["python"]:
+    for language in ([namespace] if namespace is not None else detect_project_languages(project_root) or ["python"]):
         ep = _get_entry_point_config(language)
         all_decorators.extend(ep["decorators"])
         all_decorators.extend(ep["decorator_basenames"])
@@ -1171,8 +1173,8 @@ def _project_entry_point_options(graph, project_root, decorators=None, names=Non
         prefixes.extend(ep["name_prefixes"])
         for receiver, methods in ep["decorator_type_methods"].items():
             type_methods.setdefault(receiver, set()).update(methods)
-    exact = _python_metadata_entry_points(project_root) | _typed_decorator_entry_points(
-        graph, project_root, type_methods,
+    exact = (_python_metadata_entry_points(project_root) if namespace in (None, "python") else set()) | _typed_decorator_entry_points(
+        graph, project_root, type_methods, namespace,
     )
     return dict(entry_point_decorators=all_decorators, entry_point_names=all_names,
                 entry_point_prefixes=prefixes, entry_point_qualified_names=sorted(exact))
@@ -1259,22 +1261,25 @@ def find_dead_code(
         or (exclude_test_references and _is_test_file(path))
     }
 
-    entry_options = _project_entry_point_options(
-        graph, project_root_resolved, entry_point_decorators, entry_point_names,
-    )
-    exact_entry_points = set(entry_options["entry_point_qualified_names"])
-
-    query_options = dict(
-        **entry_options,
-        exclude_reference_files=sorted(
-            str(Path(path).relative_to(project_root_resolved)) for path in excluded_files
-        ),
-        include_transitive=True,
-    )
-    raw_dead, raw_unreachable = graph.dead_code_unified(**query_options)
-    local_names = dict(graph.client.run(
-        "?[mqn, local_qn] := *search_symbol[_, mqn, _, local_qn, _, _, _, _, _, _, _, _]"
-    )["rows"])
+    query_options = {}
+    raw_dead, raw_unreachable = [], []
+    for (namespace,) in graph.client.run("?[ns] := *file_namespace[_, ns]")["rows"]:
+        query_options[namespace] = dict(
+            **_project_entry_point_options(
+                graph, project_root_resolved, entry_point_decorators, entry_point_names,
+                namespace=namespace,
+            ),
+            exclude_reference_files=sorted(
+                str(Path(path).relative_to(project_root_resolved)) for path in excluded_files
+            ),
+            include_transitive=True, namespace=namespace,
+        )
+        dead, unreachable = graph.dead_code_unified(**query_options[namespace])
+        raw_dead.extend(dead)
+        raw_unreachable.extend(unreachable)
+    local_names = {(fp, qn): local for fp, qn, local in graph.client.run(
+        "?[fp, mqn, local_qn] := *search_symbol[fp, mqn, _, local_qn, _, _, _, _, _, _, _, _]"
+    )["rows"]}
 
     # Build a language-plugin-backed cache for noqa checking.  This keeps
     # dead-code suppression aligned with lint and avoids treating arbitrary
@@ -1319,7 +1324,7 @@ def find_dead_code(
             name=sym.name,
             kind=sym.kind,
             line=sym.line,
-            selector=f"{abs_fp}::{local_names[sym.qualified_name]}",
+            selector=f"{abs_fp}::{local_names[sym.file_path, sym.qualified_name]}",
             qualified_name=sym.qualified_name,
             reason="no references found",
             root_causes=sym.root_causes,
@@ -1333,27 +1338,34 @@ def find_dead_code(
             excluded_files,
         )
 
-    by_qn = {symbol.qualified_name: symbol for symbol in dead_symbols}
-    protected = {symbol.qualified_name for symbol in raw_dead} - by_qn.keys()
-    if protected and any(symbol.root_causes for symbol in raw_dead):
-        # A suppressed/filtered root or intermediate helper must not make its
-        # dependencies look unused. Re-evaluate against the same cached facts,
-        # treating these reporting exclusions conservatively as entry points.
-        query_options["entry_point_qualified_names"] = sorted(exact_entry_points | protected)
-        raw_dead, _ = graph.dead_code_unified(**query_options)
-        surviving = {symbol.qualified_name: symbol for symbol in raw_dead}
-        by_qn = {qn: symbol for qn, symbol in by_qn.items() if qn in surviving}
-        for qn, symbol in by_qn.items():
-            symbol.root_causes = surviving[qn].root_causes
+    def identity(symbol):
+        return graph.namespace_for_file(symbol.file_path), symbol.qualified_name
 
-    # Never attach a dependency to a root outside this filtered report.
-    by_qn = {qn: symbol for qn, symbol in by_qn.items() if set(symbol.root_causes) <= by_qn.keys()}
-    for symbol in by_qn.values():
+    by_qn = {identity(symbol): symbol for symbol in dead_symbols}
+    protected = {identity(symbol) for symbol in raw_dead} - by_qn.keys()
+    if protected and any(symbol.root_causes for symbol in raw_dead):
+        surviving = {}
+        for namespace, options in query_options.items():
+            options = dict(options)
+            options["entry_point_qualified_names"] = sorted(
+                set(options["entry_point_qualified_names"])
+                | {qn for ns, qn in protected if ns == namespace}
+            )
+            remaining, _ = graph.dead_code_unified(**options)
+            surviving.update((identity(symbol), symbol) for symbol in remaining)
+        by_qn = {key: symbol for key, symbol in by_qn.items() if key in surviving}
+        for key, symbol in by_qn.items():
+            symbol.root_causes = surviving[key].root_causes
+
+    # Causes share a namespace with their dependent, even when display names collide.
+    by_qn = {key: symbol for key, symbol in by_qn.items()
+             if {(key[0], root) for root in symbol.root_causes} <= by_qn.keys()}
+    for (namespace, _qn), symbol in by_qn.items():
         if symbol.root_causes:
             symbol.reason = "only referenced by unused code; roots: " + ", ".join(symbol.root_causes)
             if not include_transitive:
                 for root in symbol.root_causes:
-                    by_qn[root].dependents.append(symbol)
+                    by_qn[namespace, root].dependents.append(symbol)
     for symbol in by_qn.values():
         symbol.dependents.sort(key=lambda item: item.selector)
     dead_symbols = [symbol for symbol in by_qn.values() if include_transitive or not symbol.root_causes]
@@ -1492,7 +1504,7 @@ def find_dead_code(
             continue
         if any(
             qualified_name.startswith(f"{module_name}.")
-            for qualified_name in exact_entry_points
+            for qualified_name in query_options.get("python", {}).get("entry_point_qualified_names", [])
         ):
             continue
         if _has_python_main_guard(abs_path):
@@ -1579,6 +1591,7 @@ def safe_delete(
         # whether each callee has references outside the delete set.
         store = AnalysisStore.open(scan_root)
         graph = store.query_facts()
+        namespace = graph.namespace_for_file(file_path)
         fdb = graph.client
         if fdb is not None:
             # Resolve the selected symbol through the graph's canonical projection;
@@ -1592,12 +1605,15 @@ def safe_delete(
             if len(rows) != 1:
                 raise ValueError(f"Cannot resolve unique cascade identity for {selector_str}")
             delete_qns.add(rows[0][0])
+            graph.require_unambiguous_symbols(delete_qns, namespace=namespace)
             entry_points = graph.entry_point_qualified_names(
-                **_project_entry_point_options(graph, str(store.project_root))
+                namespace=namespace,
+                **_project_entry_point_options(graph, str(store.project_root), namespace=namespace)
             )
             candidates = [
                 DeadSymbol(s.file_path, s.name, s.kind, s.line, s.qualified_name, "")
                 for s in graph.symbols() if not s.parent
+                and graph.namespace_for_file(s.file_path) == namespace
             ]
             # Scan strings once, not once per cascade step; deletion counts all
             # references, including tests and untracked project sources.
@@ -1616,12 +1632,12 @@ def safe_delete(
                 try:
                     # Find callees of deleted symbols that have no
                     # external references (references not from deleted symbols).
-                    result = fdb.run(
+                    result = graph._run_namespaced(
                         f'deleted[mqn] <- [{del_rows}]\n'
                         # Find callees: symbols called by deleted functions
                         'callee_of_deleted[callee_mqn] := '
                         '  deleted[caller_mqn], '
-                        '  *call[caller_mqn, callee_mqn, _, _, _, _, _], '
+                        '  scope_call[caller_mqn, callee_mqn, _, _, _, _, _], '
                         '  not deleted[callee_mqn]\n'
                         # Has external ref: any reference from outside the
                         # delete set, not just calls.  Attribute reads,
@@ -1629,20 +1645,22 @@ def safe_delete(
                         # helper live just as a call does.
                         'has_ext_ref[mqn] := '
                         '  callee_of_deleted[mqn], '
-                        '  *reference[mqn, ref_fp, ref_line, _, ref_kind, ref_mqn, _], '
+                        '  scope_reference[mqn, ref_fp, ref_line, _, ref_kind, ref_mqn, _], '
                         '  ref_kind != "import", ref_kind != "definition", '
-                        '  *symbol[mqn, sym_fp, _, _, sym_line, _, _], '
+                        '  scope_symbol[mqn, sym_fp, _, _, sym_line, _, _], '
                         '  not (ref_fp == sym_fp, ref_line == sym_line), '
                         '  not deleted[ref_mqn]\n'
                         # Cascade candidates: callees with no external refs
                         '?[mqn, name, kind, fp, line] := '
                         '  callee_of_deleted[mqn], not has_ext_ref[mqn], '
-                        '  *symbol[mqn, fp, name, kind, line, _, parent], '
-                        '  parent == ""\n'
+                        '  scope_symbol[mqn, fp, name, kind, line, _, parent], '
+                        '  parent == ""\n',
+                        namespace=namespace,
                     )
                 except Exception:
                     logger.debug("CozoDB cascade query failed", exc_info=True)
                     break
+                graph.require_unambiguous_symbols({row[0] for row in result["rows"]}, namespace=namespace)
                 for row in result["rows"]:
                     mqn, name, sym_kind, fp, line = row
                     if mqn not in delete_qns and mqn not in entry_points:

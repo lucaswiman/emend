@@ -65,7 +65,7 @@ def test_batched_fact_mutations_abort_as_one_transaction(tmp_path, request, pers
     graph.add_symbol(SymbolFact("a.py", "before", "a.before", "function", 1, 1))
     put = (
         "?[qualified_name, file_path, name, kind, line, end_line, parent] <- $rows "
-        ":put symbol {qualified_name => file_path, name, kind, line, end_line, parent}"
+        ":put symbol {qualified_name, file_path => name, kind, line, end_line, parent}"
     )
 
     with pytest.raises(RuntimeError, match="CozoDB query error"):

@@ -27,7 +27,7 @@ from emend.symbol_projection import SymbolInfo, _symbol_info_view
 from emend.sqlite_writer import SQLiteWriter
 
 
-EXTRACTION_ARTIFACT_VERSION = "17"
+EXTRACTION_ARTIFACT_VERSION = "18"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 TYPE_RESULT_VERSION = 4  # All adapters publish UTF-8 byte columns, including TypeScript.
 logger = logging.getLogger(__name__)

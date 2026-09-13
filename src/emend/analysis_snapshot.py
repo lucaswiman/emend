@@ -274,6 +274,7 @@ class CfgBlockFact:
 class DecoratorOnFact:
     symbol_qn: str
     decorator: str
+    file_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -294,6 +295,7 @@ class FuncSummaryFact:
     flows_to_return: bool = False
     flows_to_sink: bool = False
     sink_label: str = ""
+    file_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -310,6 +312,12 @@ class EntryPointNameFact:
 class ExportedSymbolFact:
     file_path: str
     qualified_name: str
+
+
+@dataclass(frozen=True)
+class FileNamespaceFact:
+    file_path: str
+    namespace: str
 
 
 Fact = Union[
@@ -331,4 +339,5 @@ Fact = Union[
     EntryPointDecoratorFact,
     EntryPointNameFact,
     ExportedSymbolFact,
+    FileNamespaceFact,
 ]

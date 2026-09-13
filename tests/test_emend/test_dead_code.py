@@ -309,7 +309,7 @@ class TestDeadCodeWarmPath:
         warm_caches(str(project), type_engine="none")
         (project / "api.py").write_text("def handler():\n    return 1\n")
         graph = AnalysisStore.open(project).query_facts()
-        rows = graph._client.run("?[qn, dec] := *decorator_on[qn, dec]")["rows"]
+        rows = graph._client.run("?[qn, dec] := *decorator_on[qn, dec, _]")["rows"]
         assert rows == []
 
     def test_warm_path_intra_file_function_call(self, tmp_path):
