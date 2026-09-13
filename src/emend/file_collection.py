@@ -13,12 +13,19 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-def collect_source_files_scandir(root_path: str, language: str = "python") -> list[str]:
-    """Walk a directory tree using the Rust emend_core module."""
+def collect_source_files_scandir(
+    root_path: str,
+    language: str = "python",
+    *,
+    skip_dirs: list[str] | None = None,
+) -> list[str]:
+    """Walk source files; optional exclusions match names or ``*suffix``."""
     from emend.language_registry import get_extensions
     from emend import emend_core as _rust
     exts = get_extensions(language)
-    return _rust.collect_files(root_path, exts)
+    if skip_dirs is None:
+        return _rust.collect_files(root_path, exts)
+    return _rust.collect_files(root_path, exts, skip_dirs)
 
 
 def detect_project_languages(project_root: str) -> list[str]:

@@ -16,7 +16,8 @@ pub const SKIP_DIRS: &[&str] = &[
 /// Collect all files under `root` with specific extensions, skipping non-project directories.
 ///
 /// Follows symlinks to both directories and files, skipping directory cycles.
-pub fn collect_files(root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
+/// `skip_dirs` matches directory names, with an optional leading `*` for suffixes.
+pub fn collect_files(root: &Path, extensions: &[&str], skip_dirs: &[&str]) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![(root.to_path_buf(), false)];
     let mut ancestors = HashSet::new();
@@ -62,7 +63,12 @@ pub fn collect_files(root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
             if ft.is_dir() {
                 // Skip all dot-directories (e.g. .venv, .poetry_cache, .git)
                 // as well as explicitly listed non-dot directories.
-                if !name_str.starts_with('.') && !SKIP_DIRS.contains(&name_str.as_ref()) {
+                let excluded = skip_dirs.iter().any(|pattern| {
+                    pattern
+                        .strip_prefix('*')
+                        .map_or(name_str == *pattern, |suffix| name_str.ends_with(suffix))
+                });
+                if !name_str.starts_with('.') && !excluded {
                     stack.push((entry.path(), false));
                 }
             } else if ft.is_file() && dotted.iter().any(|d| name_str.ends_with(d.as_str())) {
@@ -75,5 +81,5 @@ pub fn collect_files(root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
 }
 
 pub fn collect_python_files(root: &Path) -> Vec<PathBuf> {
-    collect_files(root, &["py", "pyi"])
+    collect_files(root, &["py", "pyi"], SKIP_DIRS)
 }

@@ -488,19 +488,9 @@ class EnvironmentLookupConfig:
 
 def _load_toml(path: Path) -> dict[str, Any]:
     """Load a TOML file, returning {} on any error."""
-    if not path.is_file():
-        return {}
     try:
-        if sys.version_info >= (3, 11):
-            import tomllib
-        else:
-            try:
-                import tomli as tomllib  # type: ignore[no-redef]
-            except ImportError:
-                return {}
-        return tomllib.loads(_read_config_bytes(path).decode("utf-8"))
-    except (OSError, ValueError):
-        # TOMLDecodeError subclasses ValueError in both tomllib and tomli.
+        return _load_toml_payload(_read_config_bytes(path), str(path))
+    except OSError:
         logger.debug("Could not parse %s", path, exc_info=True)
         return {}
 
@@ -512,8 +502,38 @@ def _merge_environment_lookup(base: dict[str, Any], override: dict[str, Any]) ->
     return merged
 
 
+def _project_config_inputs(root: Path) -> tuple[bytes, bytes]:
+    """Capture the exact mutable project configuration consumed below."""
+    payloads = []
+    for path in (root / "pyproject.toml", root / ".emend" / "config.toml"):
+        try:
+            payloads.append(path.read_bytes())
+        except OSError:
+            payloads.append(b"")
+    return payloads[0], payloads[1]
+
+
+def _load_toml_payload(payload: bytes, label: str) -> dict[str, Any]:
+    if not payload:
+        return {}
+    try:
+        if sys.version_info >= (3, 11):
+            import tomllib
+        else:
+            try:
+                import tomli as tomllib  # type: ignore[no-redef]
+            except ImportError:
+                return {}
+        return tomllib.loads(payload.decode())
+    except (ImportError, UnicodeError, ValueError):
+        logger.debug("Could not parse %s", label, exc_info=True)
+        return {}
+
+
 @lru_cache(maxsize=16)
-def load_project_config(project_root: str, language: str = "python") -> dict[str, Any]:
+def _load_project_config(
+    project_root: str, language: str, inputs: tuple[bytes, bytes], language_identity: str,
+) -> dict[str, Any]:
     """Load the merged project configuration.
 
     Merges (lowest → highest priority):
@@ -532,10 +552,12 @@ def load_project_config(project_root: str, language: str = "python") -> dict[str
         result["environment_lookup"] = dict(lang_config["environment_lookup"])
 
     # Layer 2: pyproject.toml [tool.emend]
-    pyproject_data = _load_toml(root / "pyproject.toml")
+    pyproject_data = _load_toml_payload(inputs[0], str(root / "pyproject.toml"))
     tool_emend = pyproject_data.get("tool", {}).get("emend", {})
     # Layer 3: .emend/config.toml
-    emend_config = _load_toml(root / ".emend" / "config.toml")
+    emend_config = _load_toml_payload(
+        inputs[1], str(root / ".emend" / "config.toml")
+    )
     for config in (tool_emend, emend_config):
         if "environment_lookup" in config:
             result["environment_lookup"] = _merge_environment_lookup(
@@ -543,6 +565,18 @@ def load_project_config(project_root: str, language: str = "python") -> dict[str
             )
 
     return result
+
+
+def load_project_config(project_root: str, language: str = "python") -> dict[str, Any]:
+    """Load content-addressed configuration that notices live file changes."""
+    from emend.language_registry import config_identity
+    root = Path(project_root)
+    return _load_project_config(
+        str(root), language, _project_config_inputs(root), config_identity(language),
+    )
+
+
+load_project_config.cache_clear = _load_project_config.cache_clear  # type: ignore[attr-defined]
 
 
 def get_environment_lookup_config(project_root: str, language: str = "python") -> EnvironmentLookupConfig:

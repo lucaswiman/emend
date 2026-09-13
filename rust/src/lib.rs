@@ -51,10 +51,18 @@ fn collect_python_files(root: &str) -> PyResult<Vec<String>> {
 /// Collect all files under `root` with specific extensions, skipping non-project dirs.
 ///
 /// Extensions should NOT include the leading dot.
-#[pyfunction]
-fn collect_files(root: &str, extensions: Vec<String>) -> PyResult<Vec<String>> {
+#[pyfunction(signature = (root, extensions, skip_dirs=None))]
+fn collect_files(
+    root: &str,
+    extensions: Vec<String>,
+    skip_dirs: Option<Vec<String>>,
+) -> PyResult<Vec<String>> {
     let exts_ref: Vec<&str> = extensions.iter().map(|s| s.as_str()).collect();
-    let files = scanner::collect_files(Path::new(root), &exts_ref);
+    let skip_dirs = skip_dirs.as_ref();
+    let skip_ref: Vec<&str> = skip_dirs.map_or(scanner::SKIP_DIRS.to_vec(), |items| {
+        items.iter().map(String::as_str).collect()
+    });
+    let files = scanner::collect_files(Path::new(root), &exts_ref, &skip_ref);
     Ok(files.into_iter().map(|p| p.to_string_lossy().into_owned()).collect())
 }
 
