@@ -508,7 +508,7 @@ To enable free-threaded speedups, install emend with a free-threaded Python:
    uv tool install --python 3.14t emend
 
 Fact identities and language boundaries
---------------------------------------
+------------------------------------------
 
 Qualified names remain human-readable (for example, ``api.common``), but are
 not globally unique: Python and TypeScript can both define that name.
