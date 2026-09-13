@@ -38,7 +38,7 @@ from emend.duplicate_heuristics import (
 # Cached payloads include the containing function/class symbol. Bump this whenever
 # the payload shape or canonicalization changes so stale rows cannot differ from
 # the cold (fresh-parse) path.
-DUP_CACHE_VERSION = "7"
+DUP_CACHE_VERSION = "8"
 
 def _duplicate_cache_key(file_path, content):
     """Content addressing includes the grammar, not the worktree path."""
@@ -201,12 +201,12 @@ def _build_symbol_index(content: str, ext: str = "py") -> list[tuple[str, int, i
     return sorted(result, key=lambda t: (t[1], -(t[2] - t[1])))
 
 
-def _is_bound_inside(qn: str, def_loc: dict[str, tuple[int, int]], subtree_start: int, subtree_end: int) -> bool:
-    """Check if a qualified name's definition is inside the subtree's line range."""
+def _is_bound_inside(qn: str, def_loc: dict[str, tuple[int, int]], subtree_start: tuple[int, int], subtree_end: tuple[int, int]) -> bool:
+    """Check binding ownership using exact, end-exclusive source positions."""
     loc = def_loc.get(qn)
     if loc is None:
         return False
-    return subtree_start <= loc[0] <= subtree_end
+    return subtree_start <= loc < subtree_end
 
 
 def _node_depth(node) -> int:
@@ -221,7 +221,7 @@ def canonicalize_subtree(
     qn_at: dict[tuple[int, int], str],
     def_loc: dict[str, tuple[int, int]],
     *,
-    binding_scope: tuple[int, int] | None = None,
+    binding_scope: tuple[tuple[int, int], tuple[int, int]] | None = None,
     bound_map: dict[str, str] | None = None,
     config: dict | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -235,7 +235,7 @@ def canonicalize_subtree(
 
     Returns (kind_seq, token_seq) as pre-order sequences.
     """
-    subtree_start, subtree_end = binding_scope or (node.start_point[0], node.end_point[0])
+    subtree_start, subtree_end = binding_scope or (node.start_point, node.end_point)
 
     if bound_map is None:
         bound_map = {}
@@ -368,19 +368,14 @@ def _is_trivial(
 # ---------------------------------------------------------------------------
 
 
-def _stmt_canonical_hash(
-    stmt,
-    func_start: int,
-    func_end: int,
-    qn_at: dict[tuple[int, int], str],
-    def_loc: dict[str, tuple[int, int]],
-    bound_map: dict[str, str],
-    config: dict,
-) -> bytes:
-    """Hash a statement using the same semantics as exact subtree detection."""
-    return _canonical_hash(*canonicalize_subtree(
-        stmt, qn_at, def_loc, binding_scope=(func_start, func_end), bound_map=bound_map, config=config,
-    ))
+def _function_bindings(node, qn_at, def_loc, config):
+    """Preserve parameter positions when comparing bodies without signatures."""
+    bindings = {}
+    parameters = node.child_by_field_name("parameters") or node.child_by_field_name("parameter")
+    if parameters is not None:
+        canonicalize_subtree(parameters, qn_at, def_loc,
+                             binding_scope=(node.start_point, node.end_point), bound_map=bindings, config=config)
+    return bindings
 
 
 # ---------------------------------------------------------------------------
@@ -511,23 +506,20 @@ def build_statement_seqs_for_cache(
                 hashes_list: list[str] = []
                 ranges_list: list[list[int]] = []
                 kinds_list: list[str] = []
-                bound_map: dict[str, str] = {}
-                parameters = node.child_by_field_name("parameters") or node.child_by_field_name("parameter")
-                if parameters is not None:
-                    canonicalize_subtree(parameters, qn_at, def_loc,
-                                         binding_scope=(func_start, func_end), bound_map=bound_map, config=config)
+                bound_map = _function_bindings(node, qn_at, def_loc, config)
 
                 for stmt in body.named_children():
                     if stmt.kind in config["comment_nodes"]:
                         continue
                     try:
-                        h = _stmt_canonical_hash(
-                            stmt, func_start, func_end, qn_at, def_loc, bound_map, config
-                        )
+                        h = _canonical_hash(*canonicalize_subtree(
+                            stmt, qn_at, def_loc, binding_scope=(node.start_point, node.end_point),
+                            bound_map=bound_map, config=config,
+                        ))
                     except BUG_EXCEPTIONS:
                         raise
                     except Exception:
-                        logger.debug("_stmt_canonical_hash failed in %s", file_path, exc_info=True)
+                        logger.debug("Statement canonicalization failed in %s", file_path, exc_info=True)
                         continue
                     hashes_list.append(h.hex())
                     ranges_list.append([stmt.start_point[0], stmt.end_point[0]])

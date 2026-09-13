@@ -16,9 +16,9 @@ def test_near_cli_usage(arguments, status, monkeypatch, tmp_path):
     assert result.output
 
 
-@pytest.mark.parametrize("change", ["guard", "operator", "literal", "rename", "docstring", "parenthesized_docstring", "indentation", "fstring", "comma", "multi", "non_python"])
+@pytest.mark.parametrize("change", ["guard", "operator", "literal", "rename", "parameter_order", "docstring", "parenthesized_docstring", "indentation", "fstring", "comma", "multi", "non_python"])
 def test_near_clone_differences(tmp_path, change):
-    original = '''def process(items):
+    original = '''def process(items, fallback):
     result = []
     for item in items:
         if not allowed(item):
@@ -34,6 +34,7 @@ def test_near_clone_differences(tmp_path, change):
         "operator": original.replace("value > 10", "value < 10"),
         "literal": original.replace("value > 10", "value > 11"),
         "rename": original.replace("items", "records").replace("result", "output"),
+        "parameter_order": original.replace("in items", "in fallback"),
         "docstring": original.replace("    result =", '    "Different documentation."\n    result ='),
         "parenthesized_docstring": original.replace("    result =", '    ("Different documentation.")\n    result ='),
         "non_python": original.replace("value > 10", "value < 10"),
@@ -70,6 +71,7 @@ def test_near_clone_differences(tmp_path, change):
         assert {
             "guard": "allowed", "operator": "<", "literal": "11",
             "indentation": ("block", "end"), "fstring": "audit",
+            "parameter_order": "bound_1",
         }[change] in delta
 
 

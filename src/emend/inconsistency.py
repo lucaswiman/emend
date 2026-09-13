@@ -9,6 +9,7 @@ from difflib import SequenceMatcher, unified_diff
 
 from emend.duplicate import (
     _find_containing_symbol,
+    _function_bindings,
     _parsed_inputs,
     canonicalize_subtree,
 )
@@ -69,11 +70,11 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
                 if children and _is_docstring(children[0]):
                     statements.pop(0)
             tokens = []
-            bindings = {}
+            bindings = _function_bindings(node, qn_at, def_loc, config)
             for statement in statements:
                 _, part = canonicalize_subtree(
                     statement, qn_at, def_loc,
-                    binding_scope=(node.start_point[0], node.end_point[0]),
+                    binding_scope=(node.start_point, node.end_point),
                     bound_map=bindings,
                     config=config,
                 )
