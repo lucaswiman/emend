@@ -638,22 +638,23 @@ class TestFileTypeCache:
             assert adapter._get_lsp(tmp_path) is None
         assert client.stop.call_count == 2
 
-    def test_result_contract_upgrade_drops_legacy_empty_cache(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("engine, previous_version", [("pyrefly", 2), ("typescript", 3)])
+    def test_result_contract_upgrade_invalidates_cache_views(self, tmp_path, monkeypatch, engine, previous_version):
         from emend.type_oracle import load_cached_file_types
 
         target = tmp_path / "target.py"
         target.write_text("value = 1\n")
-        monkeypatch.setattr("emend.analysis_store.TYPE_RESULT_VERSION", 2)
-        old = create_type_oracle("pyrefly", tmp_path)
+        monkeypatch.setattr("emend.analysis_store.TYPE_RESULT_VERSION", previous_version)
+        old = create_type_oracle(engine, tmp_path)
         key = old._file_key(target, tmp_path)
         old._cache.put(key, FileTypes(path=str(target)))
         assert load_cached_file_types(target, project_root=tmp_path).complete
-        monkeypatch.setattr("emend.analysis_store.TYPE_RESULT_VERSION", 3)
-        current = create_type_oracle("pyrefly", tmp_path)
+        monkeypatch.setattr("emend.analysis_store.TYPE_RESULT_VERSION", 4)
+        current = create_type_oracle(engine, tmp_path)
         assert current._cache.get(key, target) is None
         assert load_cached_file_types(target, project_root=tmp_path) is None
         current._cache.put(key, FileTypes(path=str(target)))
-        assert create_type_oracle("pyrefly", tmp_path)._cache.get(key, target).complete
+        assert create_type_oracle(engine, tmp_path)._cache.get(key, target).complete
 
     def test_get_miss(self):
         cache = _FileTypeCache(max_entries=10)

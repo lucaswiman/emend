@@ -1963,7 +1963,6 @@ class TypeScriptAdapter(TypeOracle):
         self._extra_args = extra_args or []
         self._cache_engine = "typescript"
         self._cache_engine_options = {
-            "column_encoding": "utf8",
             "node_path": self._node,
             "extra_args": tuple(self._extra_args),
         }
