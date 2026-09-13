@@ -619,14 +619,15 @@ def test_scan_ignores_file_deleted_during_snapshot_boundary(
     source.write_text("value = 2\n")
     original_stat = os.stat
     source_stats = 0
+    source_path = str(source.resolve())
 
-    def deleting_stat(path):
+    def deleting_stat(path, *args, **kwargs):
         nonlocal source_stats
-        if os.fspath(path) == str(source.resolve()):
+        if os.fspath(path) == source_path:
             source_stats += 1
             if source_stats == delete_stat:
                 source.unlink()
-        return original_stat(path)
+        return original_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(os, "stat", deleting_stat)
     scan = store._scan_disk()
