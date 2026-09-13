@@ -2120,7 +2120,12 @@ impl ScopeResolver {
                     })
                 } else { None };
                 let imported_token = if in_import {
-                    node.parent().filter(|parent| parent.kind() == "import_specifier")
+                    node.parent().and_then(|parent| {
+                        if self.config.imports.dotted_name.as_deref() == Some(parent.kind()) {
+                            parent.parent()
+                        } else { Some(parent) }
+                    }).filter(|parent| parent.kind() == "import_specifier"
+                        || self.config.imports.aliased_import.as_deref() == Some(parent.kind()))
                         .and_then(|specifier| {
                             let local = specifier.child_by_field_name("alias")
                                 .map(|alias| node_text(alias, source)).unwrap_or(name);

@@ -73,9 +73,7 @@ def rename_symbol(
     Raises:
         ValueError: If symbol not found
     """
-    from emend import emend_core as _rust
     from .project_iter import _find_project_root, _normalize_module_qn, _file_to_module, _files_importing_module, visit_project_ts
-    from .components import _generate_diff
     from .refs import _rename_in_docstrings
     symbol_name = selector.symbol_path[-1] if selector.symbol_path else None
     if not symbol_name:
@@ -99,8 +97,7 @@ def rename_symbol(
     language = selector.language
     candidates = _files_importing_module(scan_root, target_module, language=language)
 
-    diffs = {}
-    pending_contents: dict[str, str] = {}
+    edits = {}
     wildcard_reexport = None
 
     for py_file, content, resolver in visit_project_ts(
@@ -114,39 +111,11 @@ def rename_symbol(
         language=language,
     ):
         references = resolver.references_in_file(py_file)
-        transform = _rust.PyFileTransform(content)
-        changed = False
-
-        # offset/end_offset from the resolver are BYTE offsets and
-        # PyFileTransform.replace_range indexes bytes, so all comparisons and
-        # slicing must be done against the utf-8 encoded content.  Slicing the
-        # str with byte offsets is wrong once multi-byte characters precede a
-        # reference.
-        content_bytes = content.encode('utf-8')
-        symbol_name_bytes = symbol_name.encode('utf-8')
-
         for qn, line, col, offset, end_offset, kind, _ann in references:
             if kind == "wildcard_reexport" and qn == target_module:
                 wildcard_reexport = py_file
-            if qn == target_qn:
-                # Check if the text at the position matches symbol_name
-                # (to avoid renaming aliases or coincidental names in attributes)
-                # Now using end_offset for better precision!
-                if content_bytes[offset:end_offset].endswith(symbol_name_bytes):
-                    replacement = (
-                        f"{new_name} as {symbol_name}"
-                        if kind == "reexport" else new_name
-                    )
-                    transform.replace_range(
-                        end_offset - len(symbol_name_bytes), end_offset, replacement,
-                    )
-                    changed = True
-
-        if not changed:
-            continue
-
-        new_content = transform.apply()
-        if new_content is None:
+        new_content = resolver.rename_symbol_content(py_file, content, target_qn, new_name)
+        if new_content == content:
             continue
 
         # Apply docstring renaming if requested -- but only in files where
@@ -156,21 +125,14 @@ def rename_symbol(
             if docs_result is not None:
                 new_content = docs_result
 
-        diff = _generate_diff(py_file, content, new_content)
-        diffs[py_file] = diff
-
-        if apply:
-            pending_contents[py_file] = new_content
+        edits[py_file] = (content, new_content)
 
     if wildcard_reexport is not None:
         raise ValueError(
             f"Cannot safely rename {target_qn}: wildcard re-export in "
             f"{wildcard_reexport} has no symbol token to update"
         )
-    for file_path, new_content in pending_contents.items():
-        Path(file_path).write_text(new_content)
-
-    return diffs
+    return _publish_edits(edits, apply)
 
 
 def move_symbol(
