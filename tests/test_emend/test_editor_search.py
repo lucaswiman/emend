@@ -611,50 +611,7 @@ def multi_file_project(tmp_path):
     })
 
 
-class TestPatternPrefilter:
-    def test_index_prefilter_narrows_scope(self, multi_file_project):
-        """Index prefilter should return only files containing the literal."""
-        from emend.transform import _index_prefilter
-
-        db_path = multi_file_project / ".emend" / "cache" / "parse.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
-            # "sqrt" only appears in b.py
-            candidates = _index_prefilter(["sqrt"], conn)
-            assert candidates is not None
-            assert any("b.py" in f for f in candidates)
-        finally:
-            conn.close()
-
-    def test_index_prefilter_intersection(self, multi_file_project):
-        """Multiple literals should intersect — only files with ALL literals."""
-        from emend.transform import _index_prefilter
-
-        db_path = multi_file_project / ".emend" / "cache" / "parse.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
-            # "math" and "sqrt" both in b.py only
-            candidates = _index_prefilter(["math", "sqrt"], conn)
-            assert candidates is not None
-            assert {Path(f).name for f in candidates} == {"b.py"}
-        finally:
-            conn.close()
-
-    def test_index_prefilter_unknown_literal_returns_none(self, multi_file_project):
-        """Unknown literal not in the index should return None (no useful data)."""
-        from emend.transform import _index_prefilter
-
-        db_path = multi_file_project / ".emend" / "cache" / "parse.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
-            candidates = _index_prefilter(["xyzzy_nonexistent"], conn)
-            # Should return None — index had nothing useful
-            assert candidates is None
-        finally:
-            conn.close()
+class TestPatternSearch:
 
     def test_pattern_search_single_file(self, multi_file_project):
         """Pattern search on a single file should work without prefilter."""
@@ -707,8 +664,9 @@ class TestPatternPrefilter:
 def test_editor_patterns_preserve_language_and_dialect(tmp_path, extension, source, pattern):
     target = tmp_path / f"target.{extension}"
     target.write_text(source)
-    (tmp_path / "unrelated.py").write_text("other(2)\n")
+    (tmp_path / "unrelated.py").write_text("def fn_marker():\n    pass\n")
     with _engine(tmp_path) as engine:
+        engine.reindex()
         for scope in (str(target), str(tmp_path)):
             result = engine.search_pattern(pattern, file_scope=scope)
             assert [item["file_path"] for item in result.items] == [str(target)]
@@ -762,6 +720,32 @@ def test_editor_reindex_builds_cold_and_large_updates(tmp_path, background, monk
             assert {row[0] for row in rows} == {
                 symbol.qualified_name for symbol in engine._store.query_facts().symbols()
             }
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_failed_index_write_preserves_rows_and_freshness(tmp_path, background):
+    source = tmp_path / "app.py"
+    source.write_text("def initial():\n    pass\n")
+    with _engine(tmp_path) as engine:
+        engine.reindex()
+        before = engine._get_conn().execute("SELECT path, content_hash FROM file_manifest").fetchall()
+        engine._store.write(lambda db: db.execute(
+            "CREATE TRIGGER fail_symbol BEFORE INSERT ON symbol_index "
+            "WHEN NEW.name = 'replacement' BEGIN SELECT RAISE(FAIL, 'storage failure'); END"
+        ))
+        source.write_text("def accepted():\n    pass\ndef replacement():\n    pass\n")
+        if background:
+            engine.start_background_reindex()
+            engine._index_thread.join(timeout=10)
+            assert not engine.is_indexing and not engine.check_index_complete()
+        else:
+            with pytest.raises(sqlite3.Error, match="storage failure"):
+                engine.reindex()
+        assert engine._get_conn().execute("SELECT name FROM symbol_index").fetchall() == [("initial",)]
+        assert engine._get_conn().execute("SELECT path, content_hash FROM file_manifest").fetchall() == before
+        engine._store.write(lambda db: db.execute("DROP TRIGGER fail_symbol"))
+        assert engine.reindex().items[0]["fresh"]
+        assert {row[0] for row in engine._get_conn().execute("SELECT name FROM symbol_index")} == {"accepted", "replacement"}
 
 
 class TestGrepSearch:

@@ -1006,13 +1006,9 @@ class EditorSearchEngine:
         """Run a full pattern search via the shared pipeline.
 
         Delegates to ``find_pattern_in_project`` which handles:
-        1. Index prefilter (SQLite)
-        2. Rust string-contains filter
-        3. Rust tree-sitter batch (when applicable)
-        4. Pattern matching fallback (parallel)
-
-        The SQLite index connection is passed through so the shared
-        backend can do the index prefilter without opening a second DB.
+        1. Rust string-contains filter
+        2. Rust tree-sitter batch (when applicable)
+        3. Pattern matching fallback (parallel)
         """
         from emend.transform import find_pattern_in_project
         from emend.file_collection import collect_all_source_files
@@ -1027,7 +1023,6 @@ class EditorSearchEngine:
 
         project_matches = find_pattern_in_project(
             pattern, file_paths,
-            index_conn=self._get_conn(),
             limit=limit,
             language=None,
         )

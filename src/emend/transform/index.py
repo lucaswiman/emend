@@ -130,18 +130,17 @@ def _write_index_rows(
     """Bulk-write collected index rows to the SQLite cache.
 
     Performs a delete-then-insert for the per-file-derived tables so that
-    a second indexing pass replaces stale rows.  SQLite errors are swallowed
-    (and logged) — environmental failures must not crash the worker process.
+    a second indexing pass replaces stale rows. Failed writes roll back and
+    propagate so callers cannot publish a successful freshness marker.
     """
-    import sqlite3
-
     has_data = qn_rows or sym_rows or import_rows or ref_rows or dsl_rows
     if not has_data:
         return
-    try:
+    with conn:
         if qn_rows:
             revised_paths = list({row[0] for row in qn_rows})
             for table, column in (
+                ("qn_index", "file_path"),
                 ("symbol_index", "file_path"),
                 ("import_graph", "file_path"),
                 ("reference_index", "file_path"),
@@ -187,10 +186,6 @@ def _write_index_rows(
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 dsl_rows,
             )
-        conn.commit()
-    except sqlite3.Error:
-        conn.rollback()
-        logger.debug("bulk index write failed", exc_info=True)
 
 
 def _index_batch(args: tuple[str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int, int]:
@@ -603,24 +598,6 @@ def _ensure_index_fresh_impl(
                 files_to_index.append((path, content))
             except (OSError, UnicodeDecodeError):
                 continue
-            # File path is the owning identity.  Content hashes are revisions,
-            # and may intentionally be shared by multiple modules.
-            for table, column in (
-                ("qn_index", "file_path"),
-                ("symbol_index", "file_path"),
-                ("import_graph", "file_path"),
-                ("reference_index", "file_path"),
-                ("dsl_symbols", "host_file"),
-            ):
-                try:
-                    conn.execute(
-                        f"DELETE FROM {table} WHERE {column} = ?",
-                        (str(Path(path).resolve()),),
-                    )
-                except _sql3.Error:
-                    logger.debug("stale %s cleanup failed", table, exc_info=True)
-        if scan.changed:
-            conn.commit()
 
         if files_to_index:
             _index_batch((str(db_path), project_root, files_to_index))
@@ -639,7 +616,7 @@ def _ensure_index_fresh_impl(
                         (worktree_id, resolved, st.st_mtime_ns, st.st_size, content_hash, now,
                          _scope_cache_hash(b"", resolved, project_root)),
                     )
-                except (OSError, _sql3.Error):
+                except OSError:
                     logger.debug("manifest update failed for %s", py_file, exc_info=True)
             conn.commit()
 
@@ -662,13 +639,17 @@ def _ensure_index_fresh_impl(
                     (worktree_id, deleted_path),
                 )
             except _sql3.Error:
-                logger.debug("deleted-file cleanup failed for %s", deleted_path, exc_info=True)
+                conn.rollback()
+                raise
         if scan.deleted:
             conn.commit()
 
         conn.close()
         return True
     except BUG_EXCEPTIONS:
+        raise
+    except _sql3.Error:
+        conn.close()
         raise
     except Exception:
         logger.debug("inline re-index failed; treating index as stale", exc_info=True)
@@ -1200,6 +1181,7 @@ def warm_caches(
         # Phase 2.5: Update file_manifest and index_meta with freshness data.
         worktree_id = _get_worktree_id(project_root)
         import os as _os
+        _mf_conn = None
         try:
             _mf_conn = _sqlite3.connect(db_path, timeout=30)
             _mf_conn.execute("PRAGMA journal_mode=WAL")
@@ -1243,7 +1225,7 @@ def warm_caches(
                         "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
                         (git_head_key, head_sha),
                     )
-            except (OSError, _sp.SubprocessError, _sqlite3.Error):
+            except (OSError, _sp.SubprocessError):
                 logger.debug("git HEAD update failed", exc_info=True)
             _mf_conn.execute(
                 "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
@@ -1254,11 +1236,14 @@ def warm_caches(
                 ("schema_version", _SCHEMA_VERSION),
             )
             _mf_conn.commit()
-            _mf_conn.close()
         except BUG_EXCEPTIONS:
             raise
         except Exception:
             logger.debug("warm_caches: file_manifest update failed", exc_info=True)
+            raise
+        finally:
+            if _mf_conn is not None:
+                _mf_conn.close()
 
         # Rebuild FTS5 after all search-index rows have been written.
         if build_fts:
