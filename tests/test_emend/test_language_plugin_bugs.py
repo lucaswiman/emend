@@ -506,15 +506,16 @@ class TestFindSourceRootLanguageThreading:
 
     def test_find_dead_code_uses_datalog_backend(self, tmp_path):
         """find_dead_code() should delegate to FactGraph.dead_code_unified()."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
+        from emend.analysis_store import AnalysisStore
         from emend.transform import find_dead_code
 
-        mock_graph = MagicMock()
-        mock_graph.dead_code_unified.return_value = ([], [])
-
-        with patch("emend.transform.refs._get_or_build_fact_graph", return_value=mock_graph):
-            with patch("emend.transform.project_iter._find_project_root", return_value=str(tmp_path)):
-                result = list(find_dead_code(str(tmp_path)))
+        (tmp_path / "app.py").write_text("def entry(): pass\n")
+        graph = AnalysisStore.open(tmp_path).query_facts()
+        with patch("emend.transform.refs._get_or_build_fact_graph", return_value=graph), \
+                patch.object(graph, "dead_code_unified", return_value=([], [])) as query:
+            result = list(find_dead_code(str(tmp_path), unused_modules=False))
 
         assert result == []
-        mock_graph.dead_code_unified.assert_called_once()
+        query.assert_called_once()
+        assert query.call_args.kwargs["namespace"] == "python"
