@@ -611,50 +611,7 @@ def multi_file_project(tmp_path):
     })
 
 
-class TestPatternPrefilter:
-    def test_index_prefilter_narrows_scope(self, multi_file_project):
-        """Index prefilter should return only files containing the literal."""
-        from emend.transform import _index_prefilter
-
-        db_path = multi_file_project / ".emend" / "cache" / "parse.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
-            # "sqrt" only appears in b.py
-            candidates = _index_prefilter(["sqrt"], conn)
-            assert candidates is not None
-            assert any("b.py" in f for f in candidates)
-        finally:
-            conn.close()
-
-    def test_index_prefilter_intersection(self, multi_file_project):
-        """Multiple literals should intersect — only files with ALL literals."""
-        from emend.transform import _index_prefilter
-
-        db_path = multi_file_project / ".emend" / "cache" / "parse.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
-            # "math" and "sqrt" both in b.py only
-            candidates = _index_prefilter(["math", "sqrt"], conn)
-            assert candidates is not None
-            assert {Path(f).name for f in candidates} == {"b.py"}
-        finally:
-            conn.close()
-
-    def test_index_prefilter_unknown_literal_returns_none(self, multi_file_project):
-        """Unknown literal not in the index should return None (no useful data)."""
-        from emend.transform import _index_prefilter
-
-        db_path = multi_file_project / ".emend" / "cache" / "parse.db"
-        conn = sqlite3.connect(str(db_path))
-        conn.execute("PRAGMA journal_mode=WAL")
-        try:
-            candidates = _index_prefilter(["xyzzy_nonexistent"], conn)
-            # Should return None — index had nothing useful
-            assert candidates is None
-        finally:
-            conn.close()
+class TestPatternSearch:
 
     def test_pattern_search_single_file(self, multi_file_project):
         """Pattern search on a single file should work without prefilter."""
@@ -697,6 +654,98 @@ class TestPatternPrefilter:
                 file_scope=str(multi_file_project),
             )
             assert result.items == []
+
+
+@pytest.mark.parametrize("extension,source,pattern", [
+    ("py", "emit(1)\n", "emit($X)"),
+    ("rs", "fn main() { emit(1); }\n", "fn $F() { $...BODY }"),
+    ("tsx", "const view = <div>{emit(1)}</div>;\n", "<div>{$X}</div>"),
+])
+def test_editor_patterns_preserve_language_and_dialect(tmp_path, extension, source, pattern):
+    target = tmp_path / f"target.{extension}"
+    target.write_text(source)
+    (tmp_path / "unrelated.py").write_text("def fn_marker():\n    pass\n")
+    with _engine(tmp_path) as engine:
+        engine.reindex()
+        for scope in (str(target), str(tmp_path)):
+            result = engine.search_pattern(pattern, file_scope=scope)
+            assert [item["file_path"] for item in result.items] == [str(target)]
+
+
+def test_editor_pattern_mixed_languages_share_limit(tmp_path):
+    for extension, source in [("py", "emit(1)"), ("rs", "fn f() { emit(1); }"),
+                              ("tsx", "const f = <div>{emit(1)}</div>;")]:
+        (tmp_path / f"target.{extension}").write_text(source)
+    with _engine(tmp_path) as engine:
+        result = engine.search_pattern("emit($X)")
+        assert {Path(item["file_path"]).suffix for item in result.items} == {".py", ".rs", ".tsx"}
+        limited = engine.search_pattern("emit($X)", limit=2)
+        assert len(limited.items) == 2 and limited.truncated
+
+
+@pytest.mark.parametrize("background", [False, True])
+@pytest.mark.parametrize("extension,template", [("py", "def {}():\n    pass\n"), ("rs", "fn {}() {{}}\n")])
+def test_editor_reindex_builds_cold_and_large_updates(tmp_path, background, monkeypatch, extension, template):
+    sources = tmp_path / "src"
+    sources.mkdir()
+    if extension == "rs":
+        (tmp_path / "Cargo.toml").write_text('[package]\nname="example"\nversion="0.1.0"\n')
+    first = sources / ("lib.rs" if extension == "rs" else "first.py")
+    first.write_text(template.format("initial"))
+    with _engine(tmp_path) as engine:
+        if background:
+            def unavailable(_):
+                raise OSError("temporarily unavailable")
+            with monkeypatch.context() as patch:
+                patch.setattr("emend.transform.index.ensure_search_index", unavailable)
+                assert engine.start_background_reindex()
+                engine._index_thread.join(timeout=10)
+                assert not engine.is_indexing and not engine.check_index_complete()
+        for name, expected in [("initial", 1), ("updated", 1), ("added", 11)]:
+            if name == "updated":
+                first.write_text(template.format("updated"))
+            if name == "added":
+                for index in range(expected):
+                    (sources / f"new_{index}.{extension}").write_text(template.format("added"))
+            if background:
+                assert engine.start_background_reindex()
+                engine._index_thread.join(timeout=10)
+                assert not engine.is_indexing
+                assert engine.check_index_complete()
+                engine.finalize_reindex()
+            else:
+                assert engine.reindex().items[0]["fresh"]
+            assert len(engine.search_symbols(name).items) == expected
+            rows = engine._get_conn().execute("SELECT module_qn FROM symbol_index").fetchall()
+            assert {row[0] for row in rows} == {
+                symbol.qualified_name for symbol in engine._store.query_facts().symbols()
+            }
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_failed_index_write_preserves_rows_and_freshness(tmp_path, background):
+    source = tmp_path / "app.py"
+    source.write_text("def initial():\n    pass\n")
+    with _engine(tmp_path) as engine:
+        engine.reindex()
+        before = engine._get_conn().execute("SELECT path, content_hash FROM file_manifest").fetchall()
+        engine._store.write(lambda db: db.execute(
+            "CREATE TRIGGER fail_symbol BEFORE INSERT ON symbol_index "
+            "WHEN NEW.name = 'replacement' BEGIN SELECT RAISE(FAIL, 'storage failure'); END"
+        ))
+        source.write_text("def accepted():\n    pass\ndef replacement():\n    pass\n")
+        if background:
+            engine.start_background_reindex()
+            engine._index_thread.join(timeout=10)
+            assert not engine.is_indexing and not engine.check_index_complete()
+        else:
+            with pytest.raises(sqlite3.Error, match="storage failure"):
+                engine.reindex()
+        assert engine._get_conn().execute("SELECT name FROM symbol_index").fetchall() == [("initial",)]
+        assert engine._get_conn().execute("SELECT path, content_hash FROM file_manifest").fetchall() == before
+        engine._store.write(lambda db: db.execute("DROP TRIGGER fail_symbol"))
+        assert engine.reindex().items[0]["fresh"]
+        assert {row[0] for row in engine._get_conn().execute("SELECT name FROM symbol_index")} == {"accepted", "replacement"}
 
 
 class TestGrepSearch:

@@ -130,18 +130,17 @@ def _write_index_rows(
     """Bulk-write collected index rows to the SQLite cache.
 
     Performs a delete-then-insert for the per-file-derived tables so that
-    a second indexing pass replaces stale rows.  SQLite errors are swallowed
-    (and logged) — environmental failures must not crash the worker process.
+    a second indexing pass replaces stale rows. Failed writes roll back and
+    propagate so callers cannot publish a successful freshness marker.
     """
-    import sqlite3
-
     has_data = qn_rows or sym_rows or import_rows or ref_rows or dsl_rows
     if not has_data:
         return
-    try:
+    with conn:
         if qn_rows:
             revised_paths = list({row[0] for row in qn_rows})
             for table, column in (
+                ("qn_index", "file_path"),
                 ("symbol_index", "file_path"),
                 ("import_graph", "file_path"),
                 ("reference_index", "file_path"),
@@ -187,18 +186,14 @@ def _write_index_rows(
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 dsl_rows,
             )
-        conn.commit()
-    except sqlite3.Error:
-        conn.rollback()
-        logger.debug("bulk index write failed", exc_info=True)
 
 
-def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int, int]:
+def _index_batch(args: tuple[str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int, int, int]:
     """Own one connection per worker batch, with one transaction per file."""
     import sqlite3
     from .cache import _initialize_cache_connection
 
-    if not args[3]:
+    if not args[2]:
         return (0, 0, 0, 0, 0, 0, 0)
     with closing(sqlite3.connect(args[0], timeout=30)) as conn:
         _initialize_cache_connection(conn)
@@ -218,7 +213,7 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
     skipped (cache-hit fast path).
 
     Args:
-        args: (db_path, source_root, project_root, [(file_path, content), ...])
+        args: (db_path, project_root, [(file_path, content), ...])
 
     Returns:
         (parse_count, qn_count, skipped_count, sym_count, import_count, ref_count, dsl_count).
@@ -233,7 +228,7 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
     )
 
     from .deadcode import _is_likely_entry_point
-    db_path, source_root, project_root, file_batch = args
+    db_path, project_root, file_batch = args
     # Scope resolvers share the configured module identity used by live
     # project traversal; one resolver is retained per language extension.
     scope_resolvers = {}
@@ -312,58 +307,43 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
             logger.debug("symbol collection failed for %s", py_file, exc_info=True)
             syms_for_file = []
 
-        # Compute module_qn prefix for this file.
-        _src = Path(source_root)
-        _proj = Path(project_root)
-        _abs = Path(py_file).resolve()
-        try:
-            _rel = _abs.relative_to(_src)
-        except ValueError:
-            try:
-                _rel = _abs.relative_to(_proj)
-            except ValueError:
-                _rel = None
+        from emend.project_config import module_name_for_file
+        _module_prefix = module_name_for_file(py_file, project_root, module_separator=".")
+        # __all__ membership and noqa for dead-code pre-filtering.
+        exported_names = _extract_all_exports_text(content)
+        noqa_lines = _extract_noqa_lines(content)
 
-        if _rel is not None:
-            _module_prefix = ".".join(
-                list(_rel.parts[:-1]) + [_rel.stem]
-            )
-
-            # __all__ membership and noqa for dead-code pre-filtering.
-            exported_names = _extract_all_exports_text(content)
-            noqa_lines = _extract_noqa_lines(content)
-
-            for sym in syms_for_file:
-                # Build qualified_name from file module path + symbol path
-                # For index batch, use the dotted symbol path from the selector
-                parts = sym.path.split("::", 1)
-                dotted = parts[1] if len(parts) > 1 else sym.name
-                m_qn = f"{_module_prefix}.{dotted}"
-                sig = None
-                if sym.parameters:
-                    ret_str = f" -> {sym.returns}" if sym.returns else ""
-                    sig = f"def {sym.name}({', '.join(sym.parameters)}){ret_str}"
-                sym_rows.append((
-                    content_hash,
-                    py_file,
-                    sym.name,
-                    dotted,
-                    m_qn,
-                    sym.kind,
-                    sym.line,
-                    sym.end_line,
-                    sym.depth,
-                    sym.parent,
-                    ",".join(sym.bases) if getattr(sym, "bases", None) else None,
-                    sig,
-                    sym.returns,
-                    ",".join(sym.decorators) if sym.decorators else None,
-                    int(_is_likely_entry_point(
-                        sym.name, sym.kind, sym.decorators, sym.depth,
-                    )),
-                    int(sym.name in exported_names),
-                    int(sym.line in noqa_lines),
-                ))
+        for sym in syms_for_file:
+            # Build qualified_name from file module path + symbol path
+            # For index batch, use the dotted symbol path from the selector
+            parts = sym.path.split("::", 1)
+            dotted = parts[1] if len(parts) > 1 else sym.name
+            m_qn = f"{_module_prefix}.{dotted}"
+            sig = None
+            if sym.parameters:
+                ret_str = f" -> {sym.returns}" if sym.returns else ""
+                sig = f"def {sym.name}({', '.join(sym.parameters)}){ret_str}"
+            sym_rows.append((
+                content_hash,
+                py_file,
+                sym.name,
+                dotted,
+                m_qn,
+                sym.kind,
+                sym.line,
+                sym.end_line,
+                sym.depth,
+                sym.parent,
+                ",".join(sym.bases) if getattr(sym, "bases", None) else None,
+                sig,
+                sym.returns,
+                ",".join(sym.decorators) if sym.decorators else None,
+                int(_is_likely_entry_point(
+                    sym.name, sym.kind, sym.decorators, sym.depth,
+                )),
+                int(sym.name in exported_names),
+                int(sym.line in noqa_lines),
+            ))
 
         if scope_indexed:
             try:
@@ -555,7 +535,7 @@ def _ensure_index_fresh_impl(
     import sqlite3 as _sql3
     import time
     from .cache import _get_worktree_id, _cache_db_dir, _SCHEMA_VERSION
-    from .project_iter import _find_project_root, _find_source_root
+    from .project_iter import _find_project_root
 
     project_root = _find_project_root(project_path)
     worktree_id = _get_worktree_id(project_root)
@@ -618,28 +598,9 @@ def _ensure_index_fresh_impl(
                 files_to_index.append((path, content))
             except (OSError, UnicodeDecodeError):
                 continue
-            # File path is the owning identity.  Content hashes are revisions,
-            # and may intentionally be shared by multiple modules.
-            for table, column in (
-                ("qn_index", "file_path"),
-                ("symbol_index", "file_path"),
-                ("import_graph", "file_path"),
-                ("reference_index", "file_path"),
-                ("dsl_symbols", "host_file"),
-            ):
-                try:
-                    conn.execute(
-                        f"DELETE FROM {table} WHERE {column} = ?",
-                        (str(Path(path).resolve()),),
-                    )
-                except _sql3.Error:
-                    logger.debug("stale %s cleanup failed", table, exc_info=True)
-        if scan.changed:
-            conn.commit()
 
         if files_to_index:
-            _src_root = _find_source_root(project_root, language=language)
-            _index_batch((str(db_path), _src_root, project_root, files_to_index))
+            _index_batch((str(db_path), project_root, files_to_index))
             # Update manifest for re-indexed files
             import os as _os
             now = time.time()
@@ -655,7 +616,7 @@ def _ensure_index_fresh_impl(
                         (worktree_id, resolved, st.st_mtime_ns, st.st_size, content_hash, now,
                          _scope_cache_hash(b"", resolved, project_root)),
                     )
-                except (OSError, _sql3.Error):
+                except OSError:
                     logger.debug("manifest update failed for %s", py_file, exc_info=True)
             conn.commit()
 
@@ -678,13 +639,17 @@ def _ensure_index_fresh_impl(
                     (worktree_id, deleted_path),
                 )
             except _sql3.Error:
-                logger.debug("deleted-file cleanup failed for %s", deleted_path, exc_info=True)
+                conn.rollback()
+                raise
         if scan.deleted:
             conn.commit()
 
         conn.close()
         return True
     except BUG_EXCEPTIONS:
+        raise
+    except _sql3.Error:
+        conn.close()
         raise
     except Exception:
         logger.debug("inline re-index failed; treating index as stale", exc_info=True)
@@ -706,6 +671,13 @@ def _ensure_index_fresh(
         project_path, language=language,
         max_inline_reindex=max_inline_reindex,
     )
+
+
+def ensure_search_index(project_path: str) -> bool:
+    """Finish a requested index refresh, including cold and large updates."""
+    if not _ensure_index_fresh(project_path):
+        warm_caches(project_path, type_engine=None, build_fts=False, language=None)
+    return True
 
 
 def query_symbol_index(
@@ -1100,7 +1072,7 @@ def warm_caches(
     jobs: int | None = None,
     callback: Callable[[str, str], None] | None = None,
     type_engine: str | None = "pyrefly",
-    language: str = "python",
+    language: str | None = "python",
     build_fts: bool = True,
     build_duplicates: bool = False,
 ) -> dict[str, int | str]:
@@ -1116,6 +1088,7 @@ def warm_caches(
     Args:
         project_path: Root directory of the project.
         jobs: Max parallelism (defaults to CPU count).
+        language: Restrict indexed files to this language; ``None`` indexes all languages.
         callback: Called with ``(phase, file_path)`` for progress reporting.
         type_engine: Type inference engine for the type-cache phase.
             Defaults to ``"pyrefly"``. ``"auto"`` detects from project config
@@ -1142,13 +1115,14 @@ def warm_caches(
         _cache_db_dir,
         _get_worktree_id,
     )
-    from .project_iter import _find_project_root, _find_source_root, _collect_source_files_scandir
+    from .project_iter import _find_project_root
+    from emend.file_collection import collect_all_source_files
 
     project_root = _find_project_root(project_path)
     # Collect files from the user-specified path (not the project root)
     # so that `emend index src/` only indexes src/, not the entire repo.
     scan_root = str(Path(project_path).resolve())
-    source_files = _collect_source_files_scandir(scan_root)
+    source_files = collect_all_source_files(scan_root, [language] if language else None)
     logger.info("warm_caches: %d source files in %s", len(source_files), scan_root)
 
     max_workers = jobs or multiprocessing.cpu_count() or 4
@@ -1184,14 +1158,11 @@ def warm_caches(
     except _sqlite3.Error:
         logger.debug("cache schema pre-creation failed", exc_info=True)
 
-    # Resolve source root once so _index_batch workers can compute module_qn.
-    source_root = _find_source_root(project_root, language=language)
-
     indexed_paths = {str(Path(path).resolve()) for path, _ in file_contents}
 
     def prepare_file(revision, content):
         if revision.file_path in indexed_paths:
-            return _index_batch((db_path, source_root, project_root,
+            return _index_batch((db_path, project_root,
                                  [(revision.file_path, content)]))
         return None
 
@@ -1210,6 +1181,7 @@ def warm_caches(
         # Phase 2.5: Update file_manifest and index_meta with freshness data.
         worktree_id = _get_worktree_id(project_root)
         import os as _os
+        _mf_conn = None
         try:
             _mf_conn = _sqlite3.connect(db_path, timeout=30)
             _mf_conn.execute("PRAGMA journal_mode=WAL")
@@ -1253,7 +1225,7 @@ def warm_caches(
                         "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
                         (git_head_key, head_sha),
                     )
-            except (OSError, _sp.SubprocessError, _sqlite3.Error):
+            except (OSError, _sp.SubprocessError):
                 logger.debug("git HEAD update failed", exc_info=True)
             _mf_conn.execute(
                 "INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)",
@@ -1264,11 +1236,14 @@ def warm_caches(
                 ("schema_version", _SCHEMA_VERSION),
             )
             _mf_conn.commit()
-            _mf_conn.close()
         except BUG_EXCEPTIONS:
             raise
         except Exception:
             logger.debug("warm_caches: file_manifest update failed", exc_info=True)
+            raise
+        finally:
+            if _mf_conn is not None:
+                _mf_conn.close()
 
         # Rebuild FTS5 after all search-index rows have been written.
         if build_fts:

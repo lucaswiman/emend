@@ -16,7 +16,6 @@ from emend.errors import BUG_EXCEPTIONS
 from emend.edit_session import current_edit_session, read_source, write_source
 
 if TYPE_CHECKING:
-    import sqlite3
     from ..type_oracle import TypeOracle
 
 logger = logging.getLogger(__name__)
@@ -66,26 +65,23 @@ def find_pattern_in_project(
     imported_from: str | None = None,
     scope_local: bool = False,
     type_oracle: TypeOracle | None = None,
-    index_conn: sqlite3.Connection | None = None,
     limit: int | None = None,
-    language: str = "python",
+    language: str | None = "python",
 ) -> list[ProjectPatternMatch]:
     """Search for a pattern across multiple files.
 
-    Four-stage pipeline, each stage reducing the file set:
+    Three-stage pipeline, each stage reducing the file set:
 
-    1. **Index prefilter** (optional) — if *index_conn* is provided,
-       query ``reference_index`` / ``symbol_index`` for files that
-       mention the pattern's literal identifiers.
-    2. **Rust string-contains filter** — ``read_and_filter_files``
+    1. **Rust string-contains filter** — ``read_and_filter_files``
        drops files whose text doesn't contain every required literal.
-    3. **Rust tree-sitter batch** — if the pattern compiles to Rust IR
+    2. **Rust tree-sitter batch** — if the pattern compiles to Rust IR
        and no advanced constraints are active, match all files at once
        in Rust.
-    4. **Pattern matching fallback** — parse and match remaining files
+    3. **Pattern matching fallback** — parse and match remaining files
        in parallel via ``ThreadPoolExecutor``.
 
     Returns a list of ``ProjectPatternMatch`` (file_path + match).
+    ``language=None`` detects each file's language, retaining same-dialect batching.
     """
     from .patterns import find_pattern, PatternMatch
     from emend.pattern import parse_pattern
@@ -98,19 +94,7 @@ def find_pattern_in_project(
 
     literals = extract_pattern_literals(pattern_str)
 
-    # --- Stage 1: index prefilter ---
-    if literals and index_conn is not None and not is_single_file:
-        candidate_set = _index_prefilter(literals, index_conn)
-        if candidate_set is not None:
-            before = len(file_paths)
-            file_paths = [f for f in file_paths if f in candidate_set]
-            logger.debug(
-                "index prefilter: %d → %d files", before, len(file_paths),
-            )
-            if not file_paths:
-                return []
-
-    # --- Stage 2: Rust string-contains filter ---
+    # --- Stage 1: Rust string-contains filter ---
     if literals and len(file_paths) > 1:
         try:
             file_contents: list[tuple[str, str]] = _rust.read_and_filter_files(
@@ -141,15 +125,16 @@ def find_pattern_in_project(
     if not file_contents:
         return []
 
-    # --- Stage 3: Rust batch fast-path ---
+    # --- Stage 2: Rust batch fast-path ---
     has_constraints = (
         scope is not None
         or imported_from is not None
         or scope_local
         or type_oracle is not None
     )
-    from emend.language_registry import get_extensions
-    extensions = get_extensions(language)
+    from emend.language_registry import detect_language, get_extensions
+    matcher_language = language or detect_language(file_contents[0][0]) or "python"
+    extensions = get_extensions(matcher_language)
     dialects = {Path(fp).suffix.lstrip('.') for fp, _ in file_contents}
     extension = next(iter(dialects)) if len(dialects) == 1 else None
     if extension not in extensions:
@@ -161,13 +146,13 @@ def find_pattern_in_project(
             compile_constraint_to_rust_ir,
         )
 
-        pattern_ir = compile_pattern_to_rust_ir(pattern_str, language=language, extension=extension)
+        pattern_ir = compile_pattern_to_rust_ir(pattern_str, language=matcher_language, extension=extension)
         if pattern_ir is not None:
             inside_ir = (
-                compile_constraint_to_rust_ir(inside, language=language, extension=extension) if inside else None
+                compile_constraint_to_rust_ir(inside, language=matcher_language, extension=extension) if inside else None
             )
             not_inside_ir = (
-                compile_constraint_to_rust_ir(not_inside, language=language, extension=extension)
+                compile_constraint_to_rust_ir(not_inside, language=matcher_language, extension=extension)
                 if not_inside
                 else None
             )
@@ -204,7 +189,7 @@ def find_pattern_in_project(
                         results = results[:limit]
                     return results
 
-    # --- Stage 4: Pattern matching fallback (parallel) ---
+    # --- Stage 3: Pattern matching fallback (parallel) ---
     results: list[ProjectPatternMatch] = []
 
     if is_single_file:
@@ -248,50 +233,6 @@ def find_pattern_in_project(
                     break
 
     return results
-
-
-def _index_prefilter(
-    literals: list[str],
-    conn: sqlite3.Connection,
-) -> set[str] | None:
-    """Query the index for files likely to contain *literals*.
-
-    Returns a set of file paths, or ``None`` if the index has no useful
-    data (caller should skip this stage).
-    """
-    import sqlite3
-
-    per_literal: list[set[str]] = []
-    for lit in literals:
-        files_for_lit: set[str] = set()
-        try:
-            for (fp,) in conn.execute(
-                "SELECT DISTINCT file_path FROM reference_index "
-                "WHERE target_qn LIKE ?",
-                ("%" + lit + "%",),
-            ):
-                files_for_lit.add(fp)
-        except sqlite3.Error:
-            pass  # index table missing or corrupt
-        try:
-            for (fp,) in conn.execute(
-                "SELECT DISTINCT file_path FROM symbol_index "
-                "WHERE name = ? OR qualified_name LIKE ?",
-                (lit, "%" + lit + "%"),
-            ):
-                files_for_lit.add(fp)
-        except sqlite3.Error:
-            pass  # index table missing or corrupt
-        if files_for_lit:
-            per_literal.append(files_for_lit)
-
-    if not per_literal:
-        return None
-
-    candidates = per_literal[0]
-    for s in per_literal[1:]:
-        candidates &= s
-    return candidates
 
 
 def _read_and_filter_py(

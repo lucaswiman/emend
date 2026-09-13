@@ -121,8 +121,7 @@ def test_index_leaves_duplicates_for_on_demand_analysis(tmp_path, monkeypatch):
         assert conn.execute("SELECT count(*) FROM dup_cache").fetchone() == (0,)
 
 
-@pytest.mark.parametrize("fail_first", [False, True])
-def test_index_writes_completed_file_before_deriving_next(tmp_path, monkeypatch, fail_first):
+def test_index_writes_completed_file_before_deriving_next(tmp_path, monkeypatch):
     from emend import analysis_store
     from emend.transform import _index_batch
     from emend.transform import index
@@ -133,24 +132,22 @@ def test_index_writes_completed_file_before_deriving_next(tmp_path, monkeypatch,
     write = index._write_index_rows
     def checked_write(conn, *rows):
         connections.append(conn)
-        if fail_first and len(connections) == 1:
-            rows = (rows[0], [()], *rows[2:])  # Fail after writing the QN marker.
         return write(conn, *rows)
     monkeypatch.setattr(index, "_write_index_rows", checked_write)
     collect = analysis_store.collect_symbol_info
     def checked_collect(path, source):
         if path.name == "b.py":
             with sqlite3.connect(db_path) as conn:
-                assert conn.execute("SELECT file_path FROM qn_index").fetchall() == ([] if fail_first else [(files[0][0],)])
-                assert conn.execute("SELECT name FROM symbol_index").fetchall() == ([] if fail_first else [("hello",)])
+                assert conn.execute("SELECT file_path FROM qn_index").fetchall() == [(files[0][0],)]
+                assert conn.execute("SELECT name FROM symbol_index").fetchall() == [("hello",)]
         return collect(path, source)
     monkeypatch.setattr(analysis_store, "collect_symbol_info", checked_collect)
-    counts = _index_batch((str(db_path), str(tmp_path), str(tmp_path), files))
+    counts = _index_batch((str(db_path), str(tmp_path), files))
     assert counts[:4] == (2, 2, 0, 2)
     assert len(connections) == 2 and connections[0] is connections[1]
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT file_path FROM qn_index ORDER BY file_path").fetchall() == [
-            (path,) for path, _ in (files[1:] if fail_first else files)
+            (path,) for path, _ in files
         ]
 
 
@@ -231,7 +228,7 @@ class TestIndexBatchCacheHit:
         if legacy_schema:
             with sqlite3.connect(db_path) as conn:
                 conn.execute("CREATE TABLE qn_index (hash BLOB PRIMARY KEY, qnames BLOB)")
-        args = (str(db_path), str(tmp_path), str(tmp_path),
+        args = (str(db_path), str(tmp_path),
                 [(str(tmp_path / "a.py"), SOURCE)])
         assert _index_batch(args)[:4] == (1, 1, 0, 1)
         assert _db_row_count(db_path, "qn_index") == 1
@@ -510,7 +507,7 @@ class TestSymbolIndex:
         db_path = tmp_path / "parse.db"
         source = "def process_request(x: int) -> str:\n    return str(x)\n\nclass MyClass:\n    pass\n"
         batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
+        _index_batch((str(db_path), str(tmp_path), batch))
 
         count = _db_row_count(db_path, "symbol_index")
         assert count >= 2  # at least process_request + MyClass
@@ -533,7 +530,7 @@ class TestSymbolIndex:
         db_path = tmp_path / "parse.db"
         source = "def greet(name: str, loud: bool = False) -> str:\n    pass\n"
         batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
+        _index_batch((str(db_path), str(tmp_path), batch))
 
         conn = sqlite3.connect(str(db_path))
         row = conn.execute(
@@ -585,7 +582,7 @@ class TestSymbolIndex:
         db_path = tmp_path / "parse.db"
         source = "def foo(): pass\nclass Bar: pass\ndef baz(): pass\n"
         batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
+        _index_batch((str(db_path), str(tmp_path), batch))
 
         conn = sqlite3.connect(str(db_path))
         funcs = conn.execute(
@@ -610,7 +607,7 @@ class TestSymbolIndex:
             "def handle_error(): pass\n"
         )
         batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
+        _index_batch((str(db_path), str(tmp_path), batch))
 
         conn = sqlite3.connect(str(db_path))
         results = conn.execute(
@@ -633,7 +630,7 @@ class TestImportGraph:
         db_path = tmp_path / "parse.db"
         source = "import os\nfrom pathlib import Path\nimport json\n"
         batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
+        _index_batch((str(db_path), str(tmp_path), batch))
 
         conn = sqlite3.connect(str(db_path))
         rows = conn.execute(
@@ -663,7 +660,7 @@ class TestReferenceIndex:
             "    return x\n"
         )
         batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
+        _index_batch((str(db_path), str(tmp_path), batch))
 
         count = _db_row_count(db_path, "reference_index")
         # Should have references for helper, main, x, etc.
@@ -680,7 +677,7 @@ class TestReferenceIndex:
             "result = process()\n"
         )
         batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), str(tmp_path), str(tmp_path), batch))
+        _index_batch((str(db_path), str(tmp_path), batch))
 
         conn = sqlite3.connect(str(db_path))
         calls = conn.execute(

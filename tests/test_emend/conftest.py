@@ -104,7 +104,7 @@ def build_indexed_project(
         (proj / name).write_text(content)
 
     batch = [(str(proj / name), content) for name, content in files.items()]
-    _index_batch((str(db_path), str(proj), str(proj), batch))
+    _index_batch((str(db_path), str(proj), batch))
 
     conn = sqlite3.connect(str(db_path))
     conn.execute("PRAGMA journal_mode=WAL")
