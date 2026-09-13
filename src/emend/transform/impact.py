@@ -209,11 +209,12 @@ def _find_impact_via_fact_graph(
     """Compute impact using the owner's current project fact generation."""
     from emend.analysis_store import AnalysisStore
     from emend.component_selector import parse_extended_selector
-    fdb = AnalysisStore.open(proj_root).query_facts().client
+    graph = AnalysisStore.open(proj_root).query_facts()
+    fdb = graph.client
 
     # Resolve selectors to module-qualified names (mqn) in facts.db.
-    changed_mqns: set[str] = set()
-    mqn_to_sel: dict[str, str] = {}
+    changed_mqns: set[tuple[str, str]] = set()
+    mqn_to_sel: dict[tuple[str, str], str] = {}
 
     for sel_str in changed_selectors:
         try:
@@ -245,15 +246,17 @@ def _find_impact_via_fact_graph(
                 continue
             if result["rows"]:
                 mqn = result["rows"][0][0]
-                changed_mqns.add(mqn)
-                mqn_to_sel[mqn] = sel_str
+                identity = (graph.namespace_for_file(fp), mqn)
+                changed_mqns.add(identity)
+                mqn_to_sel[identity] = sel_str
                 break
 
     resolved = set(mqn_to_sel.values())
     for sel_str, mqn in (identities or {}).items():
         if sel_str not in resolved:
-            changed_mqns.add(mqn)
-            mqn_to_sel[mqn] = sel_str
+            identity = (graph.namespace_for_file(parse_extended_selector(sel_str).file_path), mqn)
+            changed_mqns.add(identity)
+            mqn_to_sel[identity] = sel_str
 
     if not changed_mqns:
         return ImpactResult(
@@ -264,43 +267,44 @@ def _find_impact_via_fact_graph(
         )
 
     # Build a depth-bounded reverse closure over the canonical call relation.
-    rules = ["changed[x] <- $changed\n"]
+    rules = ["changed[ns, x] <- $changed\n"]
 
     rules.append(
-        'call_edge[caller_mqn, callee_mqn] := '
-        '*call[caller_mqn, callee_mqn, _, _, _, _, _]\n'
+        'call_edge[ns, caller_mqn, callee_mqn] := '
+        '*call[caller_mqn, callee_mqn, fp, _, _, _, _], *file_namespace[fp, ns]\n'
     )
 
     # Depth-bounded transitive reverse-caller closure
     rules.append(
-        "layer_0[caller] := call_edge[caller, callee], changed[callee]\n"
+        "layer_0[ns, caller] := call_edge[ns, caller, callee], changed[ns, callee]\n"
     )
     for i in range(1, max_depth):
         rules.append(
-            f"layer_{i}[caller] := call_edge[caller, mid], layer_{i - 1}[mid]\n"
+            f"layer_{i}[ns, caller] := call_edge[ns, caller, mid], layer_{i - 1}[ns, mid]\n"
         )
     for i in range(max_depth):
-        rules.append(f"impacted[x] := layer_{i}[x]\n")
+        rules.append(f"impacted[ns, x] := layer_{i}[ns, x]\n")
 
     # Edges: witness pairs
     rules.append(
-        "edge[caller, callee] := impacted[caller], call_edge[caller, callee], changed[callee]\n"
+        "edge[ns, caller, callee] := impacted[ns, caller], call_edge[ns, caller, callee], changed[ns, callee]\n"
     )
     if max_depth > 1:
         for i in range(1, max_depth):
             rules.append(
-                f"edge[caller, mid] := layer_{i}[caller], call_edge[caller, mid], layer_{i - 1}[mid]\n"
+                f"edge[ns, caller, mid] := layer_{i}[ns, caller], call_edge[ns, caller, mid], layer_{i - 1}[ns, mid]\n"
             )
 
     # Return impacted symbols with file paths for selector construction
     rules.append(
-        "?[caller_mqn, caller_fp, caller_name, callee_mqn] := "
-        "edge[caller_mqn, callee_mqn], not changed[caller_mqn], "
-        "*search_symbol[caller_fp, caller_mqn, _, caller_name, _, _, _, _, _, _, _, _]"
+        "?[ns, caller_mqn, caller_fp, caller_name, callee_mqn] := "
+        "edge[ns, caller_mqn, callee_mqn], not changed[ns, caller_mqn], "
+        "*search_symbol[caller_fp, caller_mqn, _, caller_name, _, _, _, _, _, _, _, _], "
+        "*file_namespace[caller_fp, ns]"
     )
 
     try:
-        result = fdb.run("".join(rules), {"changed": [[mqn] for mqn in changed_mqns]})
+        result = fdb.run("".join(rules), {"changed": [list(key) for key in sorted(changed_mqns)]})
     except Exception:
         logger.debug("facts.db impact query failed", exc_info=True)
         return None
@@ -313,13 +317,11 @@ def _find_impact_via_fact_graph(
     abs_root = str(Path(proj_root).resolve())
     # Complete the projection before rendering any edge: row ordering is not
     # graph traversal ordering, and both endpoints must use selector identities.
-    for mqn, fp, local_name, _ in result["rows"]:
-        mqn_to_sel.setdefault(mqn, f"{Path(abs_root) / fp}::{local_name}")
-    for row in result["rows"]:
-        caller_mqn, caller_fp, caller_name, callee_mqn = row[0], row[1], row[2], row[3]
-
-        caller_sel = mqn_to_sel[caller_mqn]
-        callee_sel = mqn_to_sel.get(callee_mqn, callee_mqn)
+    for ns, mqn, fp, local_name, _ in result["rows"]:
+        mqn_to_sel.setdefault((ns, mqn), f"{Path(abs_root) / fp}::{local_name}")
+    for ns, caller_mqn, caller_fp, caller_name, callee_mqn in result["rows"]:
+        caller_sel = mqn_to_sel[ns, caller_mqn]
+        callee_sel = mqn_to_sel.get((ns, callee_mqn), callee_mqn)
 
         all_edges.append(ImpactEdge(
             source=callee_sel,
@@ -340,15 +342,15 @@ def _find_impact_via_fact_graph(
     deco_rows: list = []
     try:
         deco_rows = fdb.run(
-            '?[sqn] := *decorator_on[sqn, dec], '
-            'dec in ["test", "tokio::test"]'
+            '?[ns, sqn] := *decorator_on[sqn, dec, fp], '
+            '*file_namespace[fp, ns], dec in ["test", "tokio::test"]'
         )["rows"]
     except Exception:
         logger.debug("decorator_on query failed", exc_info=True)
     for row in deco_rows:
-        mqn = row[0]
-        if mqn in mqn_to_sel:
-            test_decorated_sels.add(mqn_to_sel[mqn])
+        identity = tuple(row)
+        if identity in mqn_to_sel:
+            test_decorated_sels.add(mqn_to_sel[identity])
 
     test_edges: list[ImpactEdge] = []
     for sel_str in all_impacted:

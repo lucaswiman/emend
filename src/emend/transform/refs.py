@@ -69,6 +69,7 @@ def find_references(
 
     ref_facts = graph.refs_datalog(
         target_qn,
+        namespace=graph.namespace_for_file(selector.file_path),
         writes_only=writes_only,
         reads_only=reads_only,
         include_definition=include_definition,
@@ -78,6 +79,7 @@ def find_references(
     if not ref_facts:
         ref_facts = graph.refs_datalog(
             symbol_name,
+            namespace=graph.namespace_for_file(selector.file_path),
             writes_only=writes_only,
             reads_only=reads_only,
             include_definition=include_definition,
@@ -136,9 +138,9 @@ def find_callers(
 
     graph = _get_or_build_fact_graph(scan_root)
 
-    call_facts = graph.callers_datalog(target_qn)
+    call_facts = graph.callers_datalog(target_qn, namespace=graph.namespace_for_file(selector.file_path))
     if not call_facts:
-        call_facts = graph.callers_datalog(symbol_name)
+        call_facts = graph.callers_datalog(symbol_name, namespace=graph.namespace_for_file(selector.file_path))
 
     project_root_resolved = str(Path(module_root).resolve())
 
@@ -183,7 +185,7 @@ def find_callees(
 
     graph = _get_or_build_fact_graph(scan_root)
 
-    call_facts = graph.callees_datalog(target_qn)
+    call_facts = graph.callees_datalog(target_qn, namespace=graph.namespace_for_file(selector.file_path))
 
     callees: list[Callee] = []
     seen: set[tuple[str, int]] = set()

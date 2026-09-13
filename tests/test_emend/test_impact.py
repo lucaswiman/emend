@@ -10,6 +10,23 @@ from emend.component_selector import ExtendedSelector
 class TestFindImpact:
     """Tests for find_impact() in transform.py."""
 
+    @pytest.mark.parametrize("extensions", [("py",), ("ts",), ("py", "ts")])
+    def test_impact_keeps_same_named_languages_separate(self, tmp_path, extensions):
+        from emend.transform import find_impact
+
+        for ext, source in {
+            "py": "def helper(): return 1\ndef caller(): return helper()\ndef outer(): return caller()\n",
+            "ts": "function helper() { return 1; }\nfunction caller() { return helper(); }\nfunction outer() { return caller(); }\n",
+        }.items():
+            (tmp_path / f"api.{ext}").write_text(source)
+        paths = [tmp_path / f"api.{ext}" for ext in extensions]
+        result = find_impact(selectors=[ExtendedSelector(str(path), ["helper"]) for path in paths], project_path=str(tmp_path))
+        assert set(result.impacted_symbols) == {f"{path}::{name}" for path in paths for name in ("caller", "outer")}
+        assert {(edge.source, edge.target) for edge in result.edges} == {
+            (f"{path}::{source}", f"{path}::{target}")
+            for path in paths for source, target in (("helper", "caller"), ("caller", "outer"))
+        }
+
     def test_impact_from_selector_direct_caller(self, tmp_path):
         """Impact analysis finds direct callers of a changed symbol."""
         from emend.transform import find_impact

@@ -426,7 +426,7 @@ def test_replace_extracted_chunks_large_relations(monkeypatch):
     ]
 
 
-def test_replace_extracted_preserves_last_symbol_for_duplicate_qn():
+def test_replace_extracted_preserves_file_owners_for_duplicate_qn():
     graph = FactGraph()
     graph.replace_extracted(
         [
@@ -436,7 +436,10 @@ def test_replace_extracted_preserves_last_symbol_for_duplicate_qn():
         stored_paths=["a.py", "b.py"],
     )
 
-    assert graph.symbols() == [SymbolFact("b.py", "f", "shared.f", "function", 2, 2)]
+    assert graph.symbols() == [
+        SymbolFact("a.py", "f", "shared.f", "function", 1, 1),
+        SymbolFact("b.py", "f", "shared.f", "function", 2, 2),
+    ]
 
 
 class TestUpdateFilesMatchesBuildFromFiles:
