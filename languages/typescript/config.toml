@@ -246,6 +246,7 @@ elt_field = "body"
 # Control flow graph (CFG) construction
 # ---------------------------------------------------------------------------
 [cfg]
+string_nodes = ["string", "template_string"]
 function_nodes = ["function_declaration", "method_definition", "arrow_function", "function_expression"]
 container_nodes = ["class_declaration", "class_body"]
 definition_nodes = ["function_declaration", "class_declaration", "method_definition"]

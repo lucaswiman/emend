@@ -38,7 +38,7 @@ from emend.duplicate_heuristics import (
 # Cached payloads include the containing function/class symbol. Bump this whenever
 # the payload shape or canonicalization changes so stale rows cannot differ from
 # the cold (fresh-parse) path.
-DUP_CACHE_VERSION = "6"
+DUP_CACHE_VERSION = "7"
 
 def _duplicate_cache_key(file_path, content):
     """Content addressing includes the grammar, not the worktree path."""
@@ -70,7 +70,7 @@ def _parsed_inputs(files):
             groups[language, Path(path).suffix.lstrip(".")].append(path)
     for (language, extension), paths in groups.items():
         config = _duplicate_config(language)
-        _, parsed = _preparse_files(paths, None, extension=extension)
+        _, parsed = _preparse_files(paths, extension=extension)
         for path, data in parsed.items():
             yield language, config, path, data
 
@@ -591,7 +591,6 @@ _FileData = dict[str, tuple[str, Any, dict, dict, list[tuple[str, int, int]]]]
 
 def _preparse_files(
     source_files: list[str],
-    symbol_scope: str | None,
     *, extension: str = "py",
 ) -> tuple[Any, _FileData]:
     """Read, parse, and index all *source_files* once.
@@ -609,8 +608,6 @@ def _preparse_files(
     file_data: _FileData = {}
 
     for file_path in source_files:
-        if symbol_scope and symbol_scope not in file_path:
-            continue
         try:
             with open(file_path, encoding="utf-8", errors="replace") as fh:
                 content = fh.read()
@@ -1002,9 +999,6 @@ def query_duplicates(
     if not source_files:
         return []
 
-    if symbol_scope:
-        source_files = [p for p in source_files if symbol_scope in p]
-
     source_files = [str(Path(p).resolve()) for p in source_files]
     cached = _load_cached_payloads(project_path, source_files) or {}
     for _language, _config, path, data in _parsed_inputs(
@@ -1026,6 +1020,12 @@ def query_duplicates(
             c for c in clusters
             if any(str(Path(m.file).resolve()) == target for m in c.members)
         ]
+
+    if symbol_scope:
+        clusters = [c for c in clusters if any(
+            m.symbol == symbol_scope or m.symbol.endswith("." + symbol_scope)
+            for m in c.members
+        )]
 
     if min_score > 0.0:
         clusters = [c for c in clusters if c.score >= min_score]

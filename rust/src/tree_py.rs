@@ -35,8 +35,8 @@ fn language_from_ext(ext: &str) -> Option<&'static str> {
     Some(match ext {
         "py" | "pyi" => "python",
         "ts" => "typescript",
-        "tsx" => "tsx",
-        "js" | "jsx" => "typescript",
+        "tsx" | "jsx" => "tsx",
+        "js" => "typescript",
         "rs" => "rust",
         "html" | "htm" => "html",
         "css" => "css",

@@ -341,20 +341,26 @@ fn parse_string_literal(text: &str, ext: &str) -> PyResult<Option<String>> {
     Ok(Some(content.clone()))
 }
 
-/// Validate that `code` parses without syntax errors in the given language.
+/// Check `code` for structural errors reported by tree-sitter.
 ///
 /// Uses tree-sitter to parse the code. Mirrors the permissive "is this a
 /// reasonable replacement snippet?" contract: accepts any of (a) parse as
 /// top-level, (b) parse wrapped in an expression context, (c) parse wrapped
 /// in a statement context. Returns `true` if any form parses cleanly.
+/// Set `fragment=false` to validate a complete module without wrappers.
+/// This is not compiler validation: grammars may accept invalid indentation
+/// or constructs forbidden by the language in their surrounding context.
 ///
 /// The `ext` parameter selects the tree-sitter language (e.g. "py", "ts", "rs").
 /// Defaults to "py" if not provided.
 #[pyfunction]
-#[pyo3(signature = (code, ext="py"))]
-fn validate_syntax(code: &str, ext: &str) -> PyResult<bool> {
+#[pyo3(signature = (code, ext="py", *, fragment=true))]
+fn validate_syntax(code: &str, ext: &str, fragment: bool) -> PyResult<bool> {
     if parses_clean(code, ext) {
         return Ok(true);
+    }
+    if !fragment {
+        return Ok(false);
     }
     if let Some(wrapped) = wrap_as_expression(code, ext) {
         if parses_clean(&wrapped, ext) {
@@ -371,7 +377,7 @@ fn validate_syntax(code: &str, ext: &str) -> PyResult<bool> {
 
 fn parses_clean(code: &str, ext: &str) -> bool {
     match pattern::parse_by_extension(code, ext) {
-        Some(tree) => !has_error_or_missing(tree.root_node()),
+        Some(tree) => !has_error_or_missing(tree.root_node(), &scope::config_for_ext(ext).cfg.block_nodes),
         None => false,
     }
 }
@@ -397,14 +403,18 @@ fn wrap_as_statement(code: &str, ext: &str) -> Option<String> {
     }
 }
 
-fn has_error_or_missing(node: tree_sitter::Node) -> bool {
-    if node.is_error() || node.is_missing() {
+fn has_error_or_missing(node: tree_sitter::Node, block_nodes: &[String]) -> bool {
+    // Some grammars emit an empty suite instead of an explicit missing node.
+    // Empty modules are valid; empty braced blocks have nonzero spans.
+    if node.is_error() || node.is_missing() || (node.parent().is_some()
+        && node.start_byte() == node.end_byte()
+        && block_nodes.iter().any(|kind| kind == node.kind())) {
         return true;
     }
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
         loop {
-            if has_error_or_missing(cursor.node()) {
+            if has_error_or_missing(cursor.node(), block_nodes) {
                 return true;
             }
             if !cursor.goto_next_sibling() {
