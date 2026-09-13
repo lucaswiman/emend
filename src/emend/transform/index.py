@@ -13,6 +13,7 @@ import re
 from ..language_plugins import NOQA_PATTERN as _NOQA_PATTERN
 from emend import emend_core as _rust
 from emend.errors import BUG_EXCEPTIONS
+from emend.project_config import module_context_snapshot
 
 if TYPE_CHECKING:
     import sqlite3
@@ -204,6 +205,7 @@ def _index_batch(args: tuple[str, str, str, list[tuple[str, str]]]) -> tuple[int
         return _index_batch_rows(args, conn)
 
 
+@module_context_snapshot()
 def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, int, int, int, int]:
     """Worker function for per-file indexing.
 
@@ -434,6 +436,7 @@ class ManifestScanResult:
     git_head_changed: bool           # True if HEAD differs from stored HEAD
 
 
+@module_context_snapshot()
 def _scan_manifest(
     project_path: str,
     conn: sqlite3.Connection | None = None,
@@ -505,15 +508,15 @@ def _scan_manifest(
 
         # Tier 2 + 3: Stat scan + hash verification
         # Load manifest into memory for fast lookup (filtered by worktree)
-        manifest: dict[str, bytes] = {}
+        manifest = {}
         try:
             for row in conn.execute(
-                "SELECT path, content_hash FROM file_manifest "
+                "SELECT path, content_hash, scope_hash FROM file_manifest "
                 "WHERE worktree_id = ?",
                 (worktree_id,),
             ).fetchall():
                 if in_scope(row[0]):
-                    manifest[row[0]] = row[1]
+                    manifest[row[0]] = row[1:]
         except _sql3.Error:
             # Table might not exist yet
             logger.debug("file_manifest read failed; treating all files as new", exc_info=True)
@@ -522,13 +525,13 @@ def _scan_manifest(
 
         result.deleted = list(set(manifest) - set(current))
         for path, content_hash in current.items():
-            stored_hash = manifest.get(path)
-            if stored_hash is None:
+            stored = manifest.get(path)
+            if stored is None:
                 result.new_files.append(path)
-            elif stored_hash == content_hash:
+            elif stored == (content_hash, _scope_cache_hash(b"", path, project_root)):
                 result.unchanged.append(path)
             else:
-                result.changed.append((path, stored_hash, content_hash))
+                result.changed.append((path, stored[0], content_hash))
     finally:
         if close_conn and conn:
             conn.close()
@@ -647,9 +650,10 @@ def _ensure_index_fresh_impl(
                     st = _os.stat(resolved)
                     conn.execute(
                         "INSERT OR REPLACE INTO file_manifest "
-                        "(worktree_id, path, mtime_ns, size, content_hash, indexed_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (worktree_id, resolved, st.st_mtime_ns, st.st_size, content_hash, now),
+                        "(worktree_id, path, mtime_ns, size, content_hash, indexed_at, scope_hash) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (worktree_id, resolved, st.st_mtime_ns, st.st_size, content_hash, now,
+                         _scope_cache_hash(b"", resolved, project_root)),
                     )
                 except (OSError, _sql3.Error):
                     logger.debug("manifest update failed for %s", py_file, exc_info=True)
@@ -1222,14 +1226,15 @@ def warm_caches(
                         st.st_size,
                         content_hash,
                         now,
+                        _scope_cache_hash(b"", py_file, project_root),
                     ))
                 except OSError:
                     pass
             if manifest_rows:
                 _mf_conn.executemany(
                     "INSERT OR REPLACE INTO file_manifest "
-                    "(worktree_id, path, mtime_ns, size, content_hash, indexed_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "(worktree_id, path, mtime_ns, size, content_hash, indexed_at, scope_hash) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     manifest_rows,
                 )
             # Update git HEAD (scoped to this worktree)

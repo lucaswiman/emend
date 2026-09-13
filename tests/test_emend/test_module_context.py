@@ -29,7 +29,7 @@ def test_inherited_tsconfig_change_refreshes_source_root(tmp_path):
     assert find_source_root(str(tmp_path), "typescript") == second
 
 
-def test_setup_cfg_change_refreshes_source_root(tmp_path):
+def test_setup_cfg_change_refreshes_source_root(tmp_path, monkeypatch):
     first = tmp_path / "python_one"
     second = tmp_path / "python_two"
     setup_cfg = tmp_path / "setup.cfg"
@@ -39,6 +39,10 @@ def test_setup_cfg_change_refreshes_source_root(tmp_path):
     first.mkdir()
     assert find_source_root(str(tmp_path)) == first
     second.mkdir()
+    stat = setup_cfg.stat()
+    original_stat = type(setup_cfg).stat
+    monkeypatch.setattr(type(setup_cfg), "stat", lambda path, **kwargs:
+                        stat if path == setup_cfg else original_stat(path, **kwargs))
     setup_cfg.write_text("[options]\npackage_dir =\n    = python_two\n")
     assert find_source_root(str(tmp_path)) == second
 
@@ -106,6 +110,15 @@ def test_cached_rust_context_does_not_reparse_cargo(tmp_path, monkeypatch):
         return original(path)
 
     monkeypatch.setattr(project_config, "_load_toml", count_load)
+    reads = []
+    original_read = type(cargo).read_bytes
+    def read_bytes(path):
+        reads.append(path)
+        return original_read(path)
+    monkeypatch.setattr(type(cargo), "read_bytes", read_bytes)
     for _ in range(3):
-        module_resolution_context(tmp_path, "rust")
+        with project_config.module_context_snapshot():
+            for _ in range(3):
+                module_resolution_context(tmp_path, "rust")
     assert calls == [cargo]
+    assert reads == [cargo] * 3

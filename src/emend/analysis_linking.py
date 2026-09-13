@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from pathlib import PurePosixPath
-import posixpath
 
 from emend.analysis_snapshot import ExtractedFile, FileRevision
 
@@ -19,7 +18,7 @@ _FINAL_RELATIONS = (
     "module_level_refs",
     "method_calls",
 )
-_SOURCE_EXTENSIONS = (".pyi", ".tsx", ".jsx", ".py", ".ts", ".js", ".rs")
+LINKER_VERSION = "2"
 
 
 def _normalize_qn(value: str) -> str:
@@ -31,13 +30,6 @@ def _normalize_qn(value: str) -> str:
         .replace("\\", ".")
     )
     return ".".join(part for part in value.split(".") if part)
-
-
-def _strip_import_extension(value: str) -> str:
-    for extension in _SOURCE_EXTENSIONS:
-        if value.endswith(extension):
-            return value[: -len(extension)]
-    return value
 
 
 class ModuleCatalog:
@@ -64,9 +56,7 @@ class ModuleCatalog:
             aliases = catalog._language_aliases.setdefault(revision.language, {})
             aliases[module] = module
             if revision.language in ("typescript", "javascript") and stem == "index":
-                alias = module.removesuffix(".index")
-                if alias:
-                    aliases.setdefault(alias, module)
+                aliases.setdefault(module.rpartition(".")[0], module)
             elif revision.language == "rust" and stem in ("lib", "main"):
                 rust_roots.append(module)
         catalog._rust_roots = tuple(sorted(rust_roots, key=lambda root: root != "lib"))
@@ -83,6 +73,8 @@ class ModuleCatalog:
         """Return the snapshot's canonical spelling, or a stable external QN."""
         normalized = _normalize_qn(candidate)
         aliases = self._language_aliases.get(language, self._aliases)
+        if not normalized:
+            return aliases.get("", "")
         alias = self._matching_alias(normalized, language)
         return f"{aliases[alias]}{normalized[len(alias):]}" if alias else normalized
 
@@ -111,15 +103,6 @@ def _python_module(raw: str, importing_file: str, module_name: str) -> str | Non
     keep = max(0, len(package) - level + 1)
     tail = raw[level:].replace(".", "/")
     return ".".join([*package[:keep], *filter(None, tail.split("/"))])
-
-
-def _typescript_module(raw: str, module_name: str) -> str | None:
-    raw = _strip_import_extension(raw)
-    if not raw.startswith(("./", "../")):
-        return raw
-    current = module_name.replace("::", "/")
-    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(current), raw))
-    return None if resolved == ".." or resolved.startswith("../") else resolved
 
 
 def _rust_module(
@@ -166,7 +149,9 @@ def _import_target(row: list[object], lexical: str, catalog: ModuleCatalog) -> s
             str(module_name),
         )
     elif language in ("typescript", "javascript"):
-        module = _typescript_module(raw, str(module_name))
+        from emend.emend_core import resolve_node_import
+
+        module = resolve_node_import(raw, str(module_name))
     elif language == "rust":
         imported = str(imported_name) if imported_name and not is_star else ""
         module = _rust_module("::".join(filter(None, (raw, imported))), str(module_name), catalog)

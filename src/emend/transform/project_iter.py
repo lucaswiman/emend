@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 import hashlib
@@ -317,7 +316,6 @@ def _find_project_root(start_path: str) -> str:
     return str(find_project_root(start_path))
 
 
-@lru_cache(maxsize=64)
 def _find_source_root(project_root: str, language: str = "python") -> str:
     """Compatibility wrapper for the canonical source-root resolver."""
     from emend.project_config import find_source_root
