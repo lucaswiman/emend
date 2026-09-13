@@ -375,7 +375,6 @@ def rebuild_fts(conn: sqlite3.Connection) -> int:
         "SELECT DISTINCT file_path FROM symbol_index"
     )
 
-    conn.commit()
     count = conn.execute("SELECT COUNT(*) FROM symbol_fts").fetchone()[0]
     file_count = conn.execute("SELECT COUNT(*) FROM file_fts").fetchone()[0]
     logger.debug("FTS index rebuilt: %d symbols, %d files", count, file_count)
@@ -429,17 +428,15 @@ class EditorSearchEngine:
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = self._store.connection()
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn = self._store.reader()
             self._conn.execute("PRAGMA mmap_size=268435456")
             self._conn.execute("PRAGMA cache_size=-65536")
         return self._conn
 
     def close(self) -> None:
-        # AnalysisStore owns the shared connection lifetime.  Closing one
-        # editor client must not invalidate type or index consumers.
         self._store.remove_overlays(self._overlay_owner)
+        if self._conn is not None:
+            self._store.close_reader(self._conn)
         self._conn = None
         self._fts_ready = False
 
@@ -518,7 +515,7 @@ class EditorSearchEngine:
         conn = self._get_conn()
 
         if self._fts_available is None:
-            self._fts_available = _fts5_available(conn)
+            self._fts_available = self._store.write(_fts5_available)
         if not self._fts_available:
             self._fts_ready = True
             return False
@@ -544,7 +541,7 @@ class EditorSearchEngine:
                 sym_count = 0
             if sym_count > 0:
                 try:
-                    rebuild_fts(conn)
+                    self._store.write(rebuild_fts)
                 except BUG_EXCEPTIONS:
                     raise
                 except Exception as exc:
@@ -622,12 +619,8 @@ class EditorSearchEngine:
         return False
 
     def finalize_reindex(self) -> None:
-        """Rebuild FTS after a background reindex completed.
-
-        Must be called from the main thread (uses the engine's connection).
-        """
-        conn = self._get_conn()
-        rebuild_fts(conn)
+        """Rebuild FTS after a background reindex completed."""
+        self._store.write(rebuild_fts)
         self._fts_ready = True
 
     # -- unified search -----------------------------------------------------
@@ -1833,8 +1826,7 @@ class EditorSearchEngine:
 
         fresh = _ensure_index_fresh(self.project_root)
         # Rebuild FTS after any re-indexing
-        conn = self._get_conn()
-        fts_count = rebuild_fts(conn)
+        fts_count = self._store.write(rebuild_fts)
         self._fts_ready = True
 
         elapsed = round((time.monotonic() - t0) * 1000, 2)

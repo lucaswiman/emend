@@ -877,3 +877,21 @@ class TestIndexStatus:
         # and silently prints "unknown" otherwise.
         assert info.get("git_head") == head
         assert info.get("indexed_at")  # non-empty timestamp string
+
+def test_owned_cache_initializer_configures_and_commits_migration(tmp_path):
+    from contextlib import closing
+    from emend.transform.cache import _initialize_cache_connection
+
+    path = tmp_path / "parse.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE qn_index (hash BLOB PRIMARY KEY, qnames BLOB)")
+        conn.execute("INSERT INTO qn_index VALUES (X'01', X'02')")
+
+    with closing(sqlite3.connect(path)) as conn:
+        _initialize_cache_connection(conn)
+        assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+        assert conn.execute("PRAGMA synchronous").fetchone() == (1,)
+
+    with sqlite3.connect(path) as conn:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(qn_index)")]
+        assert columns == ["file_path", "hash", "qnames"]

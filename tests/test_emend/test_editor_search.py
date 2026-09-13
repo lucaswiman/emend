@@ -387,14 +387,12 @@ class TestUnifiedSearch:
 class TestReferenceSearch:
     def test_find_references(self, indexed_project):
         with _engine(indexed_project) as engine:
-            conn = engine._get_conn()
-            conn.execute(
+            engine._store.write(lambda conn: conn.execute(
                 "INSERT INTO reference_index "
                 "(content_hash, target_qn, file_path, line, col, ref_kind) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (b"h", "sample.greet", "sample.py", 6, 15, "call"),
-            )
-            conn.commit()
+            ).close())
 
             result = engine.search_references("sample.greet")
             assert result.mode == "reference"
@@ -410,15 +408,17 @@ class TestReferenceSearch:
         with _engine(indexed_project) as engine:
             # Seed known references so the filter has something to act on:
             # two "call" refs and one "read" ref for the same target.
-            conn = engine._get_conn()
-            for ref_kind, line in [("call", 10), ("read", 11), ("call", 12)]:
-                conn.execute(
+            def seed(conn):
+                conn.executemany(
                     "INSERT INTO reference_index "
                     "(content_hash, target_qn, file_path, line, col, ref_kind) "
                     "VALUES (?, ?, ?, ?, ?, ?)",
-                    (b"h", "sample.greet", "f.py", line, 0, ref_kind),
+                    [
+                        (b"h", "sample.greet", "f.py", line, 0, ref_kind)
+                        for ref_kind, line in [("call", 10), ("read", 11), ("call", 12)]
+                    ],
                 )
-            conn.commit()
+            engine._store.write(seed)
 
             result = engine.search_references(
                 "sample.greet", ref_kind="call"
@@ -936,8 +936,7 @@ class TestSearchLiteralsWildcards:
     def test_underscore_not_treated_as_wildcard(self, tmp_path):
         proj = build_indexed_project(tmp_path, {"sample.py": SAMPLE_SOURCE})
         with _engine(proj) as engine:
-            conn = engine._get_conn()
-            conn.executemany(
+            engine._store.write(lambda conn: conn.executemany(
                 "INSERT INTO reference_index "
                 "(content_hash, target_qn, file_path, line, col, ref_kind) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
@@ -945,8 +944,7 @@ class TestSearchLiteralsWildcards:
                     (b"h", "abc", "f.py", 1, 0, "read"),
                     (b"h", "a_c", "f.py", 2, 0, "read"),
                 ],
-            )
-            conn.commit()
+            ).close())
             result = engine._search_literals(["a_c"])
         qns = {item["target_qn"] for item in result.items}
         assert "a_c" in qns
