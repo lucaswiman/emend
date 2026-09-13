@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from ..component_selector import ExtendedSelector
 
 from emend.errors import BUG_EXCEPTIONS
+from emend.edit_session import write_source
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ def _publish_edits(edits: dict[str, tuple[str, str]], apply: bool) -> dict[str, 
     if apply:
         for path in diffs:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-            Path(path).write_text(edits[path][1])
+            write_source(path, edits[path][1])
     return diffs
 
 

@@ -252,6 +252,10 @@ def test_transform_replace_dry_run(tmp_path):
     )
     assert "dry-run" in result.lower()
     assert "print('hello')" in p.read_text()
+    with pytest.raises(ValueError, match="requires a type oracle"):
+        transform(operation="replace", pattern="print($X:type[int])",
+                  replacement="log($X)", path=str(p), apply=True)
+    assert p.read_text() == "print('hello')\n"
 
 
 def test_transform_edit_apply(tmp_path):

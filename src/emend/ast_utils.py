@@ -7,6 +7,7 @@ from typing import Callable, Optional, Tuple
 
 from emend import emend_core
 from emend.component_selector import NestedSymbol
+from emend.edit_session import read_source
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +161,7 @@ def find_nested_definitions(
     Uses tree-sitter via the Rust extension for parsing.
     """
     if source_override is None:
-        with open(filepath) as f:
-            source = f.read()
+        source = read_source(filepath)
     else:
         source = source_override
 

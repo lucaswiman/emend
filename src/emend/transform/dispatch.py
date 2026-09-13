@@ -363,7 +363,8 @@ def _expand_selector_with_returns_filter(
     file_path = Path(selector.file_path)
     if not file_path.exists():
         return []
-    source = file_path.read_text()
+    from emend.edit_session import read_source
+    source = read_source(file_path)
     symbols = _collect_symbols(file_path, source)
 
     # Build type index if oracle available

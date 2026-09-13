@@ -52,7 +52,7 @@ def _maybe_create_oracle(type_engine: str | None):
     oracle = create_type_oracle(engine=engine)
     if not oracle.is_available():
         logging.getLogger("emend.type_oracle").warning(
-            "Type engine '%s' not available; type constraints will have no effect",
+            "Type engine '%s' not available; type inference is unavailable",
             engine,
         )
         return None

@@ -205,20 +205,34 @@ class TestFindPatternTypeOracle:
         matches = find_pattern("$X:type[Connection] = $Y", str(f), type_oracle=oracle)
         assert len(matches) == 1
 
-    def test_type_constraint_without_oracle_returns_all(self, tmp_path):
-        """If no oracle provided, :type[X] constraints have no effect (match all)."""
-        source = textwrap.dedent("""\
-            x = 1
-            y = 2
-        """)
+    @pytest.mark.parametrize("constraint", ["type[int]", "returns[int]"])
+    def test_type_constraint_requires_oracle(self, tmp_path, constraint, monkeypatch):
+        """Missing inference must not silently broaden a constrained operation."""
+        source = "x = 1\ny = 2\n"
         f = tmp_path / "test.py"
         f.write_text(source)
 
-        from emend.transform import find_pattern
+        from emend.transform import find_pattern, find_pattern_in_project, replace_pattern
 
-        # Without oracle, type constraints match all
-        matches = find_pattern("$X:type[int] = $Y", str(f))
-        assert len(matches) == 2
+        pattern = f"$X:{constraint} = $Y"
+        with pytest.raises(ValueError, match="requires a type oracle"):
+            find_pattern(pattern, str(f))
+        with pytest.raises(ValueError, match="requires a type oracle"):
+            find_pattern_in_project(pattern, [str(f)])
+        for apply in (False, True):
+            with pytest.raises(ValueError, match="requires a type oracle"):
+                replace_pattern(pattern, "$X = 3", str(f), apply=apply)
+            assert f.read_text() == source
+        from emend.cli import app
+        from emend.type_oracle import PyrightAdapter
+        from typer.testing import CliRunner
+
+        monkeypatch.setattr(PyrightAdapter, "is_available", lambda self: False)
+        result = CliRunner().invoke(app, ["edit", "replace", pattern, "$X = 3",
+                                           str(f), "--type-engine", "pyright", "--apply"])
+        assert result.exit_code != 0
+        assert "requires a type oracle" in result.output
+        assert f.read_text() == source
 
 
 # ---------------------------------------------------------------------------

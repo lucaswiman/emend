@@ -1,13 +1,13 @@
 """Component access, modification, and diff generation."""
 from __future__ import annotations
 
-import difflib
 import re
 from pathlib import Path
 
 from emend import emend_core as _rust
 
 from ..component_selector import ExtendedSelector
+from emend.edit_session import _generate_diff, read_source, write_source
 
 _LIST_COMPONENTS = frozenset({"params", "decorators", "bases", "imports"})
 _PARAMETER_KINDS = frozenset(
@@ -20,7 +20,7 @@ def _read_source(selector: ExtendedSelector) -> tuple[Path, str, str]:
     if not file_path.exists():
         raise FileNotFoundError(f"File not found: {selector.file_path}")
 
-    return file_path, file_path.read_text(), selector.extension
+    return file_path, read_source(file_path), selector.extension
 
 
 def _finish_transform(
@@ -29,6 +29,7 @@ def _finish_transform(
     source_code: str,
     *,
     diff_path: str,
+    extension: str,
     apply: bool,
     error_message: str,
     error_type: type[Exception] = ValueError,
@@ -37,7 +38,7 @@ def _finish_transform(
     if new_code is None:
         raise error_type(error_message)
     if apply:
-        file_path.write_text(new_code)
+        write_source(file_path, new_code, extension=extension)
     return _generate_diff(diff_path, source_code, new_code)
 
 
@@ -114,17 +115,6 @@ def get_component(selector: ExtendedSelector) -> str:
     return result.strip()
 
 
-def _generate_diff(file_path: str, old_code: str, new_code: str) -> str:
-    """Generate unified diff string."""
-    old_lines = old_code.splitlines(keepends=True)
-    new_lines = new_code.splitlines(keepends=True)
-    return ''.join(difflib.unified_diff(
-        old_lines, new_lines,
-        fromfile=file_path,
-        tofile=file_path
-    ))
-
-
 def set_component(selector: ExtendedSelector, value: str, apply: bool = False) -> str:
     """Set value of component. Returns diff."""
     file_path, source_code, ext = _read_source(selector)
@@ -167,6 +157,7 @@ def set_component(selector: ExtendedSelector, value: str, apply: bool = False) -
         file_path,
         source_code,
         diff_path=selector.file_path,
+        extension=ext,
         apply=apply,
         error_message="Failed to apply transformation (overlapping edits)",
         error_type=RuntimeError,
@@ -270,7 +261,8 @@ def add_to_component(
     from .project_iter import _add_import_text
     # Handle module-level imports component
     if selector.component == "imports" and not selector.symbol_path:
-        return _add_import_text(value, position, file_path, apply, source_code, language=selector.language)
+        return _add_import_text(value, position, file_path, apply, source_code,
+                                language=selector.language, extension=ext)
 
     items_info = _rust.get_symbol_component_list_items(
         source_code,
@@ -365,6 +357,7 @@ def add_to_component(
         file_path,
         source_code,
         diff_path=selector.file_path,
+        extension=ext,
         apply=apply,
         error_message=(
             f"Failed to add to component '{selector.component}' in "
@@ -471,6 +464,7 @@ def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
         file_path,
         source_code,
         diff_path=selector.file_path,
+        extension=ext,
         apply=apply,
         error_message=(
             f"Failed to remove component '{selector.component}' from "
