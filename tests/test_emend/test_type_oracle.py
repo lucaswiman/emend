@@ -2425,10 +2425,16 @@ class TestTypeScriptAdapterIntegration:
 
     @pytest.fixture(autouse=True)
     def require_typescript(self):
-        if subprocess.run(["node", "-e", "require.resolve('typescript')"], capture_output=True).returncode:
+        result = subprocess.run(["node", "-p", "require.resolve('typescript/package.json')"], capture_output=True, text=True)
+        if result.returncode:
             pytest.skip("TypeScript dependency is not installed")
+        return Path(result.stdout.strip()).parent
 
-    def test_simple_variable(self, tmp_path):
+    def test_simple_variable(self, tmp_path, monkeypatch, require_typescript):
+        modules = tmp_path / "node_modules"
+        modules.mkdir()
+        (modules / "typescript").symlink_to(require_typescript, target_is_directory=True)
+        monkeypatch.delenv("NODE_PATH", raising=False)
         ts_file = tmp_path / "test.ts"
         prefix = "/* 😀 */ const "
         ts_file.write_text(prefix + "café: string = 'hello';\n")

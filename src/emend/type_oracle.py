@@ -1875,13 +1875,13 @@ class TyAdapter(_LSPTypeOracle):
 # LSP round-trips, making it significantly faster than an LSP-based approach.
 _TS_TYPE_HELPER = """\
 "use strict";
-var ts;
-try { ts = require("typescript"); } catch(e) {
-    process.stderr.write(String(e)); process.exit(1);
-}
 var path = require("path");
 var filePath = path.resolve(process.argv[2]);
 var projectRoot = process.argv[3] || path.dirname(filePath);
+var ts;
+try { ts = require(require.resolve("typescript", {paths:[projectRoot]})); } catch(e) {
+    process.stderr.write(String(e)); process.exit(1);
+}
 var configPath = ts.findConfigFile(projectRoot, ts.sys.fileExists, "tsconfig.json");
 var options = {target:ts.ScriptTarget.ES2020, module:ts.ModuleKind.CommonJS,
     allowJs:true, noEmit:true, strict:false, skipLibCheck:true};
