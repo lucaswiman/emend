@@ -1443,40 +1443,24 @@ class FactGraph:
             entry_point_prefixes, entry_point_qualified_names,
         )
 
-        # Build excluded-path filter clauses for CozoDB.
-        # We need two variants: one using the variable "fp" (for the
-        # ref_by_block rule) and one using "ref_fp" (for the module_level_ref
-        # rule).  Building them separately avoids the brittle
-        # `.replace("fp", "ref_fp")` which would mangle path strings that
-        # happen to contain the substring "fp".
-        excl_clauses = ""
-        excl_clauses_ref = ""
-        excl_parts: list[str] = []
-        excl_parts_ref: list[str] = []
-        if exclude_reference_paths:
-            for ep in exclude_reference_paths:
-                excl_parts.append(f'not starts_with(fp, "{ep}")')
-                excl_parts_ref.append(f'not starts_with(ref_fp, "{ep}")')
-        if exclude_reference_segments:
-            for seg in exclude_reference_segments:
-                # Match paths containing this directory segment
-                excl_parts.append(f'not str_includes(fp, "{seg}/")')
-                excl_parts.append(f'not str_includes(fp, "{seg}\\\\")')
-                excl_parts_ref.append(f'not str_includes(ref_fp, "{seg}/")')
-                excl_parts_ref.append(f'not str_includes(ref_fp, "{seg}\\\\")')
-        excluded_file_rules = ""
-        if exclude_reference_files:
-            excluded_file_rules = self._inline_relation(
-                "excluded_reference_file",
-                ["fp"],
-                [(file_path,) for file_path in exclude_reference_files],
-            )
-            excl_parts.append("not excluded_reference_file[fp]")
-            excl_parts_ref.append("not excluded_reference_file[ref_fp]")
-        if excl_parts:
-            excl_clauses = ", " + ", ".join(excl_parts)
-        if excl_parts_ref:
-            excl_clauses_ref = ", " + ", ".join(excl_parts_ref)
+        # Compatibility path options resolve to exact files, just like callers
+        # supplying an inventory. Never interpolate filesystem data as syntax.
+        excluded_files = set(exclude_reference_files or [])
+        if exclude_reference_paths or exclude_reference_segments:
+            paths = [Path(path) for path in exclude_reference_paths or []]
+            rows = self._client.run(
+                '?[fp] := *reference[_, fp, _, _, _, _, _]\n'
+                '?[fp] := *method_call[fp, _, _, _, _, _]\n'
+                '?[fp] := *noncall_private_member_ref[fp, _, _, _]'
+            )["rows"]
+            excluded_files.update(fp for (fp,) in rows if
+                any(Path(fp).is_relative_to(path) for path in paths)
+                or set(exclude_reference_segments or []) & set(Path(fp).parts[:-1]))
+        excluded_file_rules = self._inline_relation(
+            "excluded_reference_file", ["fp"], [(fp,) for fp in sorted(excluded_files)],
+        )
+        excl_clauses = ", not excluded_reference_file[fp]"
+        excl_clauses_ref = ", not excluded_reference_file[ref_fp]"
 
         query = (
             seed_rules + excluded_file_rules +

@@ -48,6 +48,26 @@ def dead_module_names(project: Path, **kwargs) -> set[str]:
     }
 
 
+@pytest.mark.parametrize("directory,pattern,excluded", [
+    ("legacy_new", "legacy", False), ("legacy", "legacy/*.py", True),
+    ('odd"dir', 'odd"dir', True), ("legacy", "legacy", True),
+])
+@pytest.mark.parametrize("reference", ["helper()", 'registry = "helper"'])
+def test_reference_exclusion_matches_exact_inventory(tmp_path, directory, pattern, excluded, reference):
+    from emend.transform import find_dead_code
+    project = make_project(tmp_path, {
+        "demo.py": "def helper():\n    return 42\n",
+        f"{directory}/use.py": f"from demo import helper\n{reference}\n",
+    })
+    options = dict(all_files=True, show_last_reference=False, unused_modules=False)
+    assert not list(find_dead_code(str(project), **options))
+    dead = list(find_dead_code(str(project), exclude_references_from=[pattern], **options))
+    assert {item.name for item in dead} == ({"helper"} if excluded else set())
+    assert ("demo" in dead_module_names(
+        project, exclude_references_from=[pattern], show_last_reference=False,
+    )) == excluded
+
+
 def test_unused_dependencies_are_summaries_not_independent_findings(tmp_path, run_emend_cmd):
     project = make_project(tmp_path, {"lib.py": (
         "def root():\n    branch()\n    shared()\n    callback()\n"
@@ -527,26 +547,32 @@ class TestFindDeadCode:
         assert "UnusedClass" in names
         assert "unused_func" not in names
 
-    def test_returns_correct_fields(self, tmp_path):
+    @pytest.mark.parametrize("source,local_name,kind,line", [
+        ("def orphan():\n    return 42\n", "orphan", "function", 1),
+        ("class Existing:\n    def _orphan(self):\n        return 42\n"
+         "    def keep(self):\n        pass\ninstance = Existing()\n",
+         "Existing._orphan", "method", 2),
+    ])
+    def test_returns_correct_fields(self, tmp_path, source, local_name, kind, line):
         """DeadSymbol has correct file_path, name, kind, line, selector."""
         from emend.transform import find_dead_code
 
         project = make_project_dir(tmp_path)
 
         main_file = project / "main.py"
-        main_file.write_text(
-            "def orphan():\n"
-            "    return 42\n"
-        )
+        main_file.write_text(source)
 
         dead = list(find_dead_code(str(project), unused_modules=False))
         assert len(dead) == 1
         d = dead[0]
-        assert d.name == "orphan"
-        assert d.kind == "function"
-        assert d.line == 1
+        assert d.name == local_name.split(".")[-1]
+        assert d.kind == kind
+        assert d.line == line
         assert "main.py" in d.file_path
-        assert "orphan" in d.selector
+        from emend.component_selector import parse_extended_selector
+        from emend.transform.deadcode import safe_delete
+        assert d.selector == f"{main_file}::{local_name}"
+        assert safe_delete(parse_extended_selector(d.selector)).deletions[0]["name"] == d.name
         assert d.reason == "no references found"
 
     def test_empty_project(self, tmp_path):

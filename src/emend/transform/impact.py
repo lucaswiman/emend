@@ -1,10 +1,12 @@
 """Impact analysis: find what code is affected by changes."""
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 import logging
+import json
 import re
+import subprocess
 
 if TYPE_CHECKING:
     from ..component_selector import ExtendedSelector
@@ -65,43 +67,50 @@ def impact_projection(
     return data
 
 
-def _parse_diff_to_changed_files(diff_text: str) -> list[tuple[str, list[int]]]:
-    """Parse unified diff output to extract changed file paths and line numbers.
+@dataclass
+class _DiffFile:
+    paths: list[str | None] = field(default_factory=lambda: [None, None])
+    blobs: list[str] = field(default_factory=lambda: ["", ""])
+    lines: list[list[int]] = field(default_factory=lambda: [[], []])
 
-    Returns a list of (file_path, changed_lines) tuples where changed_lines
-    are the line numbers in the *new* version of the file that were modified.
-    """
-    results: list[tuple[str, list[int]]] = []
-    current_file: str | None = None
-    changed_lines: list[int] = []
 
+def _parse_diff(diff_text: str) -> list[_DiffFile]:
+    """Keep both coordinate spaces and blob identities of a Git patch."""
+    files: list[_DiffFile] = []
+    in_hunk = False
     for line in diff_text.splitlines():
-        # Detect file header: +++ b/path/to/file.py
-        if line.startswith('+++ b/'):
-            # Save previous file if any
-            if current_file is not None:
-                results.append((current_file, changed_lines))
-            current_file = line[6:]  # strip '+++ b/'
-            changed_lines = []
-        # Detect hunk header: @@ -old_start,old_count +new_start,new_count @@
-        elif line.startswith('@@') and current_file is not None:
-            m = re.search(r'\+(\d+)(?:,(\d+))?', line)
-            if m:
-                start = int(m.group(1))
-                count = int(m.group(2)) if m.group(2) else 1
-                # Track all lines in the hunk range as potentially changed
-                changed_lines.extend(range(start, start + count))
+        if line.startswith("diff --git "):
+            files.append(_DiffFile())
+            in_hunk = False
+        elif files:
+            current = files[-1]
+            if match := re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line):
+                in_hunk = True
+                for side in (0, 1):
+                    start, count = match.groups()[side * 2:side * 2 + 2]
+                    current.lines[side].extend(range(int(start), int(start) + int(count or 1)))
+            elif in_hunk:
+                continue
+            elif line.startswith("index "):
+                current.blobs = line.split()[1].split("..")
+            elif line.startswith(("--- ", "+++ ")):
+                path = line[4:].removesuffix("\t")
+                if path.startswith('"'):
+                    path = json.loads(path)
+                current.paths[line.startswith("+++")] = None if path == "/dev/null" else path[2:]
+    return files
 
-    # Don't forget the last file
-    if current_file is not None:
-        results.append((current_file, changed_lines))
 
-    return results
+def _parse_diff_to_changed_files(diff_text: str) -> list[tuple[str, list[int]]]:
+    """Compatibility projection of changed lines in the new version only."""
+    return [(f.paths[1], f.lines[1]) for f in _parse_diff(diff_text) if f.paths[1] is not None]
 
 
 def _parse_diff_to_selectors(
     diff_spec: str,
     project_path: str,
+    *,
+    identities: dict[str, str] | None = None,
 ) -> list[str]:
     """Run ``git diff`` and map changed lines to symbol selectors.
 
@@ -112,10 +121,9 @@ def _parse_diff_to_selectors(
     Returns:
         List of selector strings for symbols touched by the diff.
     """
-    import subprocess
-
     result = subprocess.run(
-        ['git', 'diff', '-U0', diff_spec],
+        ['git', '-c', 'core.quotepath=false', 'diff', '--no-ext-diff', '--no-textconv',
+         '--no-renames', '--full-index', '-U0', diff_spec, '--'],
         capture_output=True, text=True, timeout=30,
         cwd=project_path,
     )
@@ -124,43 +132,40 @@ def _parse_diff_to_selectors(
             f"git diff failed (exit {result.returncode}): {result.stderr.strip()}"
         )
 
-    changed_files = _parse_diff_to_changed_files(result.stdout)
-    if not changed_files:
-        return []
-
     from emend.ast_utils import find_nested_definitions, find_symbol_by_line
+    from emend.language_registry import is_source_file
+    from emend.project_config import module_name_for_file
+    from emend.analysis_linking import _normalize_qn
 
     selectors: list[str] = []
     seen: set[str] = set()
 
-    for file_rel, lines in changed_files:
-        file_path = str(Path(project_path) / file_rel)
-        if not Path(file_path).is_file():
-            continue
-
-        # Only process source files we can parse
-        from emend.language_registry import is_source_file
-        if not is_source_file(file_path):
-            continue
-
-        try:
-            symbols = find_nested_definitions(file_path)
-        except BUG_EXCEPTIONS:
-            raise
-        except Exception:
-            logger.debug(
-                "could not collect symbols from %s, skipping", file_path,
-                exc_info=True,
+    for changed in _parse_diff(result.stdout):
+        for side, file_rel in enumerate(changed.paths):
+            if file_rel is None or not changed.lines[side] or not is_source_file(file_rel):
+                continue
+            file_path = str(Path(project_path).resolve() / file_rel)
+            blob = subprocess.run(
+                ['git', 'cat-file', 'blob', changed.blobs[side]],
+                cwd=project_path, capture_output=True, text=True, timeout=30,
             )
-            continue
-
-        for line_no in lines:
-            sym = find_symbol_by_line(symbols, line_no)
-            if sym is not None:
-                sel = f"{file_path}::{'.'.join(sym.path)}"
-                if sel not in seen:
-                    seen.add(sel)
-                    selectors.append(sel)
+            if blob.returncode and side == 0:
+                raise ValueError(f"Cannot read pre-change source: {file_rel}")
+            # Git does not store worktree blobs. Committed range endpoints,
+            # however, must be parsed from their blobs, not today's worktree.
+            source = Path(file_path).read_text() if blob.returncode else blob.stdout
+            symbols = find_nested_definitions(file_path, source_override=source)
+            for line_no in changed.lines[side]:
+                sym = find_symbol_by_line(symbols, line_no)
+                if sym is not None:
+                    local_name = '.'.join(sym.path)
+                    sel = f"{file_path}::{local_name}"
+                    if identities is not None:
+                        module = _normalize_qn(module_name_for_file(file_path, project_path))
+                        identities[sel] = '.'.join(filter(None, (module, local_name)))
+                    if sel not in seen:
+                        seen.add(sel)
+                        selectors.append(sel)
 
     return selectors
 
@@ -198,6 +203,8 @@ def _find_impact_via_fact_graph(
     changed_selectors: list[str],
     proj_root: str,
     max_depth: int = 10,
+    *,
+    identities: dict[str, str] | None = None,
 ) -> ImpactResult | None:
     """Compute impact using the owner's current project fact generation."""
     from emend.analysis_store import AnalysisStore
@@ -206,7 +213,6 @@ def _find_impact_via_fact_graph(
 
     # Resolve selectors to module-qualified names (mqn) in facts.db.
     changed_mqns: set[str] = set()
-    sel_to_mqn: dict[str, str] = {}
     mqn_to_sel: dict[str, str] = {}
 
     for sel_str in changed_selectors:
@@ -240,9 +246,14 @@ def _find_impact_via_fact_graph(
             if result["rows"]:
                 mqn = result["rows"][0][0]
                 changed_mqns.add(mqn)
-                sel_to_mqn[sel_str] = mqn
                 mqn_to_sel[mqn] = sel_str
                 break
+
+    resolved = set(mqn_to_sel.values())
+    for sel_str, mqn in (identities or {}).items():
+        if sel_str not in resolved:
+            changed_mqns.add(mqn)
+            mqn_to_sel[mqn] = sel_str
 
     if not changed_mqns:
         return ImpactResult(
@@ -253,9 +264,7 @@ def _find_impact_via_fact_graph(
         )
 
     # Build a depth-bounded reverse closure over the canonical call relation.
-    seed_rows = ", ".join(f'["{mqn}"]' for mqn in changed_mqns)
-
-    rules = [f"changed[x] <- [{seed_rows}]\n"]
+    rules = ["changed[x] <- $changed\n"]
 
     rules.append(
         'call_edge[caller_mqn, callee_mqn] := '
@@ -287,11 +296,11 @@ def _find_impact_via_fact_graph(
     rules.append(
         "?[caller_mqn, caller_fp, caller_name, callee_mqn] := "
         "edge[caller_mqn, callee_mqn], not changed[caller_mqn], "
-        "*symbol[caller_mqn, caller_fp, caller_name, _, _, _, _]"
+        "*search_symbol[caller_fp, caller_mqn, _, caller_name, _, _, _, _, _, _, _, _]"
     )
 
     try:
-        result = fdb.run("".join(rules))
+        result = fdb.run("".join(rules), {"changed": [[mqn] for mqn in changed_mqns]})
     except Exception:
         logger.debug("facts.db impact query failed", exc_info=True)
         return None
@@ -302,16 +311,13 @@ def _find_impact_via_fact_graph(
     seen_impacted: set[str] = set()
 
     abs_root = str(Path(proj_root).resolve())
+    # Complete the projection before rendering any edge: row ordering is not
+    # graph traversal ordering, and both endpoints must use selector identities.
+    for mqn, fp, local_name, _ in result["rows"]:
+        mqn_to_sel.setdefault(mqn, f"{Path(abs_root) / fp}::{local_name}")
     for row in result["rows"]:
         caller_mqn, caller_fp, caller_name, callee_mqn = row[0], row[1], row[2], row[3]
 
-        # Convert relative path back to absolute for selectors.
-        if not Path(caller_fp).is_absolute():
-            caller_fp = str(Path(abs_root) / caller_fp)
-
-        # Build selector for the caller
-        if caller_mqn not in mqn_to_sel:
-            mqn_to_sel[caller_mqn] = f"{caller_fp}::{caller_name}"
         caller_sel = mqn_to_sel[caller_mqn]
         callee_sel = mqn_to_sel.get(callee_mqn, callee_mqn)
 
@@ -413,6 +419,7 @@ def find_impact(
 
     # Step 1: Determine changed symbols
     changed_selectors: list[str] = []
+    identities: dict[str, str] = {}
 
     if selectors:
         for sel in selectors:
@@ -422,7 +429,7 @@ def find_impact(
                 )
 
     if diff_spec:
-        diff_sels = _parse_diff_to_selectors(diff_spec, proj_root)
+        diff_sels = _parse_diff_to_selectors(diff_spec, proj_root, identities=identities)
         changed_selectors.extend(diff_sels)
 
     if not changed_selectors:
@@ -435,7 +442,7 @@ def find_impact(
 
     # Datalog query on the persisted facts.db.
     dl_result = _find_impact_via_fact_graph(
-        changed_selectors, proj_root, max_depth=max_depth,
+        changed_selectors, proj_root, max_depth=max_depth, identities=identities,
     )
     if dl_result is not None:
         return dl_result
