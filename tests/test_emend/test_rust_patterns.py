@@ -10,6 +10,22 @@ from emend.pattern import compile_pattern_to_rust_ir
 from emend.transform import find_pattern
 
 
+@pytest.mark.parametrize("extension, source, pattern, capture", [
+    ("rs", "fn main() { let result = emit(1); }\n", "let $X = $Y;", "result"),
+    ("rs", "fn main() { let result: i32 = emit(1); }\n", "let $X: i32 = $Y;", "result"),
+    ("rs", "fn main() { let result: i32; }\n", "let $X: i32;", "result"),
+    ("rs", "fn main() { let result; }\n", "let $X;", "result"),
+    ("py", "result: int\n", "$X: int", "result"),
+    ("py", "result: int = 1\n", "$X: int = $Y", "result"),
+    ("py", "result = emit(1)\n", "$X = $Y", "result"),
+])
+def test_declaration_assignment_fields(tmp_path, extension, source, pattern, capture):
+    path = tmp_path / f"app.{extension}"
+    path.write_text(source)
+    matches = find_pattern(pattern, str(path))
+    assert [m.captures["X"] for m in matches] == [capture]
+
+
 def _rust_match(file_contents, pattern_str):
     """Run pattern matching via the Rust fast-path directly.
 

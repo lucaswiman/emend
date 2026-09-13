@@ -784,7 +784,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                 )
             })?;
             let annotation = deserialize_pattern(&ann_obj)?;
-            let value = if let Some(v_obj) = d.get_item("value")? {
+            let value = if let Some(v_obj) = d.get_item("value")?.filter(|value| !value.is_none()) {
                 Some(Box::new(deserialize_pattern(&v_obj)?))
             } else {
                 None
@@ -1398,6 +1398,14 @@ impl Captures {
     }
 }
 
+fn assignment_target<'a>(node: Node<'a>, config: &LanguageConfig) -> Option<Node<'a>> {
+    let field = config.bindings.assignment.iter()
+        .find(|rule| rule.node == node.kind())
+        .map(|rule| rule.target.as_str())
+        .unwrap_or(&config.pattern_matching.left_field);
+    node.child_by_field_name(field)
+}
+
 /// Match a tree-sitter node against a pattern node.
 /// Returns Some(node) if it matches, where 'node' is the node to use for
 /// positional information (usually the node itself, but may be a child
@@ -1868,23 +1876,32 @@ fn matches_node<'a>(
             annotation,
             value,
         } => {
-            if node.kind() != config.pattern_matching.annotated_assignment {
+            if node.kind() != config.pattern_matching.annotated_assignment
+                && node.kind() != config.pattern_matching.assignment {
                 return None;
             }
-            let left_node = match node.child_by_field_name(&config.pattern_matching.left_field) {
+            let left_node = match assignment_target(node, config) {
                 Some(n) => n,
                 None => return None,
             };
-            let type_node = match node.child_by_field_name(&config.pattern_matching.annotation_field) {
+            let mut type_node = match node.child_by_field_name(&config.pattern_matching.annotation_field) {
                 Some(n) => n,
                 None => return None,
             };
+            // Ignore grammar-only annotation wrappers, without stripping
+            // syntax such as reference markers or generic arguments.
+            while type_node.named_child_count() == 1 {
+                let child = type_node.named_child(0).unwrap();
+                if child.byte_range() != type_node.byte_range() { break; }
+                type_node = child;
+            }
             if matches_node(left_node, source, target, captures, config).is_none()
                 || matches_node(type_node, source, annotation, captures, config).is_none()
             {
                 return None;
             }
-            match (value, node.child_by_field_name(&config.pattern_matching.value_field)) {
+            match (value, node.child_by_field_name(&config.pattern_matching.right_field)
+                .or_else(|| node.child_by_field_name(&config.pattern_matching.value_field))) {
                 (Some(p), Some(n)) => {
                     if matches_node(n, source, p, captures, config).is_some() {
                         Some(node)
@@ -2105,7 +2122,8 @@ fn matches_node<'a>(
         }
 
         PatternNode::Assign { target, value } => {
-            if node.kind() != config.pattern_matching.assignment.as_str() {
+            if node.kind() != config.pattern_matching.assignment
+                && node.kind() != config.pattern_matching.annotated_assignment {
                 return None;
             }
             // Some grammars represent annotated assignments with the same
@@ -2116,11 +2134,12 @@ fn matches_node<'a>(
             {
                 return None;
             }
-            let left_node = match node.child_by_field_name("left") {
+            let left_node = match assignment_target(node, config) {
                 Some(n) => n,
                 None => return None,
             };
-            let right_node = match node.child_by_field_name("right") {
+            let right_node = match node.child_by_field_name(&config.pattern_matching.right_field)
+                .or_else(|| node.child_by_field_name(&config.pattern_matching.value_field)) {
                 Some(n) => n,
                 None => return None,
             };
@@ -4103,7 +4122,9 @@ fn node_to_ir<'a>(
     }
     if kind == pm.named_expr
         || kind == pm.augmented_assignment
-        || kind == pm.annotated_assignment
+        || (kind == pm.annotated_assignment
+            && (node.child_by_field_name(&pm.annotation_field).is_some()
+                || node.child_by_field_name(&pm.value_field).is_some()))
         || (kind == pm.assignment && node.child_by_field_name(&pm.annotation_field).is_some())
     {
         let annotated = node.child_by_field_name(&pm.annotation_field);
@@ -4113,14 +4134,16 @@ fn node_to_ir<'a>(
                 "named_expr"
             } else if annotated.is_some() {
                 "ann_assign"
-            } else {
+            } else if kind == pm.augmented_assignment {
                 "aug_assign"
+            } else {
+                "assign"
             },
         )
         .unwrap();
         set_node(
             "target",
-            node.child_by_field_name(&pm.left_field)
+            assignment_target(node, config)
                 .or_else(|| node.child_by_field_name("name")),
         );
         set_node(
