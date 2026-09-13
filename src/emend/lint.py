@@ -53,6 +53,7 @@ class LintViolation:
     col: int = 0
     match_text: str = ""
     witness: FlowWitness | None = None
+    end_line: int | None = None
 
 
 def load_duplicate_code_config(
@@ -244,6 +245,7 @@ def run_lint(
                     message=rule.message,
                     file_path=file_path_str,
                     line=line,
+                    end_line=_end_line,
                     match_text=text.strip(),
                 ))
 
@@ -314,6 +316,7 @@ def run_lint(
                     message=rule.message,
                     file_path=file_path,
                     line=match.line or 0,
+                    end_line=match.end_line,
                     match_text=match_text,
                 ))
         return file_violations
@@ -539,6 +542,7 @@ def run_lint(
                     message=f"{deadcode_config.message}: {name}",
                     file_path=d.file_path,
                     line=line,
+                    end_line=getattr(d, "end_line", None),
                     match_text=match_text,
                 ))
         except BUG_EXCEPTIONS:

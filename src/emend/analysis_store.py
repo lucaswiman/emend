@@ -610,20 +610,22 @@ class AnalysisStore:
                     extracted = ExtractedFile(revision, cached.qnames, cached.rows)
                 return key, extracted, payload is None, preparation
 
-            from concurrent.futures import ThreadPoolExecutor
-            from collections import deque
+            from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+            from itertools import islice
 
             with ThreadPoolExecutor(max_workers=jobs) as pool:
                 def completed_files():
-                    futures = deque()
-                    for item in pending:
+                    items = iter(pending)
+                    def submit(item):
                         if started is not None:
                             started(item[0])
-                        futures.append(pool.submit(extract, item))
-                        if len(futures) == (jobs or 8):
-                            yield futures.popleft().result()
+                        return pool.submit(extract, item)
+                    futures = {submit(item) for item in islice(items, jobs or 8)}
                     while futures:
-                        yield futures.popleft().result()
+                        done, futures = wait(futures, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            yield future.result()
+                        futures.update(submit(item) for item in islice(items, len(done)))
                 extracted_files = completed_files()
                 for key, extracted, fresh, preparation in extracted_files:
                     if prepared is not None:

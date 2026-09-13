@@ -10,7 +10,8 @@ import re
 
 
 def _run(root, *args, required=True):
-    result = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=30)
+    result = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True,
+                            errors="surrogateescape", timeout=30)
     if required and result.returncode:
         raise ValueError(result.stderr.strip() or "Git command failed")
     return result.stdout.removesuffix("\n") if result.returncode == 0 else None
@@ -70,12 +71,17 @@ def _gh(root, *args):
             pass
 
 
-def resolve_diff(spec, path="."):
-    """Return repository root and an explicit Git diff spec, without fetching."""
+def repository_root(path="."):
+    """Resolve the coordinate origin of Git paths, independently of analysis scope."""
     candidate = Path(str(path).split("::", 1)[0]).resolve()
     while not candidate.is_dir():
         candidate = candidate.parent
-    root = Path(_run(candidate, "rev-parse", "--show-toplevel"))
+    return Path(_run(candidate, "rev-parse", "--show-toplevel"))
+
+
+def resolve_diff(spec, path="."):
+    """Return repository root and an explicit Git diff spec, without fetching."""
+    root = repository_root(path)
     if spec != "auto":
         if spec.startswith("-"):
             raise ValueError("Expected a Git revision or range, not an option")

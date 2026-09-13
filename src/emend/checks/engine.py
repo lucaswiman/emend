@@ -23,6 +23,7 @@ class CheckViolation:
     line: int
     col: int = 0
     witness: list[str] | None = None
+    end_line: int | None = None
 
 
 def _lint_kind(rule: "LintRule") -> str:
@@ -111,6 +112,7 @@ def _lint_violations_to_checks(
             message=violation.message,
             file_path=violation.file_path,
             line=violation.line,
+            end_line=violation.end_line,
             col=violation.col,
             witness=witness,
         ))
@@ -126,6 +128,7 @@ def _policy_violations_to_checks(violations: "list[PolicyViolation]") -> list[Ch
             message=v.message,
             file_path=v.file_path,
             line=v.line,
+            end_line=v.end_line,
             col=v.col,
             witness=v.witness,
         )

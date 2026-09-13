@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from ..component_selector import ExtendedSelector
 
 from emend.errors import BUG_EXCEPTIONS
-from emend.git_diff import _parse_diff, read_diff
+from emend.git_diff import _parse_diff, read_diff, repository_root
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,8 @@ def _parse_diff_to_selectors(
     Returns:
         List of selector strings for symbols touched by the diff.
     """
-    changes = read_diff(project_path, diff_spec)
+    root = repository_root(project_path)
+    changes = read_diff(root, diff_spec)
 
     from emend.ast_utils import find_nested_definitions, find_symbol_by_line
     from emend.language_registry import is_source_file
@@ -100,10 +101,10 @@ def _parse_diff_to_selectors(
         for side, file_rel in enumerate(changed.paths):
             if file_rel is None or not changed.lines[side] or not is_source_file(file_rel):
                 continue
-            file_path = str(Path(project_path).resolve() / file_rel)
+            file_path = str(root / file_rel)
             blob = subprocess.run(
                 ['git', 'cat-file', 'blob', changed.blobs[side]],
-                cwd=project_path, capture_output=True, text=True, timeout=30,
+                cwd=root, capture_output=True, text=True, timeout=30,
             )
             if blob.returncode and side == 0:
                 raise ValueError(f"Cannot read pre-change source: {file_rel}")

@@ -110,7 +110,11 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
     for members in postings.values():
         if len(members) <= 40:
             for position, right in enumerate(members):
-                neighbors[right].update(members[:position])
+                peers = members[:position]
+                if not functions[right]["selected"]:
+                    peers = [left for left in peers if functions[left]["selected"]]
+                if peers:
+                    neighbors[right].update(peers)
 
     findings = []
     for right, counts in neighbors.items():
@@ -121,8 +125,6 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
                 continue
             # Nested functions share text with their enclosing function.
             if a["path"] == b["path"] and max(a["start"], b["start"]) < min(a["end"], b["end"]):
-                continue
-            if not (a["selected"] or b["selected"]):
                 continue
             matcher = SequenceMatcher(None, a["tokens"], b["tokens"], autojunk=False)
             if matcher.quick_ratio() < min_similarity or matcher.ratio() < min_similarity:

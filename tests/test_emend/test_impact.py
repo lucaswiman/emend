@@ -446,6 +446,8 @@ class TestImpactWithDiff:
         original = ("def greet():\n" if ext == "py" else "export function greet() {\n")
         original += "    print('hello')\n    return 'hello'\n" + ("" if ext == "py" else "}\n")
         lib.write_text(original)
+        notes = project / "notes.txt"
+        notes.write_bytes(b"caf\xe9\n")
         test_file = project / f"test_lib.{ext}"
         test_file.write_text(
             "from pkg.lib import greet\ndef test_greet():\n    assert greet() == 'hello'\n"
@@ -454,6 +456,7 @@ class TestImpactWithDiff:
         )
         git("add", ".")
         git("commit", "-m", "init")
+        notes.write_bytes(b"caf\xe9 updated\n")
 
         # Modify the file (unstaged change -- git diff HEAD will pick it up)
         if change == "delete_file":
@@ -466,6 +469,9 @@ class TestImpactWithDiff:
             }[change])
 
         from emend.transform import find_impact
+        from emend.transform.impact import _parse_diff_to_selectors
+
+        assert _parse_diff_to_selectors("HEAD", str(project / "pkg")) == [f"{lib}::greet"]
 
         result = find_impact(diff_spec="HEAD", project_path=str(project))
 

@@ -192,25 +192,33 @@ def test_index_cli_reports_long_running_phases(monkeypatch, tmp_path):
 
 
 def test_index_progress_covers_all_fact_files(tmp_path, monkeypatch):
+    from threading import Event
     from emend import analysis_extraction
     from emend.transform import warm_caches
 
-    sources = {"a.py": SOURCE, "b.js": "function example() { return 1; }"}
+    sources = {"a.py": SOURCE, "b.js": "function example() { return 1; }", "c.py": SOURCE}
     for name, source in sources.items():
         (tmp_path / name).write_text(source)
     (tmp_path / "static").mkdir()
     (tmp_path / "static" / "bundle.js").write_text(sources["b.js"])
     events = []
+    replenished = Event()
+    progressed = []
     extract = analysis_extraction._extract_file_facts
 
     def checked_extract(revision, *args):
         assert ("start", revision.file_path) in events
+        if Path(revision.file_path).name == "a.py":
+            progressed.append(replenished.wait(3))
+        elif Path(revision.file_path).name == "c.py":
+            replenished.set()
         return extract(revision, *args)
 
     monkeypatch.setattr(analysis_extraction, "_extract_file_facts", checked_extract)
     warm_caches(str(tmp_path), jobs=2, type_engine="none",
                 callback=lambda *event: events.append(event))
-    assert ("total", "2") in events
+    assert progressed == [True], "a slow first file must not stall other workers"
+    assert ("total", "3") in events
     for phase in ("start", "index"):
         assert {Path(path).name for kind, path in events if kind == phase} == sources.keys()
 

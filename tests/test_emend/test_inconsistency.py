@@ -2,6 +2,7 @@
 
 import pytest
 import json
+from pathlib import Path
 from typer.testing import CliRunner
 
 from emend.inconsistency import find_inconsistencies
@@ -17,7 +18,7 @@ def test_near_cli_usage(arguments, status, monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("change", ["guard", "operator", "literal", "rename", "parameter_order", "docstring", "parenthesized_docstring", "indentation", "fstring", "comma", "multi", "non_python"])
-def test_near_clone_differences(tmp_path, change):
+def test_near_clone_differences(tmp_path, change, monkeypatch):
     original = '''def process(items, fallback):
     result = []
     for item in items:
@@ -63,7 +64,13 @@ def test_near_clone_differences(tmp_path, change):
         short = CliRunner().invoke(app, ["dupes", str(tmp_path), "--near", "--min-lines", "100", "--json"])
         assert short.exit_code == 0 and json.loads(short.output) == []
         assert find_inconsistencies(files, location_filter=lambda path, start, end: start <= 7 <= end)
-        assert find_inconsistencies(files, location_filter=lambda *args: False) == []
+        for file in files:
+            assert find_inconsistencies(files, location_filter=lambda path, *args: Path(path) == file) == findings
+        def unexpected_candidates():
+            pytest.fail("unselected functions should not generate candidate pairs")
+        with monkeypatch.context() as patch:
+            patch.setattr("emend.inconsistency.Counter", unexpected_candidates)
+            assert find_inconsistencies(files, location_filter=lambda *args: False) == []
     assert len(findings) == (0 if change in {"rename", "docstring", "parenthesized_docstring", "comma", "multi", "non_python"} else 1)
     if change == "multi":
         relaxed = find_inconsistencies(files, max_regions=3)
