@@ -2422,18 +2422,24 @@ _has_node = shutil.which("node") is not None
 class TestTypeScriptAdapterIntegration:
     """Integration tests for TypeScriptAdapter (requires node + typescript)."""
 
+    @pytest.fixture(autouse=True)
+    def require_typescript(self):
+        if subprocess.run(["node", "-e", "require.resolve('typescript')"], capture_output=True).returncode:
+            pytest.skip("TypeScript dependency is not installed")
+
     def test_simple_variable(self, tmp_path):
         ts_file = tmp_path / "test.ts"
-        ts_file.write_text("const greeting: string = 'hello';\n")
+        prefix = "/* 😀 */ const "
+        ts_file.write_text(prefix + "café: string = 'hello';\n")
         adapter = TypeScriptAdapter(db_path=None)
         ft = adapter.infer_file(ts_file, project_root=tmp_path)
-        if not ft.bindings:
-            pytest.skip("TypeScript toolchain produced no bindings")
-        names = {b.name for b in ft.bindings}
-        assert "greeting" in names
-        greeting_bindings = ft.types_for_name("greeting")
-        assert greeting_bindings
-        assert "string" in greeting_bindings[0].raw_type
+        assert ft.complete
+        binding = ft.type_at(1, len(prefix.encode()) + 1)
+        assert binding is not None and binding.name == "café"
+        assert binding.col_end == len((prefix + "café").encode()) + 1
+        assert "string" in binding.raw_type
+        from emend.transform import find_pattern
+        assert [m.node_text for m in find_pattern("$X:type[string]", str(ts_file), type_oracle=adapter)] == ["café"]
 
     def test_function_types(self, tmp_path):
         ts_file = tmp_path / "test.ts"
@@ -2445,8 +2451,7 @@ class TestTypeScriptAdapterIntegration:
         """))
         adapter = TypeScriptAdapter(db_path=None)
         ft = adapter.infer_file(ts_file, project_root=tmp_path)
-        if not ft.bindings:
-            pytest.skip("TypeScript toolchain produced no bindings")
+        assert ft.complete
         names = {b.name for b in ft.bindings}
         assert "add" in names or "result" in names
 
@@ -2455,8 +2460,7 @@ class TestTypeScriptAdapterIntegration:
         ts_file.write_text("const items: Array<string> = ['a', 'b'];\n")
         adapter = TypeScriptAdapter(db_path=None)
         ft = adapter.infer_file(ts_file, project_root=tmp_path)
-        if not ft.bindings:
-            pytest.skip("TypeScript toolchain produced no bindings")
+        assert ft.complete
         items = ft.types_for_name("items")
         assert items
         assert "string" in items[0].raw_type

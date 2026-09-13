@@ -1921,8 +1921,10 @@ function visit(node) {
                             ts.isPropertyDeclaration(par) || ts.isInterfaceDeclaration(par) ||
                             ts.isTypeAliasDeclaration(par)) && par.name === node)
                             kind = "definition";
-                        bindings.push({name:node.text, line:p.line+1, col_start:p.character+1,
-                            col_end:p.character+1+node.text.length, type:s, kind:kind});
+                        var col = Buffer.byteLength(sf.text.slice(
+                            sf.getPositionOfLineAndCharacter(p.line, 0), node.getStart(sf)), "utf8") + 1;
+                        bindings.push({name:node.text, line:p.line+1, col_start:col,
+                            col_end:col+Buffer.byteLength(node.getText(sf), "utf8"), type:s, kind:kind});
                     }
                 }
             } catch(e) {}
@@ -1961,6 +1963,7 @@ class TypeScriptAdapter(TypeOracle):
         self._extra_args = extra_args or []
         self._cache_engine = "typescript"
         self._cache_engine_options = {
+            "column_encoding": "utf8",
             "node_path": self._node,
             "extra_args": tuple(self._extra_args),
         }
