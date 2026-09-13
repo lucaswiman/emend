@@ -29,6 +29,15 @@ def store(tmp_path):
 
 
 class TestMappings:
+    def test_separate_stores_preserve_updates(self, tmp_path):
+        first, second = MappingStore(str(tmp_path)), MappingStore(str(tmp_path / "."))
+        first.add_module_mapping(ModuleMapping(module_prefix="a", local_path="/a"))
+        second.add_module_mapping(ModuleMapping(module_prefix="b", local_path="/b"))
+        assert {m.module_prefix for m in first.list_module_mappings()} == {"a", "b"}
+        assert first.delete_module_mapping_by_prefix("a")
+        assert [m.module_prefix for m in second.list_module_mappings()] == ["b"]
+        assert [m.module_prefix for m in MappingStore(str(tmp_path)).list_module_mappings()] == ["b"]
+
     def test_add_and_search(self, store):
         m = IdentifierMapping(
             source_project="user-service",

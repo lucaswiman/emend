@@ -97,7 +97,7 @@ def run_lint(
     rule_filter: str | None = None,
     deadcode_config: DeadCodeConfig | None = None,
     project_path: str | None = None,
-    language: str = "python",
+    language: str | None = None,
     duplicate_code_config: DuplicateCodeConfig | None = None,
     compiled_flows=None,
 ) -> list[LintViolation]:
@@ -122,7 +122,7 @@ def run_lint(
     # Build per-file language map for auto-detection
     file_languages: dict[str, str] = {}
     for fp in paths:
-        file_languages[fp] = _detect_file_language(fp, fallback=language)
+        file_languages[fp] = _detect_file_language(fp, fallback=language or "python")
 
     # Separate flow rules, DSL rules, and pattern rules
     flow_rules = [r for r in rules if r.flows_from and r.flows_to]
@@ -144,7 +144,7 @@ def run_lint(
     # involved).
     for fp in all_file_contents:
         if fp not in file_languages:
-            file_languages[fp] = _detect_file_language(fp, fallback=language)
+            file_languages[fp] = _detect_file_language(fp, fallback=language or "python")
 
     # Pre-filter per rule using already-read content (no extra I/O).
     # Also respects per-rule language scope.

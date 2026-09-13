@@ -147,7 +147,7 @@ def run_checks(
     kind: str | None = None,
     mode: str | None = None,
     fix: bool = False,
-    language: str = "python",
+    language: str | None = None,
     project_path: str | None = None,
 ) -> list[CheckViolation]:
     """Run unified rules from ``rules.yaml``.
@@ -161,7 +161,7 @@ def run_checks(
             ``"policy"`` (structural/type/datalog/custom/sequence policies),
             or ``None`` / ``"all"`` (both engines).
         fix: Apply auto-fix replacements for pattern rules.
-        language: Source language for parsing.
+        language: Source language override; omitted detects each file's language.
         project_path: Project root for cross-file analysis.
     """
     from emend.lint import load_rules, load_duplicate_code_config, run_lint

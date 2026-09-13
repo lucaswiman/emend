@@ -221,13 +221,11 @@ def search(
                 )
             return json.dumps({"count": len(all_matches), "matches": serialized}, indent=2)
         else:
-            lines = []
-            for file_path_str, match in all_matches:
-                if match.line is not None:
-                    lines.append(f"{file_path_str}:{match.line}")
-                else:
-                    lines.append(f"{file_path_str}:?")
-            return "\n".join(lines)
+            from emend.cli_output import print_pattern_matches
+
+            buf = io.StringIO()
+            print_pattern_matches(all_matches, effective_output, dedent=dedent_output, stream=buf)
+            return buf.getvalue().rstrip("\n")
 
     # --- Symbol lookup mode ---
     if files and len(files) > 1:

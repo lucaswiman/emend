@@ -244,12 +244,13 @@ def run_policy_checks(
     paths: list[str],
     policies: list[Policy],
     *,
-    language: str = "python",
+    language: str | None = None,
     project_path: str | None = None,
     compiled_flows=None,
 ) -> list[PolicyViolation]:
     """Run all policy checks against the given file paths."""
     from emend import emend_core
+    from emend.language_registry import detect_language
 
     violations: list[PolicyViolation] = []
 
@@ -338,22 +339,23 @@ def run_policy_checks(
         )
 
         for file_path, source in file_contents.items():
+            file_language = language or detect_language(file_path) or "python"
             for policy, check in file_policies:
                 try:
                     if isinstance(check, StructuralCheck):
                         violations.extend(
-                            _run_structural_check(check, policy, file_path, source, language)
+                            _run_structural_check(check, policy, file_path, source, file_language)
                         )
                     elif isinstance(check, TypeCheck):
                         violations.extend(
                             _run_type_check(
-                                check, policy, file_path, source, language,
+                                check, policy, file_path, source, file_language,
                                 project_root=project_path,
                             )
                         )
                     elif isinstance(check, CustomCheck):
                         violations.extend(
-                            _run_custom_check(check, policy, file_path, source, language)
+                            _run_custom_check(check, policy, file_path, source, file_language)
                         )
                 except BUG_EXCEPTIONS:
                     raise

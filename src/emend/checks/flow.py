@@ -261,20 +261,28 @@ class _EndpointMatch:
 
 
 def _pattern_spans(
-    pattern: str, file_pairs: list[tuple[str, str]], language: str,
+    pattern: str, file_pairs: list[tuple[str, str]], language: str | None,
 ) -> list[_PatternSpan]:
     """Run the Rust matcher and retain exact match/capture byte spans."""
     from emend import emend_core
-    from emend.language_registry import get_extensions
+    from emend.language_registry import detect_language, get_extensions
     from emend.pattern import compile_pattern_to_rust_ir
 
-    ir = compile_pattern_to_rust_ir(pattern, language=language)
-    if ir is None:
-        raise ValueError(f"Pattern {pattern!r} could not be compiled")
-    extension = (get_extensions(language) or [Path(file_pairs[0][0]).suffix.lstrip(".")])[0]
-    rows = emend_core.find_pattern_spans_in_files(
-        file_pairs, ir, None, None, extension=extension,
-    )
+    groups: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
+    for path, source in file_pairs:
+        lang = language or detect_language(path) or "python"
+        suffix = Path(path).suffix.lstrip(".")
+        extensions = get_extensions(lang) or [suffix]
+        extension = suffix if suffix in extensions else extensions[0]
+        groups[(lang, extension)].append((path, source))
+    rows = []
+    for (lang, extension), pairs in groups.items():
+        ir = compile_pattern_to_rust_ir(pattern, language=lang)
+        if ir is None:
+            raise ValueError(f"Pattern {pattern!r} could not be compiled")
+        rows.extend(emend_core.find_pattern_spans_in_files(
+            pairs, ir, None, None, extension=extension,
+        ))
 
     result: list[_PatternSpan] = []
     for row in rows:
@@ -332,7 +340,7 @@ def _resolve_endpoints(
     file_pairs: list[tuple[str, str]],
     events_by_actual: dict[str, list["FlowEventFact"]],
     actual_to_stored: dict[str, str],
-    language: str,
+    language: str | None,
     match_cache: dict[tuple[Any, ...], list[_PatternSpan]] | None = None,
 ) -> list[_EndpointMatch]:
     if not endpoint.pattern:
@@ -670,16 +678,17 @@ def _add_cross_file_calls(
 def _add_container_mutations(
     events: dict[tuple[str, int], "FlowEventFact"],
     adjacency: dict[Any, list[Any]],
-    language: str,
+    language: str | None,
 ) -> None:
     """Connect append/extend inputs to later uses of the same container generation."""
-    from emend.language_registry import load_config
+    from emend.language_registry import detect_language, load_config
 
-    methods = frozenset(
-        load_config(language).get("trace", {}).get("container_mutations", {})
-        .get("methods", ())
-    )
-    if not methods:
+    languages = {path: language or detect_language(path) or "python"
+                 for path in {event.file_path for event in events.values()}}
+    methods = {lang: frozenset(load_config(lang).get("trace", {})
+                              .get("container_mutations", {}).get("methods", ()))
+               for lang in set(languages.values())}
+    if not any(methods.values()):
         return
     incoming_reaching: dict[Any, set[Any]] = defaultdict(set)
     outgoing_reaching: dict[Any, set[Any]] = defaultdict(set)
@@ -697,7 +706,7 @@ def _add_container_mutations(
         if call is None or not call[1].access_path:
             continue
         receiver, separator, method = call[1].access_path.rpartition(".")
-        if not separator or method not in methods:
+        if not separator or method not in methods[languages[call[1].file_path]]:
             continue
         receiver_root = receiver.split(".", 1)[0].split("[", 1)[0]
         receiver_uses = [
@@ -789,13 +798,14 @@ def evaluate_compiled_flow(
     *,
     interprocedural: bool,
     label_filter: str | None = None,
-    language: str = "python",
+    language: str | None = None,
     project_path: str | None = None,
     graph: "FactGraph | None" = None,
     source_overrides: dict[str, str] | None = None,
     max_call_depth: int | None = None,
 ) -> list[EvaluatedFlow]:
     """Evaluate compiled rules over exact occurrence and control facts."""
+    from emend.language_registry import detect_language
     all_rules = tuple(rules)
     for rule in all_rules:
         for endpoint in rule.sanitizers:
@@ -840,6 +850,7 @@ def evaluate_compiled_flow(
     contents = {path: overrides[path] if path in overrides else graph.source_text(path)
                 for path in actual_paths}
     file_pairs = list(contents.items())
+    file_languages = {path: language or detect_language(path) or "python" for path in actual_paths}
 
     all_events: dict[tuple[str, int], FlowEventFact] = {}
     events_by_actual: dict[str, list[FlowEventFact]] = defaultdict(list)
@@ -888,7 +899,7 @@ def evaluate_compiled_flow(
         if label_filter and label_filter not in {rule.label, rule.rule_id}:
             continue
         rule_pairs = [pair for pair in file_pairs
-                      if _rule_applies(rule, pair[0], language, project_root)]
+                      if _rule_applies(rule, pair[0], file_languages[pair[0]], project_root)]
         if not rule_pairs:
             continue
         allowed_actual = {path for path, _source in rule_pairs}
