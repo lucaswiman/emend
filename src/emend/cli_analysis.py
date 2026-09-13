@@ -27,6 +27,7 @@ from emend.transform import (
 )
 from emend.transform.impact import IMPACT_OUTPUTS, impact_projection
 from emend.cli_output import emit_json
+from emend.git_diff import DiffOption, DiffSelection, resolve_diff
 
 logger = logging.getLogger("emend.cli.analysis")
 
@@ -92,6 +93,7 @@ def _trace_cmd_impl(
     preset: str | None,
     exclude_path: list[str] | None = None,
     max_chain_depth: int | None = None,
+    diff: str | None = None,
 ) -> None:
     """Shared implementation for the ``trace`` command."""
     try:
@@ -152,6 +154,9 @@ def _trace_cmd_impl(
                 project_path=_proj_root,
             )
 
+        selection = DiffSelection.load(diff, project or path)
+        if selection is not None:
+            violations = selection.filter(violations)
         output = format_violations(violations, show_trace=trace, json_output=json_output)
         if output:
             print(output, end='\n' if not output.endswith('\n') else '')
@@ -180,6 +185,7 @@ def trace_cmd(
     max_chain_depth: Annotated[Optional[int], typer.Option("--max-chain-depth", help="Max call-chain depth for transitive sink propagation (default: unlimited)")] = None,
     preset: Annotated[Optional[str], typer.Option("--preset", help="Load framework-specific trace rules. Python: django, flask, sqlalchemy, fastapi. TypeScript/Node.js: express, react, nextjs, node-sql. Rust: actix-web, axum, sqlx, diesel. Special: all")] = None,
     exclude_path: Annotated[Optional[list[str]], typer.Option("--exclude-path", help="Glob patterns for paths to exclude from analysis (repeatable)")] = None,
+    diff: DiffOption = None,
 ):
     """Run trace analysis to detect unsafe data flows.
 
@@ -210,7 +216,7 @@ def trace_cmd(
     """
     _trace_cmd_impl(path, config, label, trace, json_output, project,
                     interprocedural, preset, exclude_path,
-                    max_chain_depth=max_chain_depth)
+                    max_chain_depth=max_chain_depth, diff=diff)
 
 
 
@@ -221,6 +227,7 @@ def dsl_debug_cmd(
     resolve: Annotated[bool, typer.Option("--resolve", help="Resolve cross-language links")] = False,
     json_output: JsonFlag = False,
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root")] = None,
+    diff: DiffOption = None,
 ):
     """[Debug] Detect and analyze embedded DSL regions (SQL, CSS, HTML).
 
@@ -257,6 +264,10 @@ def dsl_debug_cmd(
             project_root = project or str(Path(path).resolve() if Path(path).is_dir() else Path(path).parent.resolve())
             links = _resolve_dsl_links(all_symbols, project_root, orm=orm)
 
+        selection = DiffSelection.load(diff, project or path)
+        if selection is not None:
+            all_symbols = [s for s in all_symbols if selection.matches(s.host_file, s.host_line)]
+            links = [link for link in links if link.dsl_symbol in all_symbols]
         output = format_symbols(all_symbols, links=links if resolve else None, json_output=json_output)
         if output:
             print(output, end='')
@@ -278,6 +289,7 @@ def refs_cmd(
     reads_only: Annotated[bool, typer.Option("--reads-only", help="Only show read (load) references")] = False,
     calls_only: Annotated[bool, typer.Option("--calls-only", help="Only show call sites (not mere references)")] = False,
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root directory (used with --calls-only)")] = None,
+    diff: DiffOption = None,
 ):
     """Find all references to a symbol across the project.
 
@@ -296,6 +308,7 @@ def refs_cmd(
     with cli_error_handler():
         _reject_file_glob(selector, "refs")
         parsed_selector = parse_extended_selector(selector)
+        selection = DiffSelection.load(diff, project or parsed_selector.file_path)
 
         if calls_only:
             if writes_only or reads_only or exclude_definition or exclude_imports:
@@ -304,6 +317,8 @@ def refs_cmd(
                     "--exclude-definition, and --exclude-imports"
                 )
             callers = find_callers(parsed_selector, project_path=project)
+            if selection is not None:
+                callers = selection.filter(callers)
             if json_output:
                 data = [
                     {
@@ -329,6 +344,8 @@ def refs_cmd(
         )
 
         references = list(references)
+        if selection is not None:
+            references = selection.filter(references)
         refs_data: list[dict] = [
             {
                 "file_path": ref.file_path,
@@ -363,6 +380,7 @@ def refs_cmd(
                 _matched = [
                     lnk for lnk in _dsl_links
                     if _sel_name.lower() in lnk.target_qualified_name.lower()
+                    and (selection is None or selection.matches(lnk.dsl_symbol.host_file, lnk.dsl_symbol.host_line))
                 ]
                 if _matched:
                     for lnk in _matched:
@@ -389,6 +407,7 @@ def graph_cmd(
     file: Annotated[str, typer.Argument(help="Python file to analyze")],
     format: Annotated[str, typer.Option("--format", "-f", help="Output format: plain, json, dot")] = "plain",
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root directory")] = None,
+    diff: DiffOption = None,
 ):
     """Generate a call graph for all functions in a file.
 
@@ -403,7 +422,8 @@ def graph_cmd(
         emend graph src/module.py --format json
     """
     with cli_error_handler():
-        result = generate_graph(file, project_path=project, format=format)
+        selection = DiffSelection.load(diff, project or file)
+        result = generate_graph(file, project_path=project, format=format, selection=selection)
         print(result)
 
 
@@ -455,6 +475,7 @@ def dead_code_cmd(
     include_transitive: Annotated[
         bool, typer.Option("--include-transitive", help="List transitively unused symbols separately instead of summarizing them under roots")
     ] = False,
+    diff: DiffOption = None,
 ):
     """Find potentially dead (unreferenced) code in a project.
 
@@ -515,6 +536,9 @@ def dead_code_cmd(
             include_transitive=include_transitive,
         )
 
+        selection = DiffSelection.load(diff, path)
+        if selection is not None:
+            results = selection.filter(results)
         if json_output:
             # JSON mode: must collect all results before printing
             data = [dead_code_result_to_dict(result) for result in results]
@@ -551,7 +575,7 @@ def dead_code_cmd(
 
 def impact_cmd(
     selector: Annotated[Optional[str], typer.Argument(help="Selector (file.py::Symbol)")] = None,
-    diff: Annotated[Optional[str], typer.Option("--diff", help="Git diff spec (e.g. HEAD, abc..def)")] = None,
+    diff: DiffOption = None,
     output: Annotated[str, typer.Option("--output", "-o", help="Output mode: symbols, tests, graph")] = "symbols",
     json_output: JsonFlag = False,
     project: Annotated[Optional[str], typer.Option("--project", "-p", help="Project root directory")] = None,
@@ -583,6 +607,8 @@ def impact_cmd(
 
     with cli_error_handler():
         selectors_list = None
+        if diff is not None:
+            _, diff = resolve_diff(diff, project or selector or ".")
         if selector:
             sel = parse_extended_selector(selector)
             selectors_list = [sel]
@@ -654,6 +680,7 @@ def types_cmd(
     json_output: JsonFlag = False,
     engine: Annotated[str, typer.Option("--engine", help="Type inference engine: pyrefly, pyright, ty, typescript, rust-analyzer, auto")] = "auto",
     definitions_only: Annotated[bool, typer.Option("--definitions-only", "-d", help="Show only definitions")] = False,
+    diff: DiffOption = None,
 ):
     """Show inferred types for symbols in a file.
 
@@ -711,9 +738,14 @@ def types_cmd(
             files = [target]
 
         all_bindings = []
+        selection = DiffSelection.load(diff, path)
         for f in files:
+            if selection is not None and not selection.matches(f):
+                continue
             ft = oracle.infer_file(f)
             for b in ft.bindings:
+                if selection is not None and not selection.matches(f, b.line):
+                    continue
                 if name and b.name != name:
                     continue
                 if kind and b.binding_kind != kind:
@@ -765,6 +797,7 @@ def facts_cmd(
     max_depth: Annotated[int, typer.Option("--max-depth", help="Max depth for transitive queries")] = 10,
     json_output: JsonFlag = False,
     limit: Annotated[int, typer.Option("--limit", help="Max results")] = 100,
+    diff: DiffOption = None,
 ):
     """Query the relational fact graph for code invariants.
 
@@ -791,6 +824,7 @@ def facts_cmd(
 
         results: list = []
         extra: dict | None = None
+        selection = DiffSelection.load(diff, project)
 
         if fact_type == "symbols":
             results = graph.symbols(name=name, kind=kind, file_path=file)
@@ -800,10 +834,15 @@ def facts_cmd(
                 raise typer.Exit(2)
             if transitive:
                 callers = graph.transitive_callers(symbol, max_depth=max_depth)
+                if selection is not None:
+                    callers = set(callers) & {s.qualified_name for s in selection.filter(graph.symbols(), relative_to=project)}
                 extra = {"symbol": symbol, "transitive_callers": sorted(callers)}
             else:
                 from_calls = graph.calls_from(symbol)
                 to_calls = graph.calls_to(symbol)
+                if selection is not None:
+                    from_calls, to_calls = (selection.filter(rows, relative_to=project)
+                                           for rows in (from_calls, to_calls))
                 extra = {
                     "calls_from": [dataclasses.asdict(c) for c in from_calls[:limit]],
                     "calls_to": [dataclasses.asdict(c) for c in to_calls[:limit]],
@@ -829,6 +868,8 @@ def facts_cmd(
             print(f"Error: unknown fact type '{fact_type}'", file=sys.stderr)
             raise typer.Exit(2)
 
+        if selection is not None:
+            results = selection.filter(results, relative_to=project)
         if extra:
             if json_output:
                 emit_json(extra)
@@ -877,6 +918,7 @@ def cfg_cmd(
         bool,
         typer.Option("--unreachable", help="Only show unreachable blocks"),
     ] = False,
+    diff: DiffOption = None,
 ):
     """Build and display per-function control flow graphs.
 
@@ -902,6 +944,7 @@ def cfg_cmd(
         files = [str(f) for f in resolved]
         from emend.transform import _find_project_root
         project_root = Path(_find_project_root(path)).resolve()
+        selection = DiffSelection.load(diff, project_root)
         requested_files = {
             _project_relative(file_path, project_root) for file_path in files
         }
@@ -921,10 +964,20 @@ def cfg_cmd(
             for cfg in cfgs:
                 if function and cfg.func_name != function:
                     continue
+                if selection is not None and not selection.matches(
+                    fpath, cfg.func_start_line + 1, cfg.func_end_line + 1
+                ):
+                    continue
                 all_cfgs.append(cfg)
                 cfg_files.append(fpath)
 
         if not all_cfgs:
+            if selection is not None:
+                if output_format == "json":
+                    emit_json([])
+                elif output_format == "dot":
+                    print(format_cfgs_dot([]))
+                raise typer.Exit(0)
             if function:
                 print(f"No function named '{function}' found.", file=sys.stderr)
             else:
@@ -1004,6 +1057,11 @@ def cfg_cmd(
                             ],
                         })
 
+            if selection is not None:
+                for result in results:
+                    result["unreachable_blocks"] = [b for b in result["unreachable_blocks"]
+                        if selection.matches(project_root / result["file"], b["start_line"], b["end_line"])]
+                results = [result for result in results if result["unreachable_blocks"]]
             if output_format == "json":
                 emit_json(results)
             else:
@@ -1038,11 +1096,13 @@ def dupes_cmd(
     file: Annotated[Optional[str], typer.Option("--file", help="Restrict to a specific file")] = None,
     check_file: Annotated[Optional[str], typer.Option("--check-file", help="Scan the full project and report only duplicates involving this file (for post-write hooks)")] = None,
     symbol: Annotated[Optional[str], typer.Option("--symbol", help="Restrict to a specific symbol")] = None,
-    limit: Annotated[int, typer.Option("--limit", help="Maximum number of clusters to show")] = 50,
-    min_lines: Annotated[int, typer.Option("--min-lines", help="Minimum lines for a finding")] = 3,
+    limit: Annotated[int, typer.Option("--limit", min=0, help="Maximum number of clusters to show")] = 50,
+    min_lines: Annotated[Optional[int], typer.Option("--min-lines", min=1, help="Minimum lines per finding (default: 3 exact/sequence, 1 near)")] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show matched source lines")] = False,
     min_score: Annotated[float, typer.Option("--min-score", help="Minimum score threshold")] = 0.0,
     json_output: JsonFlag = False,
     cross_file: Annotated[Optional[bool], typer.Option("--cross-file/--intra-file", help="Filter by cross-file or intra-file")] = None,
+    diff: DiffOption = None,
 ):
     """Find duplicate code via AST canonicalization.
 
@@ -1062,21 +1122,23 @@ def dupes_cmd(
         format_duplicates_text,
         query_duplicates,
     )
+    selection = DiffSelection.load(diff, path)
+    run_analysis = limit > 0 and (selection is None or any(selection.lines.values()))
 
     if near:
         from emend.inconsistency import find_inconsistencies
         from emend.file_collection import collect_all_source_files
 
-        if (mode != "all" or file or check_file or symbol or min_lines != 3
+        if (mode != "all" or file or check_file or symbol
                 or min_score != 0.0 or cross_file is not None):
-            raise typer.BadParameter("--near supports PATH, --limit and --json, not exact/sequence filters")
+            raise typer.BadParameter("--near does not support exact/sequence filters (--mode, --file, --check-file, --symbol, --min-score, --cross-file)")
         root = Path(path)
         if not root.exists():
             raise typer.BadParameter(f"path does not exist: {path}")
-        if limit < 0:
-            raise typer.BadParameter("--limit must be nonnegative")
         files = collect_all_source_files(path, ["python", "rust", "typescript"]) if root.is_dir() else [path]
-        findings = find_inconsistencies(files)[:limit]
+        findings = find_inconsistencies(files, min_lines=min_lines or 1, verbose=verbose,
+                                       location_filter=selection.matches if selection is not None else None) if run_analysis else []
+        findings = findings[:limit]
         if json_output:
             emit_json(findings)
         elif findings:
@@ -1093,12 +1155,17 @@ def dupes_cmd(
         mode=mode,
         file_scope=file,
         symbol_scope=symbol,
-        limit=limit,
-        min_lines=min_lines,
+        limit=None if selection is not None else limit,
+        min_lines=min_lines or 3,
         min_score=min_score,
         cross_file=cross_file,
         involves_file=check_file,
-    )
+    ) if run_analysis else []
+    if selection is not None:
+        clusters = [cluster for cluster in clusters if any(
+            selection.matches(member.file, member.start_line, member.end_line)
+            for member in cluster.members
+        )][:limit]
 
     if json_output:
         print(format_duplicates_json(clusters), end='')
@@ -1106,4 +1173,4 @@ def dupes_cmd(
         if not clusters:
             print("No duplicates found.", file=sys.stderr)
             return
-        print(format_duplicates_text(clusters), end='')
+        print(format_duplicates_text(clusters, verbose=verbose), end='')

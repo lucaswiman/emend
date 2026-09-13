@@ -529,7 +529,7 @@ class AnalysisStore:
         self,
         revisions: Iterable[FileRevision],
         contents: dict[str, str],
-        *, prepare=None, prepared=None, jobs=None,
+        *, prepare=None, prepared=None, started=None, jobs=None,
     ) -> Iterable[ExtractedFile]:
         """Load content-addressed revision artifacts or extract them once."""
         from emend.analysis_extraction import _extract_file_facts
@@ -617,6 +617,8 @@ class AnalysisStore:
                 def completed_files():
                     futures = deque()
                     for item in pending:
+                        if started is not None:
+                            started(item[0])
                         futures.append(pool.submit(extract, item))
                         if len(futures) == (jobs or 8):
                             yield futures.popleft().result()
@@ -1080,12 +1082,14 @@ class AnalysisStore:
 
     @contextmanager
     def prepare_index_facts(self, file_paths=None, *, include_overlays=False,
-                            prepare=None, prepared=None, jobs=None):
+                            prepare=None, prepared=None, callback=None, jobs=None):
         """Fan one extraction stream into type inputs and a private fact view."""
         from concurrent.futures import ThreadPoolExecutor
         from queue import Queue, Full, Empty
 
         scan = self._scan_disk()
+        if callback is not None:
+            callback("total", str(len(scan.snapshot.files)))
         queue = Queue(maxsize=8)
         end = object()
 
@@ -1138,6 +1142,8 @@ class AnalysisStore:
                 for file in self._extract_revisions(
                     scan.snapshot.files, scan.contents,
                     prepare=prepare, prepared=prepared, jobs=jobs,
+                    started=(lambda revision: callback("start", revision.file_path))
+                    if callback is not None else None,
                 ):
                     send(file)
                     yield file

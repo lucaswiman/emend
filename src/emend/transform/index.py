@@ -1167,13 +1167,12 @@ def warm_caches(
         return None
 
     def prepared_file(revision, result):
-        if result is None:
-            return
-        for key, count in zip(
-            ("indexed", "qn_cached", "skipped", "sym_cached",
-             "import_cached", "ref_cached", "dsl_cached"), result,
-        ):
-            stats[key] += count
+        if result is not None:
+            for key, count in zip(
+                ("indexed", "qn_cached", "skipped", "sym_cached",
+                 "import_cached", "ref_cached", "dsl_cached"), result,
+            ):
+                stats[key] += count
         if callback:
             callback("index", revision.file_path)
 
@@ -1291,7 +1290,7 @@ def warm_caches(
     with store.prepare_index_facts(
         paths if types_enabled else None,
         include_overlays=bool(types_enabled and oracle.supports_source_overrides),
-        prepare=prepare_file, prepared=prepared_file, jobs=max_workers,
+        prepare=prepare_file, prepared=prepared_file, callback=callback, jobs=max_workers,
     ) as inputs, ThreadPoolExecutor(max_workers=1) as pool:
         if types_enabled:
             announce_phase(f"Type analysis ({engine_name}) + facts database")

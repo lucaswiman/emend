@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// Non-dot directories to skip when scanning for Python files.
+/// Dependency and generated-output directories to skip during source discovery.
 /// All directories starting with '.' are skipped automatically.
 pub const SKIP_DIRS: &[&str] = &[
     "__pycache__",
@@ -11,6 +11,8 @@ pub const SKIP_DIRS: &[&str] = &[
     "node_modules",
     "dist",
     "build",
+    "static",
+    "target",
 ];
 
 /// Collect all files under `root` with specific extensions, skipping non-project directories.

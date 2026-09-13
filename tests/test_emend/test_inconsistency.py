@@ -58,6 +58,12 @@ def test_near_clone_differences(tmp_path, change):
         assert "--- " in text.output and "+        if value < 10:" in text.output
         limited = CliRunner().invoke(app, ["dupes", str(tmp_path), "--near", "--json", "--limit", "0"])
         assert limited.exit_code == 0 and json.loads(limited.output) == []
+        verbose = CliRunner().invoke(app, ["dupes", str(tmp_path), "--near", "-v"])
+        assert verbose.exit_code == 0 and "def process(items, fallback):" in verbose.output
+        short = CliRunner().invoke(app, ["dupes", str(tmp_path), "--near", "--min-lines", "100", "--json"])
+        assert short.exit_code == 0 and json.loads(short.output) == []
+        assert find_inconsistencies(files, location_filter=lambda path, start, end: start <= 7 <= end)
+        assert find_inconsistencies(files, location_filter=lambda *args: False) == []
     assert len(findings) == (0 if change in {"rename", "docstring", "parenthesized_docstring", "comma", "multi", "non_python"} else 1)
     if change == "multi":
         relaxed = find_inconsistencies(files, max_regions=3)

@@ -47,7 +47,8 @@ def _function_nodes(node, kinds):
         yield from _function_nodes(child, kinds)
 
 
-def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_changed_tokens=20):
+def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_changed_tokens=20,
+                        min_lines=1, verbose=False, location_filter=None):
     """Find function bodies differing in a small number of token regions.
 
     Five-token shingles retrieve pairs before sequence alignment. Very common
@@ -82,6 +83,8 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
             if len(tokens) < 32:
                 continue
             line = node.start_point[0]
+            if node.end_point[0] - line + 1 < min_lines:
+                continue
             symbol = _find_containing_symbol(line, symbols)
             if not symbol and (name := node.child_by_field_name(config["name_field"])) is not None:
                 symbol = name.text()
@@ -94,6 +97,7 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
                 "tokens": tuple(tokens),
                 "source": source_lines[line:node.end_point[0] + 1],
                 "path": path, "start": node.start_byte, "end": node.end_byte,
+                "line": line + 1, "end_line": node.end_point[0] + 1,
                 "language": language,
             })
 
@@ -118,6 +122,10 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
             # Nested functions share text with their enclosing function.
             if a["path"] == b["path"] and max(a["start"], b["start"]) < min(a["end"], b["end"]):
                 continue
+            if location_filter is not None and not any(
+                location_filter(f["path"], f["line"], f["end_line"]) for f in (a, b)
+            ):
+                continue
             matcher = SequenceMatcher(None, a["tokens"], b["tokens"], autojunk=False)
             if matcher.quick_ratio() < min_similarity or matcher.ratio() < min_similarity:
                 continue
@@ -131,6 +139,7 @@ def find_inconsistencies(files, *, min_similarity=0.85, max_regions=2, max_chang
                 "left": a["location"], "right": b["location"],
                 "similarity": round(matcher.ratio(), 4), "changes": changes,
                 "category": "addition/deletion" if any(c["kind"] != "replace" for c in changes) else "replacement",
-                "diff": "".join(unified_diff(a["source"], b["source"], a["location"], b["location"])),
+                "diff": "".join(unified_diff(a["source"], b["source"], a["location"], b["location"],
+                                              n=max(len(a["source"]), len(b["source"])) if verbose else 3)),
             })
     return sorted(findings, key=lambda f: (f["category"], -f["similarity"], f["left"], f["right"]))

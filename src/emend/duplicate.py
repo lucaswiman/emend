@@ -954,7 +954,7 @@ def query_duplicates(
     mode: str = "all",
     file_scope: str | None = None,
     symbol_scope: str | None = None,
-    limit: int = 50,
+    limit: int | None = 50,
     min_lines: int = 3,
     min_score: float = 0.0,
     cross_file: bool | None = None,
@@ -1026,11 +1026,12 @@ def query_duplicates(
     return clusters[:limit]
 
 
-def format_duplicates_text(clusters: list[DuplicateCluster]) -> str:
+def format_duplicates_text(clusters: list[DuplicateCluster], *, verbose: bool = False) -> str:
     """Format duplicate clusters as human-readable text."""
     if not clusters:
         return ""
     lines: list[str] = []
+    sources: dict[str, list[str]] = {}
     for i, cluster in enumerate(clusters, 1):
         lines.append(
             f"[{i}] {cluster.kind.upper()}  score={cluster.score:.1f}  {cluster.explanation}"
@@ -1045,6 +1046,14 @@ def format_duplicates_text(clusters: list[DuplicateCluster]) -> str:
             lines.append(
                 f"{prefix} {member.file}:{member.start_line}-{member.end_line}{sym}{size}"
             )
+            if verbose:
+                if member.file not in sources:
+                    sources[member.file] = Path(member.file).read_text().splitlines()
+                source = sources[member.file]
+                lines.extend(
+                    f"    {number}: {source[number - 1]}"
+                    for number in range(member.start_line, min(member.end_line, len(source)) + 1)
+                )
         lines.append("")
     return "\n".join(lines)
 

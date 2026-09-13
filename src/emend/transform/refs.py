@@ -207,6 +207,7 @@ def generate_graph(
     file_path: str,
     project_path: str | None = None,
     format: str = "plain",
+    *, selection=None,
 ) -> str:
     """Generate a call graph for all functions in a file.
 
@@ -237,6 +238,10 @@ def generate_graph(
 
     # Also include functions and classes with no calls
     syms = graph.symbols(file_path=rel_path)
+    if selection is not None:
+        syms = selection.filter(syms, relative_to=scan_root)
+        selected = {symbol.qualified_name for symbol in syms}
+        edges = {caller: callees for caller, callees in edges.items() if caller in selected}
     for s in syms:
         if s.kind in ("function", "async_function", "method", "async_method", "class"):
             edges.setdefault(s.qualified_name, [])

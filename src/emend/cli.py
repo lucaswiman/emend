@@ -46,6 +46,7 @@ from emend.cli_map import (
 )
 from emend.cli_tooling import editor_search_cmd, editor_server_cmd, index_cmd, mcp_cmd
 from emend.errors import BUG_EXCEPTIONS
+from emend.git_diff import DiffCommand
 
 
 @dataclass
@@ -148,9 +149,10 @@ _COMMANDS: list[_CmdEntry] = [
 app.add_typer(map_app, name="map")
 
 for _entry in _COMMANDS:
-    _entry.subapp.command(_entry.name, hidden=_entry.hidden)(_entry.fn)
+    _options = {"cls": DiffCommand} if "diff" in _entry.fn.__annotations__ else {}
+    _entry.subapp.command(_entry.name, hidden=_entry.hidden, **_options)(_entry.fn)
     for _alias in _entry.aliases:
-        _entry.subapp.command(_alias, hidden=True)(_entry.fn)
+        _entry.subapp.command(_alias, hidden=True, **_options)(_entry.fn)
 
 
 def main():

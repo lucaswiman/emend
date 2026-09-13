@@ -72,6 +72,7 @@ class _DiffFile:
     paths: list[str | None] = field(default_factory=lambda: [None, None])
     blobs: list[str] = field(default_factory=lambda: ["", ""])
     lines: list[list[int]] = field(default_factory=lambda: [[], []])
+    hunks: list[tuple[int, int, int, int]] = field(default_factory=list)
 
 
 def _parse_diff(diff_text: str) -> list[_DiffFile]:
@@ -86,6 +87,8 @@ def _parse_diff(diff_text: str) -> list[_DiffFile]:
             current = files[-1]
             if match := re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line):
                 in_hunk = True
+                old, old_count, new, new_count = match.groups()
+                current.hunks.append((int(old), int(old_count or 1), int(new), int(new_count or 1)))
                 for side in (0, 1):
                     start, count = match.groups()[side * 2:side * 2 + 2]
                     current.lines[side].extend(range(int(start), int(start) + int(count or 1)))
