@@ -292,6 +292,9 @@ pub struct ScopedImportBinding {
 pub struct ImportedName {
     pub name: String,
     pub alias: Option<String>,
+    pub name_start_byte: usize,
+    pub name_end_byte: usize,
+    pub alias_range: Option<(usize, usize)>,
 }
 
 /// A structured import statement with byte-range information.
@@ -3075,6 +3078,9 @@ impl ScopeResolver {
                     names.push(ImportedName {
                         name: "*".to_string(),
                         alias: None,
+                        name_start_byte: child.start_byte(),
+                        name_end_byte: child.end_byte(),
+                        alias_range: None,
                     });
                 } else if imports.identifier.as_deref() == Some(ck)
                     || imports.dotted_name.as_deref() == Some(ck)
@@ -3082,20 +3088,24 @@ impl ScopeResolver {
                     names.push(ImportedName {
                         name: node_text(child, source).to_string(),
                         alias: None,
+                        name_start_byte: child.start_byte(),
+                        name_end_byte: child.end_byte(),
+                        alias_range: None,
                     });
                 } else if imports.aliased_import.as_deref() == Some(ck) {
                     if let Some(name_node) = child.child_by_field_name("name") {
                         let imported = node_text(name_node, source).to_string();
-                        let alias = if !imports.alias_field.is_empty() {
-                            child
-                                .child_by_field_name(&imports.alias_field)
-                                .map(|a| node_text(a, source).to_string())
+                        let alias_node = if !imports.alias_field.is_empty() {
+                            child.child_by_field_name(&imports.alias_field)
                         } else {
                             None
                         };
                         names.push(ImportedName {
                             name: imported,
-                            alias,
+                            alias: alias_node.map(|a| node_text(a, source).to_string()),
+                            name_start_byte: name_node.start_byte(),
+                            name_end_byte: name_node.end_byte(),
+                            alias_range: alias_node.map(|a| (a.start_byte(), a.end_byte())),
                         });
                     }
                 }

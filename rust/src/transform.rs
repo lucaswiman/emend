@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 /// A single edit operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Edit {
@@ -53,33 +51,72 @@ impl FileTransform {
             return Some(self.source.clone());
         }
 
-        // Use a BTreeMap to sort edits by start position and check for overlaps.
-        let mut sorted_edits = BTreeMap::new();
-        for edit in &self.edits {
-            if let Some(prev) = sorted_edits.insert(edit.start, edit) {
-                // If two edits start at the same position, it's okay only if they are both insertions
-                // or if they are identical (though that's redundant).
-                // For simplicity, we'll disallow it for now unless we need more complex logic.
-                if prev.end != edit.start || edit.end != edit.start {
-                   return None;
-                }
-            }
+        // Stable sorting retains the call order of insertions at one position.
+        // Put insertions before a replacement with the same start so the
+        // insertion is applied at the replacement's left boundary.
+        let mut sorted_edits: Vec<_> = self.edits.iter().collect();
+        sorted_edits.sort_by_key(|edit| (edit.start, edit.start != edit.end));
+
+        if sorted_edits.iter().any(|edit| {
+            edit.start > edit.end
+                || edit.end > self.source.len()
+                || !self.source.is_char_boundary(edit.start)
+                || !self.source.is_char_boundary(edit.end)
+        }) {
+            return None;
         }
 
         let mut result = String::with_capacity(self.source.len());
         let mut last_pos = 0;
 
-        for (&start, edit) in &sorted_edits {
-            if start < last_pos {
+        for edit in sorted_edits {
+            if edit.start < last_pos {
                 // Overlapping edits
                 return None;
             }
-            result.push_str(&self.source[last_pos..start]);
+            result.push_str(&self.source[last_pos..edit.start]);
             result.push_str(&edit.replacement);
             last_pos = edit.end;
         }
 
         result.push_str(&self.source[last_pos..]);
         Some(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FileTransform;
+
+    #[test]
+    fn retains_same_position_insertions_in_call_order() {
+        let mut transform = FileTransform::new("x".into());
+        transform.insert_before(0, "A".into());
+        transform.insert_before(0, "B".into());
+        assert_eq!(transform.apply(), Some("ABx".into()));
+    }
+
+    #[test]
+    fn permits_insertions_at_replacement_boundaries() {
+        let mut transform = FileTransform::new("abcd".into());
+        transform.replace_range(1, 3, "X".into());
+        transform.insert_before(1, "L".into());
+        transform.insert_after(3, "R".into());
+        assert_eq!(transform.apply(), Some("aLXRd".into()));
+    }
+
+    #[test]
+    fn rejects_overlapping_and_invalid_ranges() {
+        for edits in [vec![(1, 3), (2, 4)], vec![(3, 2)], vec![(0, 5)]] {
+            let mut transform = FileTransform::new("abcd".into());
+            for (start, end) in edits {
+                transform.replace_range(start, end, "X".into());
+            }
+            assert_eq!(transform.apply(), None);
+        }
+
+        let mut transform = FileTransform::new("é".into());
+        transform.replace_range(1, 2, "X".into());
+        assert_eq!(transform.apply(), None);
     }
 }

@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def test_move_dedent(tmp_path, emend_cmd):
     """Test that --dedent flag works for nested symbols."""
@@ -265,18 +267,36 @@ def test_move_dry_run(tmp_path, emend_cmd):
     assert dest_content == "# original\n"  # Not modified
 
 
-def test_move_recursive_symbol_does_not_import_itself(tmp_path, emend_cmd):
+@pytest.mark.parametrize(
+    "remaining_source,expected_import",
+    [
+        ("", False),
+        ("answer = fact(5)\n", True),
+        ("class Calculator:\n    def fact(self):\n        return fact(5)\n", True),
+    ],
+    ids=["recursive-only", "outside-call", "same-named-nested-symbol"],
+)
+def test_move_recursive_symbol_import_boundary(
+    tmp_path, emend_cmd, remaining_source, expected_import,
+):
     source = tmp_path / "source.py"
     source.write_text(
         "def fact(n):\n"
         "    return 1 if n <= 1 else n * fact(n - 1)\n"
+        + ("\n" + remaining_source if remaining_source else "")
     )
     dest = tmp_path / "dest.py"
+
     result = subprocess.run(
-        [emend_cmd, "move", f"{source}::fact", str(dest), "--apply"],
-        capture_output=True, text=True, cwd=tmp_path,
+        [
+            emend_cmd, "move", f"{source}::fact", str(dest),
+            "--project", str(tmp_path), "--apply",
+        ],
+        capture_output=True, text=True,
     )
+
     assert result.returncode == 0, result.stderr
+    source_after = source.read_text()
+    assert ("from dest import fact" in source_after) is expected_import
+    assert remaining_source.strip() in source_after
     assert "from source import fact" not in dest.read_text()
-    assert "def fact" in dest.read_text()
-    assert "def fact" not in source.read_text()

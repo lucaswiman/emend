@@ -160,12 +160,22 @@ def move_symbol(
     # to the destination file (issue #138 Bug 2).
     source_module = _file_to_module(selector.file_path, project_path)
 
+    from emend.ast_utils import find_nested_definitions, find_symbol_by_path
+    source_symbol = find_symbol_by_path(
+        find_nested_definitions(selector.file_path, ext=selector.extension),
+        selector.symbol_path,
+    )
+    moved_definition_range = (
+        (source_symbol.line_start, source_symbol.line_end)
+        if source_symbol is not None else None
+    )
+
     # Before removing the symbol, use the tree-sitter scope resolver to check
     # whether the source file has non-definition/non-import references to the
     # moved symbol (e.g. calls, type annotations).  After removal the name
     # becomes unresolved and the resolver can no longer see it.
     source_has_other_refs = _source_has_remaining_refs(
-        selector.file_path, symbol_name, project_path,
+        selector.file_path, symbol_name, project_path, moved_definition_range,
     )
 
     # Step 1: Copy symbol to destination (include_imports=True so the moved
@@ -201,6 +211,7 @@ def _source_has_remaining_refs(
     source_file: str,
     symbol_name: str,
     project_path: str | None,
+    moved_definition_range: tuple[int, int] | None = None,
 ) -> bool:
     """Check whether *source_file* references *symbol_name* outside its definition.
 
@@ -229,7 +240,11 @@ def _source_has_remaining_refs(
     target_suffix = f".{symbol_name}"
     return any(
         kind in ("read", "write", "call")
-        for qn, _line, _col, _off, _end, kind, _ann
+        and not (
+            moved_definition_range is not None
+            and moved_definition_range[0] <= line <= moved_definition_range[1]
+        )
+        for qn, line, _col, _off, _end, kind, _ann
         in resolver.references_in_file(resolved)
         if qn.endswith(target_suffix) or qn == symbol_name
     )
@@ -624,6 +639,25 @@ def _rename_module_references(
         old_module_bytes = old_module.encode('utf-8')
         old_bare_mod_bytes = old_bare_mod.encode('utf-8')
 
+        structured_imports = resolver.structured_imports_in_file(py_file)
+        alias_ranges = {
+            (alias_start, alias_end)
+            for imp in structured_imports
+            for _name, _start, _end, _alias, alias_start, alias_end in imp["name_spans"]
+            if alias_start is not None
+        }
+        relative_member_ranges = set()
+        for imp in structured_imports:
+            if imp["is_plain"] or not imp["level"]:
+                continue
+            relative_qn = "." * imp["level"] + imp["module"]
+            for imported_name, start, end, _alias, _alias_start, _alias_end in imp["name_spans"]:
+                member_qn = relative_qn + (sep if imp["module"] else "") + imported_name
+                if _resolve_relative_import_qn(
+                    member_qn, py_file, project_root, sep, src_text=imported_name,
+                ) == old_module:
+                    relative_member_ranges.add((start, end))
+
         for qn, line, col, offset, end_offset, kind, _ann in resolver.references_in_file(py_file):
             # Resolve relative QNs (e.g. ".models" -> "pkg.models") so that
             # the comparison against old_module works correctly.
@@ -635,6 +669,13 @@ def _rename_module_references(
                     resolved_qn = resolved
 
             if kind == "import":
+                # Alias identifiers are local bindings, not module syntax.
+                if (offset, end_offset) in alias_ranges:
+                    continue
+                if (offset, end_offset) in relative_member_ranges:
+                    transform.replace_range(offset, end_offset, new_bare_mod)
+                    changed = True
+                    continue
                 # Exact match: import old_module or from old_module import ...
                 if resolved_qn == old_module:
                     if qn.startswith(".") and resolved_qn != qn:

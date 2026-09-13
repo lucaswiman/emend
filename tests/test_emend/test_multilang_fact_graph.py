@@ -132,6 +132,29 @@ class TestDetectProjectLanguages:
 # ---------------------------------------------------------------------------
 
 class TestCollectAllSourceFiles:
+    def test_deep_discovery_and_single_walk_collection_skip_excluded(self, tmp_path, monkeypatch):
+        deep = tmp_path / "src" / "pkg" / "deep"
+        deep.mkdir(parents=True)
+        source = deep / "mod.py"
+        source.write_text(_PY_SOURCE)
+        excluded = tmp_path / "node_modules" / "dependency"
+        excluded.mkdir(parents=True)
+        (excluded / "index.ts").write_text(_TS_SOURCE)
+
+        assert detect_project_languages(str(tmp_path)) == ["python"]
+
+        from emend import emend_core
+        original = emend_core.collect_files
+        calls = []
+
+        def counting_collect_files(root, extensions):
+            calls.append((root, extensions))
+            return original(root, extensions)
+
+        monkeypatch.setattr(emend_core, "collect_files", counting_collect_files)
+        assert _collect_all_source_files(str(tmp_path)) == [str(source)]
+        assert len(calls) == 1
+
     def test_collects_py_and_ts_files(self, tmp_path):
         """Collects both .py and .ts files for a mixed project."""
         (tmp_path / "main.py").write_text(_PY_SOURCE)

@@ -497,6 +497,39 @@ class TestFindImpactFactGraph:
         impacted_names = [s.split("::")[-1] for s in result.impacted_symbols]
         assert "main" in impacted_names
 
+    def test_impact_fact_graph_distinguishes_same_named_methods(self, tmp_path):
+        """A selector resolves the full nested symbol path, not its final name."""
+        from emend.transform import find_impact
+
+        project = tmp_path / "project"
+        project.mkdir()
+        lib = project / "lib.py"
+        lib.write_text(
+            "class A:\n"
+            "    @staticmethod\n"
+            "    def foo():\n"
+            "        return 1\n"
+            "\n"
+            "class B:\n"
+            "    @staticmethod\n"
+            "    def foo():\n"
+            "        return 2\n"
+        )
+        (project / "app.py").write_text(
+            "from lib import A\n\n"
+            "def main():\n"
+            "    return A.foo()\n"
+        )
+
+        def impact_for(owner):
+            return find_impact(
+                selectors=[ExtendedSelector(str(lib), [owner, "foo"], None, None)],
+                project_path=str(project),
+            ).impacted_symbols
+
+        assert any(symbol.endswith("::main") for symbol in impact_for("A"))
+        assert not impact_for("B")
+
     def test_impact_fact_graph_transitive(self, tmp_path):
         """Fact-graph-based impact computes transitive closure."""
         from emend.transform import find_impact

@@ -57,9 +57,9 @@ def _make_project(tmp_path: Path, files: dict[str, str]) -> Path:
     return project
 
 
-def _write_malformed_config(project_root: Path) -> None:
+def _write_malformed_config(project_root: Path, language="python") -> None:
     """Plant the same ``[bindings.walrus]`` TOML bug as exists in the emend repo."""
-    cfg_dir = project_root / "languages" / "python"
+    cfg_dir = project_root / "languages" / language
     cfg_dir.mkdir(parents=True, exist_ok=True)
     (cfg_dir / "config.toml").write_text(
         "[bindings.walrus]\n"
@@ -247,6 +247,22 @@ def test_goto_definition_cross_file_call_with_malformed_config(tmp_path):
         )
     finally:
         engine.close()
+
+
+def test_scope_resolver_keeps_typescript_config_after_malformed_override(tmp_path):
+    from emend import emend_core
+
+    project = _make_project(tmp_path, {"module.ts": "function greet() {}\n"})
+    _write_malformed_config(project, "typescript")
+    source_path = project / "module.ts"
+
+    resolver = emend_core.PyScopeResolver(str(project), "ts")
+    resolver.index_file(str(source_path), source_path.read_text())
+
+    assert any(
+        name.endswith("/greet")
+        for name, _, _ in resolver.definitions_in_file(str(source_path))
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -165,23 +165,27 @@ def find_source_root(project_root: str, language: str = "python") -> Path:
     root = Path(project_root).resolve()
     if language == "python":
         data = _load_toml(root / "pyproject.toml")
-        candidates = [
-            data.get("tool", {}).get("maturin", {}).get("python-source"),
-        ]
-        where = (
-            data.get("tool", {}).get("setuptools", {}).get("packages", {})
-            .get("find", {}).get("where")
-        )
-        if isinstance(where, list) and where:
-            candidates.append(where[0])
-        hatch_source = (
-            data.get("tool", {}).get("hatch", {}).get("build", {})
-            .get("sources", {}).get("src")
-        )
-        if isinstance(hatch_source, str):
-            candidates.append(hatch_source)
+        tool = data.get("tool", {})
+        candidates = [tool.get("maturin", {}).get("python-source")]
+
+        setuptools = tool.get("setuptools", {})
+        packages = setuptools.get("packages", {})
+        if isinstance(packages, dict):
+            find = packages.get("find", {})
+            where = find.get("where") if isinstance(find, dict) else None
+            if isinstance(where, str):
+                candidates.append(where)
+            elif isinstance(where, list):
+                candidates.extend(where)
+        package_dir = setuptools.get("package-dir", {})
+        if isinstance(package_dir, dict):
+            candidates.append(package_dir.get(""))
+
+        sources = tool.get("hatch", {}).get("build", {}).get("sources")
+        if isinstance(sources, (list, dict)):
+            candidates.extend(sources)
         for relative in candidates:
-            if relative and (root / relative).is_dir():
+            if isinstance(relative, str) and relative and (root / relative).is_dir():
                 return (root / relative).resolve()
 
         setup_cfg = root / "setup.cfg"
