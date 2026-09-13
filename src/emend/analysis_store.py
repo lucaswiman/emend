@@ -23,7 +23,7 @@ from emend.project_config import find_project_root
 from emend.symbol_projection import SymbolInfo, _symbol_info_view
 
 
-EXTRACTION_ARTIFACT_VERSION = "7"
+EXTRACTION_ARTIFACT_VERSION = "8"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 logger = logging.getLogger(__name__)
 
@@ -1153,7 +1153,7 @@ class AnalysisStore:
         except (OSError, ValueError, TypeError, AttributeError):
             inherited_configs = ()
         for path in inherited_configs:
-            digest.update(str(path).encode())
+            digest.update(os.path.relpath(path, self.project_root).encode())
             digest.update(b"\0")
             try:
                 digest.update(path.read_bytes())

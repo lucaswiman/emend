@@ -193,6 +193,7 @@ class TestIndexBatchCacheHit:
 
     @pytest.mark.parametrize("legacy_schema", [False, True])
     def test_cold_then_warm_cache_preserves_rows(self, tmp_path, legacy_schema):
+        import hashlib
         from emend.transform import _index_batch
 
         db_path = tmp_path / "parse.db"
@@ -205,6 +206,10 @@ class TestIndexBatchCacheHit:
         assert _db_row_count(db_path, "qn_index") == 1
         assert _index_batch(args) == (0, 0, 1, 0, 0, 0, 0)
         assert _db_row_count(db_path, "qn_index") == 1
+        with sqlite3.connect(db_path) as conn:
+            content_hash = hashlib.md5(SOURCE.encode(), usedforsecurity=False).digest()
+            assert conn.execute("SELECT content_hash FROM symbol_index").fetchone() == (content_hash,)
+            assert conn.execute("SELECT hash FROM qn_index").fetchone() != (content_hash,)
 
 
 class TestWarmCachesSkipped:
@@ -791,7 +796,7 @@ class TestIndexStatus:
         assert info is not None
         assert info["file_manifest_count"] == 2
         assert info["symbol_index_count"] >= 2  # hello + Foo
-        assert info["schema_version"] == "6"
+        assert info["schema_version"] == "7"
 
     def test_status_returns_none_without_index(self, tmp_path):
         """get_index_status returns None when no index exists."""

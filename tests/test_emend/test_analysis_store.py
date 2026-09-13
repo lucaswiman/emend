@@ -936,13 +936,17 @@ def test_legacy_filtered_build_cannot_overwrite_owner_generation(tmp_path):
     }
 
 
+@pytest.mark.parametrize("inherited_config", [False, True])
 def test_type_batch_uses_one_snapshot_and_reuses_linked_worktree_payload(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, inherited_config
 ):
     main, linked = _linked_worktrees(tmp_path)
     for root in (main, linked):
         (root / "one.py").write_text("value = 1\n")
         (root / "two.py").write_text("other = 2\n")
+        if inherited_config:
+            (root / "tsconfig.json").write_text('{"extends":"./base.json"}')
+            (root / "base.json").write_text('{"compilerOptions":{"strict":true}}')
     target, dependency, unrelated = (
         main / "target.py", main / "dependency.py", main / "unrelated.py"
     )

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 import hashlib
 import logging
+import os
 import re
 
 from ..language_plugins import NOQA_PATTERN as _NOQA_PATTERN
@@ -18,6 +19,26 @@ if TYPE_CHECKING:
     from emend.type_oracle import TypeBatchInputs, TypeOracle
 
 logger = logging.getLogger(__name__)
+
+
+def _scope_cache_hash(content_hash: bytes, file_path: str, project_root: str) -> bytes:
+    """Key QN-derived data without changing content-addressed syntax keys."""
+    from emend.language_registry import detect_language
+    from emend.project_config import module_resolution_context
+
+    language = detect_language(file_path) or "python"
+    module_root, root_module = module_resolution_context(
+        project_root, language, file_path=file_path,
+    )
+    root = Path(project_root).resolve()
+    identity = (
+        os.path.relpath(module_root, root),
+        os.path.relpath(root_module, root) if root_module else "",
+    )
+    return hashlib.md5(
+        repr(identity).encode() + content_hash, usedforsecurity=False,
+    ).digest()
+
 
 def _get_cached_qnames(
     content_hash: bytes,
@@ -36,7 +57,8 @@ def _get_cached_qnames(
     try:
         row = conn.execute(
             "SELECT qnames FROM qn_index WHERE file_path = ? AND hash = ?",
-            (str(Path(file_path).resolve()), content_hash),
+            (str(Path(file_path).resolve()),
+             _scope_cache_hash(content_hash, file_path, str(project_root))),
         ).fetchone()
     except sqlite3.Error:
         logger.debug("qn_index cache lookup failed", exc_info=True)
@@ -210,8 +232,9 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
 
     from .deadcode import _is_likely_entry_point
     db_path, source_root, project_root, file_batch = args
-    # Scope resolver for QN and reference collection (replaces MetadataWrapper).
-    scope_resolver = _rust.PyScopeResolver(project_root)
+    # Scope resolvers share the configured module identity used by live
+    # project traversal; one resolver is retained per language extension.
+    scope_resolvers = {}
 
     # Compute content hashes up-front so we can bulk-check the cache.
     file_hashes: list[tuple[bytes, str, str]] = [
@@ -219,7 +242,8 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
         for py_file, content in file_batch
     ]
     cached_qn = _check_cache_hits(
-        conn, [(path, digest) for digest, path, _ in file_hashes]
+        conn, [(path, _scope_cache_hash(digest, path, project_root))
+               for digest, path, _ in file_hashes]
     )
 
     skipped = 0
@@ -231,7 +255,8 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
         # given file (e.g. a file with only assignments has no symbols) and are
         # written in lockstep with the QN cache, so we re-derive all of them
         # exactly when the QN cache entry is missing.
-        if (str(Path(py_file).resolve()), content_hash) in cached_qn:
+        scope_hash = _scope_cache_hash(content_hash, py_file, project_root)
+        if (str(Path(py_file).resolve()), scope_hash) in cached_qn:
             skipped += 1
             continue
 
@@ -246,6 +271,20 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
         # (replaces expensive MetadataWrapper + _QNCollector + _RefIndexCollector).
         scope_indexed = False
         try:
+            from emend.language_registry import detect_language
+            from emend.project_config import module_resolution_context
+            extension = Path(py_file).suffix.lstrip(".")
+            language = detect_language(py_file) or "python"
+            module_root, root_module = module_resolution_context(
+                project_root, language, file_path=py_file,
+            )
+            resolver_key = (extension, str(root_module) if root_module else None)
+            if resolver_key not in scope_resolvers:
+                scope_resolvers[resolver_key] = _rust.PyScopeResolver(
+                    project_root, extension, str(module_root),
+                    str(root_module) if root_module else None,
+                )
+            scope_resolver = scope_resolvers[resolver_key]
             scope_resolver.index_file(py_file, content)
             scope_indexed = True
         except Exception:
@@ -261,7 +300,7 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
                     pickle.dumps(all_qnames, protocol=pickle.HIGHEST_PROTOCOL),
                     level=1,
                 )
-                qn_rows.append((str(Path(py_file).resolve()), content_hash, qn_blob))
+                qn_rows.append((str(Path(py_file).resolve()), scope_hash, qn_blob))
 
         try:
             syms_for_file = _collect_symbols_ts(Path(py_file), content)

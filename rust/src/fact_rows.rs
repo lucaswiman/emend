@@ -699,7 +699,7 @@ fn extract_batch(
 
     for scoped in &file_scope.scoped_imports {
         let import = &scoped.binding;
-        let imported_module = import.module_path.trim_matches(['\'', '"']);
+        let imported_module = scoped.raw_module_path.trim_matches(['\'', '"']);
         let local_name = import.local_name.as_str();
         let imported_name = if matches!(language, "typescript" | "javascript")
             && (import.is_star || import.imported_name.as_deref() == Some("default"))
