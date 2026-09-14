@@ -1075,6 +1075,7 @@ def warm_caches(
     language: str | None = "python",
     build_fts: bool = True,
     build_duplicates: bool = False,
+    include_environment: bool = False,
 ) -> dict[str, int | str]:
     """Pre-populate the parse, QN-index, and type caches for all project files.
 
@@ -1101,6 +1102,9 @@ def warm_caches(
             by default; duplicate queries compute their payloads on demand.
             Use this after detecting that the persisted fact graph is empty or
             invalid while parse/reference caches are still current.
+        include_environment: Include installed environment sources in type
+            dependency identities. Disabled by default so virtualenvs and
+            other dependency trees do not become part of a project index.
 
     Returns:
         Dict with stats: ``{"files", "indexed", "qn_cached",
@@ -1277,6 +1281,7 @@ def warm_caches(
         from emend.type_oracle import create_type_oracle, TypeEngineUnavailableError
 
         oracle = create_type_oracle(engine=type_engine, project_root=Path(project_root))
+        oracle._include_environment = include_environment
         engine_name = type(oracle).__name__.replace("Adapter", "").lower()
         if not oracle.is_available():
             raise TypeEngineUnavailableError(
@@ -1290,6 +1295,7 @@ def warm_caches(
     with store.prepare_index_facts(
         paths if types_enabled else None,
         include_overlays=bool(types_enabled and oracle.supports_source_overrides),
+        include_environment=include_environment,
         prepare=prepare_file, prepared=prepared_file, callback=callback, jobs=max_workers,
     ) as inputs, ThreadPoolExecutor(max_workers=1) as pool:
         if types_enabled:

@@ -458,6 +458,9 @@ class TypeOracle(ABC):
     # visible to their subprocess.  LSP adapters set this to True because
     # they receive the overlay through didOpen below.
     _uses_overlay_source = False
+    # Indexing can deliberately omit installed environment sources. Direct
+    # type queries retain the historical environment-aware default.
+    _include_environment = True
 
     @property
     def supports_source_overrides(self) -> bool:
@@ -519,6 +522,7 @@ class TypeOracle(ABC):
         return _file_cache_key(
             path, project_root=project_root,
             include_overlays=self._uses_overlay_source,
+            include_environment=self._include_environment,
         )
 
     def _publish_result(self, path, result, key, current_key):
@@ -540,6 +544,7 @@ class TypeOracle(ABC):
         if inputs is None:
             inputs = AnalysisStore.open(root).type_file_inputs(
                 paths, include_overlays=self._uses_overlay_source,
+                include_environment=self._include_environment,
             )
         identities, sources, project_paths = inputs
         if self._uses_overlay_source:
@@ -1181,6 +1186,7 @@ def _file_cache_key(
     project_root: Path | None = None,
     *,
     include_overlays: bool = False,
+    include_environment: bool = True,
 ) -> str:
     """Key type results by logical path, content, and local dependencies."""
     from emend.analysis_store import AnalysisStore
@@ -1195,7 +1201,10 @@ def _file_cache_key(
             content_hash = None
     store = AnalysisStore.open(project_root or path)
     return store.type_file_identity(
-        path, content_hash, include_overlays=include_overlays
+        path,
+        content_hash,
+        include_overlays=include_overlays,
+        include_environment=include_environment,
     )
 
 
@@ -1524,7 +1533,11 @@ class PyreflyAdapter(TypeOracle):
 
         current = AnalysisStore.open(
             project_root or to_check[0].parent
-        ).type_file_identities(to_check, include_overlays=False)
+        ).type_file_identities(
+            to_check,
+            include_overlays=False,
+            include_environment=self._include_environment,
+        )
         for path_obj in to_check:
             key = str(path_obj)
             results[key] = self._publish_result(
@@ -1642,7 +1655,9 @@ class _LSPTypeOracle(TypeOracle):
             identities, sources, project_paths = AnalysisStore.open(
                 project_root or path.parent
             ).type_file_inputs(
-                [path], include_overlays=True
+                [path],
+                include_overlays=True,
+                include_environment=self._include_environment,
             )
             if str(path) not in identities:
                 content_hash = self._file_key(path, project_root)

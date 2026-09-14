@@ -140,6 +140,10 @@ class TestCollectAllSourceFiles:
         excluded = tmp_path / "node_modules" / "dependency"
         excluded.mkdir(parents=True)
         (excluded / "index.ts").write_text(_TS_SOURCE)
+        for name in (".venv-314t", "venv-test"):
+            venv = tmp_path / name / "site-packages"
+            venv.mkdir(parents=True)
+            (venv / "ignored.py").write_text(_PY_SOURCE)
 
         assert detect_project_languages(str(tmp_path)) == ["python"]
 

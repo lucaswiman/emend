@@ -1084,7 +1084,8 @@ class AnalysisStore:
 
     @contextmanager
     def prepare_index_facts(self, file_paths=None, *, include_overlays=False,
-                            prepare=None, prepared=None, callback=None, jobs=None):
+                            include_environment=True, prepare=None, prepared=None,
+                            callback=None, jobs=None):
         """Fan one extraction stream into type inputs and a private fact view."""
         from concurrent.futures import ThreadPoolExecutor
         from queue import Queue, Full, Empty
@@ -1159,10 +1160,16 @@ class AnalysisStore:
                     inputs = None
                 else:
                     inputs = self.type_file_inputs(
-                        file_paths, _local_state=(scan.snapshot, stream)
+                        file_paths,
+                        _local_state=(scan.snapshot, stream),
+                        include_environment=include_environment,
                     )
                     if include_overlays and self._overlays:
-                        inputs = self.type_file_inputs(file_paths, include_overlays=True)
+                        inputs = self.type_file_inputs(
+                            file_paths,
+                            include_overlays=True,
+                            include_environment=include_environment,
+                        )
                 yield inputs
             except BaseException as error:
                 if not writer.done():
@@ -1252,6 +1259,7 @@ class AnalysisStore:
         content_hash: str | None = None,
         *,
         include_overlays: bool = False,
+        include_environment: bool = True,
     ) -> str:
         """Return logical file/content plus transitive local dependency identity."""
         resolved = str(Path(file_path).resolve())
@@ -1259,6 +1267,7 @@ class AnalysisStore:
             [resolved],
             {resolved: content_hash} if content_hash else None,
             include_overlays=include_overlays,
+            include_environment=include_environment,
         )[resolved]
 
     def _external_type_source(self, path, language, root, module, config):
@@ -1305,7 +1314,14 @@ class AnalysisStore:
                 self._external_type_files[observed_key] = (identity, digest, imports)
             return FileRevision.create(root, path, digest, language, module), imports
 
-    def _type_dependency_state(self, graph=None, *, include_overlays=False, local_state=None):
+    def _type_dependency_state(
+        self,
+        graph=None,
+        *,
+        include_overlays=False,
+        local_state=None,
+        include_environment=True,
+    ):
         """Resolve import dependencies without requiring graph materialization."""
         from emend.language_registry import registry_snapshot
 
@@ -1397,6 +1413,8 @@ class AnalysisStore:
             }.values())
             if matches and language == "rust":
                 return matches[0] if len(matches) == 1 else None
+            if not include_environment:
+                return None
             from emend.project_config import resolve_environment_path
             if language not in external_roots:
                 external_roots[language] = resolve_environment_path(
@@ -1418,8 +1436,10 @@ class AnalysisStore:
             return None
 
         from emend.project_config import pyrefly_search_roots
-        python_search_roots = (pyrefly_search_roots(self.project_root)
-                               if "python" in configs else ())
+        python_search_roots = (
+            pyrefly_search_roots(self.project_root)
+            if include_environment and "python" in configs else ()
+        )
 
         @cache
         def configured_python_revisions(name):
@@ -1593,10 +1613,13 @@ class AnalysisStore:
         *,
         include_overlays: bool = False,
         graph: object | None = None,
+        include_environment: bool = True,
     ) -> dict[str, str]:
         """Compute cache identities against one source generation."""
         revisions, dependencies = self._type_dependency_state(
-            graph, include_overlays=include_overlays
+            graph,
+            include_overlays=include_overlays,
+            include_environment=include_environment,
         )
         return self._type_identities(
             file_paths, content_hashes, revisions, dependencies
@@ -1609,11 +1632,15 @@ class AnalysisStore:
         include_overlays: bool = False,
         graph: object | None = None,
         _local_state=None,
+        include_environment: bool = True,
     ) -> tuple[dict[str, str], dict[str, str], set[str]]:
         """Capture identities, transitive sources, and project file membership."""
         paths = [str(Path(path).resolve()) for path in file_paths]
         revisions, dependencies = self._type_dependency_state(
-            graph, include_overlays=include_overlays, local_state=_local_state
+            graph,
+            include_overlays=include_overlays,
+            local_state=_local_state,
+            include_environment=include_environment,
         )
         paths = [path for path in paths if path in revisions]
         identities = self._type_identities(paths, None, revisions, dependencies)
