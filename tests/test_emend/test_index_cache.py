@@ -431,6 +431,41 @@ class TestTypeCacheWarming:
         assert written.is_set()
         assert sorted(extracted) == sorted(str(proj / name) for name in ("a.py", "b.py", "b.py"))
 
+    @pytest.mark.parametrize("edit", [None, "source", "config"])
+    def test_pyrefly_starts_before_extraction(self, tmp_path, monkeypatch, edit):
+        from threading import Event
+        from emend import analysis_extraction, type_oracle
+        from emend.transform import warm_caches
+
+        proj = self._make_project(tmp_path)
+        started = Event()
+        oracle = type_oracle.PyreflyAdapter()
+        calls = []
+
+        def compute(paths, project_root):
+            calls.append(tuple(paths))
+            started.set()
+            return {str(p): type_oracle.FileTypes(path=str(p)) for p in paths}
+
+        extract = analysis_extraction._extract_file_facts
+        def checked_extract(*args):
+            assert started.wait(5), "Pyrefly waited for extraction"
+            if edit == "source" and len(calls) == 1:
+                (proj / "b.py").write_text("y: str = 'changed'\n")
+            elif edit == "config" and len(calls) == 1:
+                (proj / "pyrefly.toml").write_text('python-version = "3.13"\n')
+            return extract(*args)
+
+        monkeypatch.setattr(oracle, "_run_batch", compute)
+        monkeypatch.setattr(oracle, "is_available", lambda: True)
+        monkeypatch.setattr(type_oracle, "create_type_oracle", lambda **kw: oracle)
+        monkeypatch.setattr(analysis_extraction, "_extract_file_facts", checked_extract)
+        assert warm_caches(str(proj), jobs=1)["type_cached"] == 2
+        assert len(calls) == (2 if edit else 1)
+        if not edit:
+            assert warm_caches(str(proj), jobs=1)["type_cached"] == 2
+            assert len(calls) == 1  # Warm indexing must not speculate past its cache.
+
     @pytest.mark.skipif(not _HAS_TYPE_ENGINE, reason="no type engine on PATH")
     def test_type_cache_populated(self, tmp_path):
         """warm_caches with auto engine writes rows to the type_cache table."""

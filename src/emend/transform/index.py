@@ -1111,6 +1111,7 @@ def warm_caches(
         "type_cached", "type_engine"}``.
     """
     import multiprocessing
+    from contextlib import nullcontext
     import time
     from concurrent.futures import ThreadPoolExecutor
     from emend import emend_core as _rust
@@ -1292,7 +1293,8 @@ def warm_caches(
         paths = [Path(f) for f, _ in file_contents]
         announce_phase("Analysis inputs")
     t_facts = time.monotonic()
-    with store.prepare_index_facts(
+    with (oracle.precompute_batch(paths, Path(project_root))
+          if types_enabled else nullcontext()), store.prepare_index_facts(
         paths if types_enabled else None,
         include_overlays=bool(types_enabled and oracle.supports_source_overrides),
         include_environment=include_environment,
@@ -1348,7 +1350,7 @@ def _warm_type_cache(
     t_type = time.monotonic()
     results = oracle.infer_batch(paths, project_root=Path(project_root), inputs=inputs)
     logger.info(
-        "warm_caches: type-indexed %d files via %s in %.3fs",
+        "warm_caches: finalized %d type results via %s in %.3fs after input preparation",
         len(results), engine_name, time.monotonic() - t_type,
     )
     return {"type_cached": len(results), "type_engine": engine_name}

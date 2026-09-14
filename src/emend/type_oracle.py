@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -481,6 +482,11 @@ class TypeOracle(ABC):
         cache = getattr(self, "_cache", None)
         if cache is not None:
             cache.close()
+
+    @contextmanager
+    def precompute_batch(self, paths, project_root):
+        """Optionally overlap independent inference with index preparation."""
+        yield
 
     def type_at(self, path: Path, line: int, col: int,
                 project_root: Path | None = None) -> TypeBinding | None:
@@ -1358,6 +1364,31 @@ class PyreflyAdapter(TypeOracle):
 
     _uses_overlay_source = False
 
+    @contextmanager
+    def precompute_batch(self, paths, project_root):
+        from concurrent.futures import ThreadPoolExecutor
+        from emend.analysis_store import AnalysisStore
+
+        store = AnalysisStore.open(project_root)
+        # Warm indexes should use their type cache, not speculatively rerun it.
+        # Environment dependency closure still requires prepared identities.
+        if store.facts_path.exists() or self._include_environment or not paths:
+            yield
+            return
+
+        def generation():
+            return store._scan_disk().snapshot.snapshot_id, _type_shared_context(project_root)
+
+        before = generation()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            self._precomputed_batch = (pool.submit(
+                self._run_batch, [p.resolve() for p in paths], project_root,
+            ), before, generation)
+            try:
+                yield
+            finally:
+                del self._precomputed_batch
+
     def __init__(
         self,
         pyrefly_path: str | None = None,
@@ -1481,6 +1512,34 @@ class PyreflyAdapter(TypeOracle):
         if not to_check:
             return results
 
+        precomputed = getattr(self, "_precomputed_batch", None)
+        if precomputed is not None:
+            future, before, generation = precomputed
+            computed = future.result()
+            if generation() != before:
+                computed = self._run_batch(to_check, project_root)
+        else:
+            computed = self._run_batch(to_check, project_root)
+
+        from emend.analysis_store import AnalysisStore
+
+        current = AnalysisStore.open(
+            project_root or to_check[0].parent
+        ).type_file_identities(
+            to_check,
+            include_overlays=False,
+            include_environment=self._include_environment,
+        )
+        for path_obj in to_check:
+            key = str(path_obj)
+            results[key] = self._publish_result(
+                path_obj, computed.get(key), hashes[key], current.get(key)
+            )
+        return results
+
+    def _run_batch(self, to_check, project_root):
+        """Run the checker without reading or writing analysis caches."""
+        results = {}
         logger.info(
             "Building type indexes for %d files via pyrefly (batch)",
             len(to_check),
@@ -1528,21 +1587,6 @@ class PyreflyAdapter(TypeOracle):
                 os.unlink(debug_path)
             except OSError:
                 pass
-
-        from emend.analysis_store import AnalysisStore
-
-        current = AnalysisStore.open(
-            project_root or to_check[0].parent
-        ).type_file_identities(
-            to_check,
-            include_overlays=False,
-            include_environment=self._include_environment,
-        )
-        for path_obj in to_check:
-            key = str(path_obj)
-            results[key] = self._publish_result(
-                path_obj, results.get(key), hashes[key], current.get(key)
-            )
 
         return results
 
