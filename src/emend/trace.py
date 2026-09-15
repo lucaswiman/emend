@@ -270,7 +270,7 @@ def _project_summaries(
                           (edge.file_path, edge.to_event))
         if source not in events or target not in events:
             continue
-        (control if edge.edge_kind == "control" else adjacency)[source].append(
+        (control if edge.edge_kind == "control" or edge.edge_kind.startswith("control;") else adjacency)[source].append(
             (target, edge.edge_kind)
         )
     resolved_calls = _add_cross_file_calls(events, adjacency, control, graph)
@@ -323,7 +323,7 @@ def _project_summaries(
         reached, _predecessor = _walk(node, adjacency, events, allowed)
         reached_nodes = {state[0] for state in reached}
         labels = {rule.label for rule in rules}
-        if any(events[target].role == "return_out" for target in reached_nodes):
+        if any(events[target].role == "function_exit" for target in reached_nodes):
             summary.param_to_return.setdefault(event.var, set()).update(labels)
         for rule, endpoint, match in sink_rows:
             if match.node in reached_nodes:

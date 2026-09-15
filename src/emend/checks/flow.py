@@ -422,6 +422,28 @@ def _call_transition(
     return stack
 
 
+def _is_control_edge(kind: str) -> bool:
+    return kind == "control" or kind.startswith("control;")
+
+
+def _finally_transition(kind, event, pending):
+    if ";" not in kind:
+        return pending
+    reasons = dict(pending)
+    for encoded in kind.split(";")[1:]:
+        operation, scope, reason = encoded.split(",")
+        marker = (event.file_path, event.func_id, int(scope))
+        reason = int(reason)
+        if operation == "enter":
+            reasons[marker] = reason
+        else:
+            # A source can begin inside a finalizer, with no observed entry.
+            if operation == "resume" and marker in reasons and reasons[marker] != reason:
+                return None
+            reasons.pop(marker, None)
+    return tuple(sorted(reasons.items()))
+
+
 def _walk(
     start: tuple[str, int],
     adjacency: dict[tuple[str, int], list[tuple[tuple[str, int], str]]],
@@ -430,26 +452,31 @@ def _walk(
     *,
     blocked: frozenset[tuple[str, int]] = frozenset(),
     max_call_depth: int | None = None,
+    initial_state: Any = None,
 ) -> tuple[set[Any], dict[Any, Any]]:
-    initial = (start, ())
+    initial = initial_state if initial_state is not None else (start, (), ())
     queue = deque([initial])
     seen = {initial}
     predecessor: dict[Any, Any] = {}
     while queue:
-        node, stack = queue.popleft()
+        current = queue.popleft()
+        node, stack, pending = current
         for target, kind in adjacency.get(node, ()):
-            if kind not in allowed or target in blocked:
+            if (kind not in allowed and not (_is_control_edge(kind) and "control" in allowed)) or target in blocked:
                 continue
             next_stack = _call_transition(
                 kind, events[node], events[target], stack, max_call_depth,
             )
             if next_stack is None:
                 continue
-            state = (target, next_stack)
+            next_pending = _finally_transition(kind, events[node], pending)
+            if next_pending is None:
+                continue
+            state = (target, next_stack, next_pending)
             if state in seen:
                 continue
             seen.add(state)
-            predecessor[state] = ((node, stack), kind)
+            predecessor[state] = (current, kind)
             queue.append(state)
     return seen, predecessor
 
@@ -527,17 +554,19 @@ def _has_sanitized_path(
         max_call_depth=max_call_depth,
     )]
     relevant.extend(scope_sanitizers)
-    on_a_path = [sanitizer for sanitizer in relevant if (
-        _can_reach(
-            source.node, sanitizer.control_node, control_adjacency, events, control_edges,
-            max_call_depth=max_call_depth,
-        )
-        and _can_reach(
-            sanitizer.control_node, sink.node, control_adjacency, events, control_edges,
-            max_call_depth=max_call_depth,
-        )
-    )]
-    return bool(on_a_path)
+    if not relevant:
+        return False
+    reachable, _ = _walk(source.node, control_adjacency, events, control_edges,
+                         max_call_depth=max_call_depth)
+    for sanitizer in relevant:
+        for state in reachable:
+            if state[0] != sanitizer.control_node:
+                continue
+            onward, _ = _walk(state[0], control_adjacency, events, control_edges,
+                              max_call_depth=max_call_depth, initial_state=state)
+            if any(candidate[0] == sink.node for candidate in onward):
+                return True
+    return False
 
 
 # Allow this many additional states beyond one visit per occurrence. Exact
@@ -568,6 +597,7 @@ def _value_path_walker(sanitizers, scope_sanitizers,
     call_targets = defaultdict(set)
     parameter_inputs = defaultdict(lambda: defaultdict(set))
     transitions = {}
+    final_actions = defaultdict(set)
     resolved_results = set()
     call_results = {}
     function = [(events[node].file_path, events[node].func_id) for node in nodes]
@@ -594,10 +624,9 @@ def _value_path_walker(sanitizers, scope_sanitizers,
                 transitions[index, result] = ("return", marker)
                 resolved_results.add(result)
         for target, kind in control_adjacency.get(node, ()):
-            if kind == "control":
+            if _is_control_edge(kind):
                 successors[index].add(indices[target])
-    terminals = {i for i in range(count) if not successors[i]
-                 and events[nodes[i]].role != "throw"}
+                final_actions[index, indices[target]].add(kind)
     for marker, targets in call_targets.items():
         result = call_results[marker]
         resolved_results.add(result)
@@ -607,11 +636,6 @@ def _value_path_walker(sanitizers, scope_sanitizers,
             entry = min(members, key=lambda i: events[nodes[i]].ordinal)
             successors[marker].add(entry)
             transitions[marker, entry] = ("enter", marker)
-            # Falling off a void function completes the call without a value.
-            for i in members:
-                if i in terminals:
-                    successors[i].add(result)
-                    transitions[i, result] = ("return", marker)
     for index, targets in enumerate(successors):
         for target in targets:
             predecessors[target].add(index)
@@ -671,10 +695,12 @@ def _value_path_walker(sanitizers, scope_sanitizers,
 
         if indices[source.node] in outputs or _source_starts_clean(
             source, sanitizers, value_adjacency, events,
-            _INTRA_VALUE_EDGES | {_OPAQUE_CALL_EDGE},
+            _INTRA_VALUE_EDGES | {_OPAQUE_CALL_EDGE} | (
+                _CALL_EDGES if interprocedural else frozenset()
+            ), max_call_depth,
         ):
             return {}
-        initial = (indices[source.node], (), ())
+        initial = (indices[source.node], (), (), ())
         queue = deque([initial])
         previous = {initial: None}
         visited_nodes = {initial[0]}
@@ -682,7 +708,7 @@ def _value_path_walker(sanitizers, scope_sanitizers,
         wanted = {indices[node] for node in sinks if node in indices}
         while queue:
             state = queue.popleft()
-            index, frozen, stack = state
+            index, frozen, stack, pending_finally = state
             values, _ = advance(index, dict(frozen), stack)
             if index in wanted and index in values and nodes[index] not in paths:
                 route = []
@@ -691,7 +717,7 @@ def _value_path_walker(sanitizers, scope_sanitizers,
                     route.append(cursor)
                     cursor = previous[cursor]
                 provenance = {}
-                for step, snapshot, frame in reversed(route):
+                for step, snapshot, frame, _pending in reversed(route):
                     active, parents = advance(step, dict(snapshot), frame)
                     if step == indices[source.node]:
                         provenance[step] = (1, source.node, None)
@@ -724,19 +750,26 @@ def _value_path_walker(sanitizers, scope_sanitizers,
                     if stack[-1] != marker:
                         continue
                     next_stack = stack[:-1]
-                # Renumber live identities, preserving alias classes without
-                # confusing separate executions of the same loop occurrence.
-                names = {}
-                next_state = (target, tuple(
-                    (i, names.setdefault(value, len(names)))
-                    for i, value in sorted(carried.items()) if live[target] & (1 << i)
-                ), next_stack)
-                if next_state not in previous:
-                    if len(previous) - len(visited_nodes) >= _VALUE_STATE_LIMIT:
-                        return None
-                    visited_nodes.add(target)
-                    previous[next_state] = state
-                    queue.append(next_state)
+                for action in final_actions.get((index, target), ("control",)):
+                    next_pending = _finally_transition(action, events[nodes[index]], pending_finally)
+                    if next_pending is None:
+                        continue
+                    if kind == "enter":
+                        next_pending = tuple((scope, reason) for scope, reason in next_pending
+                                             if scope[:2] != function[target])
+                    # Renumber live identities, preserving alias classes without
+                    # confusing separate executions of the same loop occurrence.
+                    names = {}
+                    next_state = (target, tuple(
+                        (i, names.setdefault(value, len(names)))
+                        for i, value in sorted(carried.items()) if live[target] & (1 << i)
+                    ), next_stack, next_pending)
+                    if next_state not in previous:
+                        if len(previous) - len(visited_nodes) >= _VALUE_STATE_LIMIT:
+                            return None
+                        visited_nodes.add(target)
+                        previous[next_state] = state
+                        queue.append(next_state)
         return paths
     return walk
 
@@ -859,7 +892,7 @@ def _add_cross_file_calls(
                         existing.add(edge)
         results = [node for node, event in caller_events if event.role == "call_result"]
         for return_node, returned in callee_events:
-            if returned.role != "return_out":
+            if returned.role != "function_exit":
                 continue
             for result_node in results:
                 edge = (return_node, result_node, "call_return")
@@ -1068,7 +1101,7 @@ def evaluate_compiled_flow(
         target_node = (edge.file_path, edge.to_event)
         if source_node not in all_events or target_node not in all_events:
             continue
-        if edge.edge_kind == "control":
+        if _is_control_edge(edge.edge_kind):
             control_adjacency[source_node].append((target_node, edge.edge_kind))
         else:
             value_adjacency[source_node].append((target_node, edge.edge_kind))
@@ -1078,6 +1111,25 @@ def evaluate_compiled_flow(
         all_events, value_adjacency, control_adjacency, graph,
     )
     _add_container_mutations(all_events, value_adjacency, language)
+    # Finalizer continuations affect the whole connected call component, even
+    # when the pending control path carries no value into the callee.
+    function_of = {node: (event.file_path, event.func_id)
+                   for node, event in all_events.items()}
+    finally_functions = {function_of[node] for node, outgoing in control_adjacency.items()
+                         if any(kind.startswith("control;") for _target, kind in outgoing)}
+    if finally_functions and interprocedural:
+        callers = defaultdict(set)
+        for node, outgoing in value_adjacency.items():
+            for target, kind in outgoing:
+                if kind in _CALL_EDGES:
+                    left, right = function_of[node], function_of[target]
+                    callers[left].add(right)
+                    callers[right].add(left)
+        pending_functions = list(finally_functions)
+        while pending_functions:
+            for target in callers[pending_functions.pop()] - finally_functions:
+                finally_functions.add(target)
+                pending_functions.append(target)
     if interprocedural:
         for source_node, outgoing in value_adjacency.items():
             source_event = all_events[source_node]
@@ -1235,13 +1287,15 @@ def evaluate_compiled_flow(
                                if sink.node in states_by_node}
             if not reachable_sinks:
                 continue
-            correlate = rule.quantifier == "all_paths" and bool(
-                sanitizers or scope_sanitizers or return_sanitizers)
+            correlate = function_of[source.node] in finally_functions or (rule.quantifier == "all_paths" and bool(
+                sanitizers or scope_sanitizers or return_sanitizers))
             surviving = {}
             if correlate:
                 if value_walker is None:
                     value_walker = _value_path_walker(
-                        sanitizers, scope_sanitizers, return_sanitizers,
+                        sanitizers if rule.quantifier == "all_paths" else [],
+                        scope_sanitizers if rule.quantifier == "all_paths" else [],
+                        return_sanitizers if rule.quantifier == "all_paths" else [],
                         value_adjacency, control_adjacency, all_events,
                         interprocedural, max_call_depth,
                     )
@@ -1254,7 +1308,7 @@ def evaluate_compiled_flow(
                     if surviving is not None and sink.node not in surviving:
                         continue
                     event_path = surviving[sink.node] if surviving is not None else []
-                elif _has_sanitized_path(
+                if (not correlate or rule.quantifier == "some_path") and _has_sanitized_path(
                     source, sink, sanitizers, scope_sanitizers,
                     value_adjacency, control_adjacency, all_events,
                     value_edges, control_edges,

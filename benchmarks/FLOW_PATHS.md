@@ -9,18 +9,31 @@ accepted state sequence and share predecessor records during reconstruction.
 
 The native graph stores immutable protected-region spans. Inner handlers,
 failed handler assignments, unmatched catches, else bodies, and mandatory
-finalizers preserve the value generations that actually survive. Finalizer exits
-can conservatively resume either normal control or an enclosing exception.
+finalizers preserve the value generations that actually survive. Finalizer edges
+carry their pending continuation: normal completion, an exception, or a particular
+return/loop jump. The evaluator only resumes a compatible continuation, including
+when no sanitizer matches. Transitions through empty blocks are composed so
+empty finalizers and eventless loops do not grow unbounded action sequences.
+Each return has a completion point reached only if it survives its finalizers.
+Calls receive completed return values at normal function exit. A canceled inner
+return cannot erase an outer pending return, and a throw cannot complete a call.
 Handler dispatch is separate from body execution: a mismatching clause cannot
 apply that handler's writes before the next clause. Normal handler completion
 and return/break/continue exits execute mandatory finalizers. Known built-in
 catch-type names and TypeScript catch-parameter bindings use language configuration;
 custom and dynamic catch-type expressions still participate in exception flow.
-Extraction artifact version 20 invalidates cached facts with the old routing.
+Extraction artifact version 21 invalidates cached facts with the old routing.
+
+Configured composite expressions (including containers, selections, interpolated
+strings, and comprehensions) produce distinct identities. Validating their output
+cannot validate an input alias. A source pattern enclosing a resolved sanitizer
+uses the same interprocedural edges and depth limit as other value reachability.
 
 ## Bounds and limitations
 
 - Graph preparation and backward liveness are shared across sources for a rule.
+  Continuation validation is activated for functions connected by resolved calls
+  to a finalizer, so an unrelated finalizer does not enable it for every source.
   Reaching-definition extraction still uses its existing shared dataflow; there
   is no new traversal per definition. Protected-region routing scans regions and
   events, as before, with an additional region scan for finalizer continuations.
@@ -41,6 +54,9 @@ Extraction artifact version 20 invalidates cached facts with the old routing.
   `except (Exception,)`) also retain conservative warnings in nested overwrite
   cases; these warnings were reproduced on both main and the reviewed change.
 - `some_path` retains its existing existential sanitizer semantics.
+- Conditional and short-circuit expression results have conservative distinct
+  identities; their individual expression branches are not modeled. This can
+  retain a warning when a particular execution returns the original input.
 
 ## Reproduction
 
@@ -89,3 +105,21 @@ existing failed-call, failed-assignment, non-call exception, sanitizer, and
 interprocedural regressions. New compact fixtures cover Python/TypeScript
 handlers and finalizers, Python/TypeScript/Rust identity distinctions, loops,
 multiple call arguments, repeated void calls, and conservative budget behavior.
+
+### Finalizer review follow-up
+
+`benchmarks/bench_finally_paths.py` measures native extraction for repeated
+finalizers with conditional `continue` statements. On the same machine, medians
+of three runs before the follow-up (`0c4aef2`) and after it were:
+
+| Finalizers | Before (ms) | After (ms) |
+|---|---:|---:|
+| 50 | 9.53 | 9.79 |
+| 100 | 33.05 | 34.82 |
+| 200 | 119.01 | 123.54 |
+
+This is a synthetic extraction-cost check, not an end-to-end performance claim.
+The added continuation semantics retain similar extraction costs in this panel.
+The follow-up regressions cover derived-expression identities, incompatible
+finalizer exits, sources created inside finalizers, returned aliases, explicit
+throws, and cancellation of nested returns.
