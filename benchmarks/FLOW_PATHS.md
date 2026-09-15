@@ -11,7 +11,12 @@ The native graph stores immutable protected-region spans. Inner handlers,
 failed handler assignments, unmatched catches, else bodies, and mandatory
 finalizers preserve the value generations that actually survive. Finalizer exits
 can conservatively resume either normal control or an enclosing exception.
-Extraction artifact version 19 invalidates cached facts with the old routing.
+Handler dispatch is separate from body execution: a mismatching clause cannot
+apply that handler's writes before the next clause. Normal handler completion
+and return/break/continue exits execute mandatory finalizers. Known built-in
+catch-type names and TypeScript catch-parameter bindings use language configuration;
+custom and dynamic catch-type expressions still participate in exception flow.
+Extraction artifact version 20 invalidates cached facts with the old routing.
 
 ## Bounds and limitations
 
@@ -32,6 +37,9 @@ Extraction artifact version 19 invalidates cached facts with the old routing.
   limitation for explicitly raised `KeyboardInterrupt`, `SystemExit`, and
   `BaseException` escaping `except Exception` into an outer `except BaseException`.
   This change does not claim to repair that preexisting exception-class analysis.
+  Catch aliases and tuples (for example `except Exception as err` and
+  `except (Exception,)`) also retain conservative warnings in nested overwrite
+  cases; these warnings were reproduced on both main and the reviewed change.
 - `some_path` retains its existing existential sanitizer semantics.
 
 ## Reproduction

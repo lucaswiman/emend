@@ -416,6 +416,22 @@ try_body_node = "block"
 except_clauses = ["except_clause", "except_group_clause"]
 exception_type_field = "value"
 exhaustive_exception_types = ["Exception", "BaseException"]
+nonthrowing_exception_types = [
+    "ArithmeticError", "AssertionError", "AttributeError", "BaseException", "BaseExceptionGroup",
+    "BlockingIOError", "BrokenPipeError", "BufferError", "BytesWarning", "ChildProcessError",
+    "ConnectionAbortedError", "ConnectionError", "ConnectionRefusedError", "ConnectionResetError", "DeprecationWarning",
+    "EOFError", "EncodingWarning", "EnvironmentError", "Exception", "ExceptionGroup",
+    "FileExistsError", "FileNotFoundError", "FloatingPointError", "FutureWarning", "GeneratorExit",
+    "IOError", "ImportError", "ImportWarning", "IndentationError", "IndexError",
+    "InterruptedError", "IsADirectoryError", "KeyError", "KeyboardInterrupt", "LookupError",
+    "MemoryError", "ModuleNotFoundError", "NameError", "NotADirectoryError", "NotImplementedError",
+    "OSError", "OverflowError", "PendingDeprecationWarning", "PermissionError", "ProcessLookupError",
+    "PythonFinalizationError", "RecursionError", "ReferenceError", "ResourceWarning", "RuntimeError",
+    "RuntimeWarning", "StopAsyncIteration", "StopIteration", "SyntaxError", "SyntaxWarning",
+    "SystemError", "SystemExit", "TabError", "TimeoutError", "TypeError",
+    "UnboundLocalError", "UnicodeDecodeError", "UnicodeEncodeError", "UnicodeError", "UnicodeTranslateError",
+    "UnicodeWarning", "UserWarning", "ValueError", "Warning", "ZeroDivisionError",
+]
 try_else_clause = "else_clause"
 try_finally_clause = "finally_clause"
 

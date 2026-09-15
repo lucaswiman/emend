@@ -1031,6 +1031,8 @@ pub struct CfgSection {
     pub exception_type_field: String,
     #[serde(default)]
     pub exhaustive_exception_types: Vec<String>,
+    #[serde(default)]
+    pub nonthrowing_exception_types: Vec<String>,
     /// Node type for the else clause in try (Python: "else_clause").
     #[serde(default)]
     pub try_else_clause: String,

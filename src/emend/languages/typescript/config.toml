@@ -252,6 +252,10 @@ elt_field = "body"
 # ---------------------------------------------------------------------------
 # Control flow graph (CFG) construction
 # ---------------------------------------------------------------------------
+[[bindings.exception]]
+node = "catch_clause"
+target = "parameter"
+
 [cfg]
 string_nodes = ["string", "template_string"]
 function_nodes = ["function_declaration", "method_definition", "arrow_function", "function_expression"]

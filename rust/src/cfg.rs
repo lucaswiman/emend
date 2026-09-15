@@ -76,8 +76,7 @@ pub struct CfgEdge {
     pub condition: Option<(usize, usize)>,
     /// Immutable syntactic region whose evaluations may enter this handler.
     pub protected_range: Option<(usize, usize)>,
-    pub exhaustive_handler: bool,
-    pub is_finally: bool,
+    pub shadows_outer: bool,
     pub resume_from: Option<BlockId>,
 }
 
@@ -266,6 +265,7 @@ struct CfgBuilder<'a> {
     exit_block: BlockId,
     /// Stack of (loop_header, loop_exit) for break/continue.
     loop_stack: Vec<(BlockId, BlockId)>,
+    finally_jumps: HashSet<usize>,
 }
 
 impl<'a> CfgBuilder<'a> {
@@ -278,6 +278,7 @@ impl<'a> CfgBuilder<'a> {
             next_id: 0,
             exit_block: BlockId(0), // placeholder
             loop_stack: Vec::new(),
+            finally_jumps: HashSet::new(),
         };
         // Allocate entry block
         let _entry = builder.new_block_at(0, 0, 0);
@@ -328,18 +329,39 @@ impl<'a> CfgBuilder<'a> {
             kind,
             condition: cond,
             protected_range: None,
-            exhaustive_handler: false,
-            is_finally: false,
+            shadows_outer: false,
             resume_from: None,
         });
     }
 
-    fn add_exception_edge(&mut self, from: BlockId, to: BlockId, region: tree_sitter::Node, exhaustive: bool, is_finally: bool) {
+    fn add_exception_edge(&mut self, from: BlockId, to: BlockId, region: tree_sitter::Node, shadows_outer: bool) {
         self.edges.push(CfgEdge {
             from, to, kind: EdgeKind::Exception, condition: None,
             protected_range: Some((region.start_byte(), region.end_byte())),
-            exhaustive_handler: exhaustive, is_finally, resume_from: None,
+            shadows_outer, resume_from: None,
         });
+    }
+
+    fn route_finally_jumps(&mut self, region: tree_sitter::Node, finalizer: BlockId) -> Vec<(BlockId, EdgeKind)> {
+        let inside = |block: &BasicBlock| region.start_byte() <= block.start_byte
+            && block.start_byte < region.end_byte();
+        let mut continuations = Vec::new();
+        for &index in &self.finally_jumps {
+            let edge = &mut self.edges[index];
+            if inside(&self.blocks[edge.from.0 as usize]) && !inside(&self.blocks[edge.to.0 as usize]) {
+                continuations.push((edge.to, edge.kind));
+                edge.to = finalizer;
+                edge.kind = EdgeKind::Finally;
+            }
+        }
+        continuations
+    }
+
+    fn resume_finally_jumps(&mut self, end: BlockId, continuations: Vec<(BlockId, EdgeKind)>) {
+        for (target, kind) in continuations {
+            self.add_edge(end, target, kind);
+            self.finally_jumps.insert(self.edges.len() - 1);
+        }
     }
 
     fn block_mut(&mut self, block_id: BlockId) -> &mut BasicBlock {
@@ -717,12 +739,16 @@ impl<'a> CfgBuilder<'a> {
             self.add_statement(current, node);
             self.collect_defs_uses(current, node);
             self.add_edge(current, self.exit_block, EdgeKind::Jump);
+            if self.cfg_sec.return_nodes.iter().any(|n| n == kind) {
+                self.finally_jumps.insert(self.edges.len() - 1);
+            }
             return None;
         }
         if self.cfg_sec.break_nodes.iter().any(|n| n == kind) {
             self.add_statement(current, node);
             if let Some(&(_, loop_exit)) = self.loop_stack.last() {
                 self.add_edge(current, loop_exit, EdgeKind::Jump);
+                self.finally_jumps.insert(self.edges.len() - 1);
             }
             return None;
         }
@@ -730,6 +756,7 @@ impl<'a> CfgBuilder<'a> {
             self.add_statement(current, node);
             if let Some(&(loop_header, _)) = self.loop_stack.last() {
                 self.add_edge(current, loop_header, EdgeKind::BackEdge);
+                self.finally_jumps.insert(self.edges.len() - 1);
             }
             return None;
         }
@@ -1209,34 +1236,27 @@ impl<'a> CfgBuilder<'a> {
                 .unwrap_or(true)
         });
 
+        let mut handler_ends = Vec::new();
         let except_target = if !except_clauses.is_empty() {
             let first_except = self.new_block_from_node(except_clauses[0]);
 
             if let Some(te) = try_entry {
-                self.add_exception_edge(te, first_except, try_body.unwrap(), exhaustive_catch, false);
+                self.add_exception_edge(te, first_except, try_body.unwrap(), exhaustive_catch);
             }
 
-            let mut prev_handler: Option<BlockId> = None;
+            let mut prev_dispatch: Option<BlockId> = None;
             for (i, except) in except_clauses.iter().enumerate() {
-                // Reuse the pre-created first_except block for the first
-                // clause so the exception edge connects to the handler body.
-                // Subsequent handlers get new blocks chained from the previous
-                // handler (modelling Python's sequential except matching).
-                let handler_block = if i == 0 {
-                    first_except
-                } else {
-                    let hb = self.new_block_from_node(*except);
-                    if let Some(prev) = prev_handler {
-                        self.add_edge(prev, hb, EdgeKind::FalseBranch);
-                    }
-                    hb
-                };
-                prev_handler = Some(handler_block);
+                let dispatch = if i == 0 { first_except }
+                    else { self.new_block_from_node(*except) };
+                if let Some(previous) = prev_dispatch {
+                    self.add_edge(previous, dispatch, EdgeKind::FalseBranch);
+                }
+                prev_dispatch = Some(dispatch);
                 let mut ec = except.walk();
                 for c in except.children(&mut ec) {
                     if !id_node.is_empty() && c.kind() == id_node.as_str() {
                         let name = self.node_text(c).to_string();
-                        self.block_mut(handler_block).defs.push((
+                        self.block_mut(dispatch).defs.push((
                             name,
                             c.start_position().row as u32,
                             c.start_position().column as u32,
@@ -1244,7 +1264,13 @@ impl<'a> CfgBuilder<'a> {
                         ));
                     }
                     if !try_body_kind.is_empty() && c.kind() == try_body_kind.as_str() {
-                        if let Some(end) = self.walk_body(c, handler_block) {
+                        // A mismatch skips the body and its writes. Keep header
+                        // expressions in dispatch, separate from body occurrences.
+                        self.block_mut(dispatch).end_byte = c.start_byte();
+                        let body = self.new_block_from_node(c);
+                        self.add_edge(dispatch, body, EdgeKind::TrueBranch);
+                        if let Some(end) = self.walk_body(c, body) {
+                            handler_ends.push(end);
                             if finally_clause.is_none() {
                                 self.add_edge(end, join, EdgeKind::Fallthrough);
                             }
@@ -1291,15 +1317,16 @@ impl<'a> CfgBuilder<'a> {
                     if let Some(te) = try_end {
                         self.add_edge(te, fin_block, EdgeKind::Finally);
                     }
-                    if let Some(et) = except_target {
-                        self.add_edge(et, fin_block, EdgeKind::Finally);
+                    for &end in &handler_ends {
+                        self.add_edge(end, fin_block, EdgeKind::Finally);
                     }
+                    let continuations = self.route_finally_jumps(node, fin_block);
                     let exception_start = self.edges.len();
                     if let Some(protected) = except_target.or(try_entry) {
                         for region in except_clauses.iter().copied().chain(else_clause).chain(
                             try_body.into_iter().filter(|_| !exhaustive_catch)
                         ) {
-                            self.add_exception_edge(protected, fin_block, region, false, true);
+                            self.add_exception_edge(protected, fin_block, region, true);
                         }
                     }
                     let exception_end = self.edges.len();
@@ -1318,6 +1345,7 @@ impl<'a> CfgBuilder<'a> {
                         }
                     }
                     if let Some(end) = self.walk_body(c, fin_block) {
+                        self.resume_finally_jumps(end, continuations);
                         for edge in &mut self.edges[exception_start..exception_end] {
                             edge.resume_from = Some(end);
                         }
@@ -1356,7 +1384,7 @@ impl<'a> CfgBuilder<'a> {
                 if let Some(handler) = node.child_by_field_name(catch_field) {
                     let handler_block = self.new_block_from_node(handler);
                     handler_entry = Some(handler_block);
-                    self.add_exception_edge(try_block, handler_block, body, true, false);
+                    self.add_exception_edge(try_block, handler_block, body, true);
 
                     // Walk handler body
                     if let Some(hbody) = handler.child_by_field_name(body_field) {
@@ -1395,31 +1423,22 @@ impl<'a> CfgBuilder<'a> {
                 if let Some(end) = handler_end {
                     self.add_edge(end, fin_block, EdgeKind::Finally);
                 }
+                let continuations = self.route_finally_jumps(node, fin_block);
                 let exception_start = self.edges.len();
                 if let Some(protected) = handler_entry.or(try_entry) {
                     let region = node.child_by_field_name(catch_field)
                         .or_else(|| node.child_by_field_name(body_field)).unwrap();
-                    self.add_exception_edge(protected, fin_block, region, false, true);
+                    self.add_exception_edge(protected, fin_block, region, true);
                 }
                 let exception_end = self.edges.len();
-                // Walk finalizer body
-                if let Some(fbody) = fin.child_by_field_name(body_field) {
-                    if let Some(end) = self.walk_body(fbody, fin_block) {
-                        for edge in &mut self.edges[exception_start..exception_end] {
-                            edge.resume_from = Some(end);
-                        }
-                        self.add_edge(end, join, EdgeKind::Fallthrough);
-                        all_terminated = false;
+                let body = fin.child_by_field_name(body_field).unwrap_or(fin);
+                if let Some(end) = self.walk_body(body, fin_block) {
+                    self.resume_finally_jumps(end, continuations);
+                    for edge in &mut self.edges[exception_start..exception_end] {
+                        edge.resume_from = Some(end);
                     }
-                } else {
-                    // Finalizer may have its body as direct children
-                    if let Some(end) = self.walk_body(fin, fin_block) {
-                        for edge in &mut self.edges[exception_start..exception_end] {
-                            edge.resume_from = Some(end);
-                        }
-                        self.add_edge(end, join, EdgeKind::Fallthrough);
-                        all_terminated = false;
-                    }
+                    self.add_edge(end, join, EdgeKind::Fallthrough);
+                    all_terminated = false;
                 }
             }
         }
@@ -1941,13 +1960,18 @@ impl<'a> FlowExtractor<'a> {
 
     fn walk(&mut self, node: tree_sitter::Node) {
         if self.is_function(node) { return; }
-        if self.lang.cfg.except_clauses.iter().any(|kind| kind == node.kind()) {
-            let builtin = node.child_by_field_name(&self.lang.cfg.exception_type_field)
-                .filter(|value| self.lang.cfg.exhaustive_exception_types
+        let catch_binding = self.lang.bindings.exception.iter()
+            .find(|rule| rule.node == node.kind())
+            .and_then(|rule| node.child_by_field_name(&rule.target));
+        if catch_binding.is_some() || self.lang.cfg.except_clauses.iter().any(|kind| kind == node.kind()) {
+            let named_type = node.child_by_field_name(&self.lang.cfg.exception_type_field)
+                .filter(|value| self.lang.cfg.nonthrowing_exception_types
                         .iter().any(|name| name == self.text(*value)));
-            // Built-in catch types describe dispatch, not a throwing value read.
+            // Known built-in catch types describe dispatch. Custom and dynamic
+            // type expressions remain evaluated; catch parameters are definitions.
             for child in Self::children(node) {
-                if Some(child) != builtin { self.walk(child); }
+                if Some(child) == catch_binding { self.targets(child, &[], false); }
+                else if Some(child) != named_type { self.walk(child); }
             }
             return;
         }
@@ -2001,7 +2025,7 @@ impl<'a> FlowExtractor<'a> {
             let contains = |left: usize, right: usize| left <= start && end <= right
                 && (!enclosing || right - left > end - start);
             let nearest = regions.iter().filter(|((left, right), edge)|
-                contains(*left, *right) && (edge.exhaustive_handler || edge.is_finally))
+                contains(*left, *right) && edge.shadows_outer)
                 .map(|((left, right), _)| right - left).min().unwrap_or(usize::MAX);
             regions.iter().filter(|((left, right), _)|
                 contains(*left, *right) && right - left <= nearest)

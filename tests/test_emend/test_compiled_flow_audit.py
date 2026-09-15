@@ -484,3 +484,70 @@ def test_exception_in_else_executes_finalizer(tmp_path):
         sink(x)
 """, _rule(sanitizers=[FlowSanitizer("clean($X)", "value", effect="returns")]))
     assert rows
+
+
+@pytest.mark.parametrize("first,second,reports", [
+    ("x = 0", "pass", True),
+    ("pass", "x = 0", True),
+    ("x = 0", "x = 0", False),
+])
+@pytest.mark.parametrize("finalizer", [False, True])
+def test_except_dispatch_does_not_execute_mismatched_handler(tmp_path, first, second, reports, finalizer):
+    tail = "finally:\n        sink(x)" if finalizer else "sink(x)"
+    rows = _run(tmp_path, f"""def f():
+    x = source()
+    try:
+        clean(x)
+    except ValueError:
+        {first}
+    except Exception:
+        {second}
+    {tail}
+""", _rule(sanitizers=[FlowSanitizer("clean($X)", "value")]))
+    assert bool(rows) is reports
+
+
+@pytest.mark.parametrize("extension", ["py", "ts"])
+@pytest.mark.parametrize("termination", ["return", "break", "continue"])
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_terminating_handler_runs_finalizer(tmp_path, extension, termination, overwrite):
+    if extension == "py":
+        assignment = "x = 0\n            " if overwrite else ""
+        source = f"""def f():
+    x = source()
+    while flag:
+        try:
+            clean(x)
+        except Exception:
+            {assignment}{termination}
+        finally:
+            sink(x)
+"""
+    else:
+        assignment = "x = 0;" if overwrite else ""
+        source = f"function f() {{ let x = source(); while(flag) {{ try {{ clean(x); }} catch(e) {{ {assignment} {termination}; }} finally {{ sink(x); }} }} }}"
+    path = tmp_path / f"app.{extension}"
+    path.write_text(source)
+    rows = evaluate_flow_config(_rule(sanitizers=[FlowSanitizer("clean($X)", "value")]),
+                                [str(path)], project_path=str(tmp_path))
+    assert bool(rows) is not overwrite
+    if rows:
+        assert rows[0].trace
+
+
+@pytest.mark.parametrize("handler", ["Handler", "get_type()"])
+def test_custom_handler_type_evaluation_can_escape(tmp_path, handler):
+    rows = _run(tmp_path, f"""def f():
+    x = source()
+    try:
+        try:
+            clean(x)
+        except {handler}:
+            x = 0
+        except Exception:
+            x = 0
+    except Exception:
+        pass
+    sink(x)
+""", _rule(sanitizers=[FlowSanitizer("clean($X)", "value")]))
+    assert rows
