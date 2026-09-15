@@ -40,9 +40,6 @@ class LineIntervals:
         index = bisect_left(self.intervals, (end + 1,)) - 1
         return index >= 0 and self.intervals[index][1] > start
 
-    def __contains__(self, line):
-        return self.intersects(line, line)
-
     def __bool__(self):
         return bool(self.intervals)
 

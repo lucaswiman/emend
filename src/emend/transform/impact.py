@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from ..component_selector import ExtendedSelector
 
 from emend.errors import BUG_EXCEPTIONS
-from emend.git_diff import LineIntervals, _parse_diff, read_diff, repository_root
+from emend.git_diff import LineIntervals, read_diff, repository_root
 
 logger = logging.getLogger(__name__)
 
@@ -64,11 +64,6 @@ def impact_projection(
             for file, line, reason in dsl_impacts
         ]
     return data
-
-
-def _parse_diff_to_changed_files(diff_text: str) -> list[tuple[str, LineIntervals]]:
-    """Compact projection of changed lines in the new version only."""
-    return [(f.paths[1], f.lines[1]) for f in _parse_diff(diff_text) if f.paths[1] is not None]
 
 
 def _symbols_in_intervals(symbols, lines: LineIntervals):

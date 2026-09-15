@@ -249,6 +249,22 @@ def test_diff_checks_filter_findings_without_fixing_unselected_code(repo, comman
     assert source.read_text() == "print('old')\nprint('new')\n"
 
 
+def test_diff_parser_retains_each_files_coordinates():
+    from emend.git_diff import _parse_diff
+
+    files = [("lib.py", 1, 2), ("utils.ts", 5, 3), ("lib.rs", 10, 4)]
+    patch = "".join(
+        f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+        f"@@ -{start},1 +{start},{count} @@\n-old\n" + "+new\n" * count
+        for path, start, count in files
+    )
+    assert [(item.paths, [side.intervals for side in item.lines]) for item in _parse_diff(patch)] == [
+        ([path, path], [[(start, start + 1)], [(start, start + count)]])
+        for path, start, count in files
+    ]
+    assert _parse_diff("") == []
+
+
 def test_diff_intervals_bound_large_hunks_and_merge_adjacent():
     from emend.git_diff import _parse_diff, _map_lines
     changed = _parse_diff('diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n'
