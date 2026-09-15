@@ -6,7 +6,7 @@ from click import unstyle
 from typer.testing import CliRunner
 
 from emend.cli import app
-from emend.git_diff import DiffSelection, resolve_diff
+from emend.git_diff import DiffSelection, LineIntervals, resolve_diff
 
 
 @pytest.fixture
@@ -90,7 +90,7 @@ def test_diff_selection_ignores_presentation_config(repo, setting, value):
 
 def test_diff_matches_reuses_path_resolution(repo, monkeypatch):
     root, _ = repo
-    scope = DiffSelection(root, {str(root / "a.py"): [2]})
+    scope = DiffSelection(root, {str(root / "a.py"): LineIntervals([(2, 3)])})
     resolve = type(root).resolve
     calls = []
     def count(path, *args, **kwargs):
@@ -247,3 +247,32 @@ def test_diff_checks_filter_findings_without_fixing_unselected_code(repo, comman
     rejected = CliRunner().invoke(app, [*args, "--fix"])
     assert rejected.exit_code != 0 and "cannot be combined" in rejected.output
     assert source.read_text() == "print('old')\nprint('new')\n"
+
+
+def test_diff_intervals_bound_large_hunks_and_merge_adjacent():
+    from emend.git_diff import _parse_diff, _map_lines
+    changed = _parse_diff('diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n'
+                          '@@ -0,0 +1,1000000 @@\n@@ -0,0 +1000001,2 @@\n')[0]
+    assert changed.lines[0].intervals == []
+    assert changed.lines[1].intervals == [(1, 1000003)]
+    assert _map_lines(changed.lines[1], [(1, 0, 2, 1)]).intervals == [(1, 2), (3, 1000004)]
+
+
+@pytest.mark.parametrize('hunks,expected', [
+    ([], [(2, 5), (8, 10)]),
+    ([(1, 10, 0, 0)], []),
+    ([(0, 0, 1, 2)], [(4, 7), (10, 12)]),
+    ([(3, 2, 2, 0)], [(2, 3), (6, 8)]),
+    ([(3, 2, 3, 4)], [(2, 7), (10, 12)]),
+    ([(5, 0, 6, 2)], [(2, 5), (10, 12)]),
+    ([(1, 10, 1, 2)], [(1, 3)]),
+    ([(5, 2, 5, 1)], [(2, 5), (7, 9)]),
+])
+def test_interval_translation_boundaries(hunks, expected, tmp_path):
+    from emend.git_diff import LineIntervals, _map_lines
+    mapped = _map_lines(LineIntervals([(2, 5), (8, 10)]), hunks)
+    assert mapped.intervals == expected
+    selection = DiffSelection(tmp_path, {str(tmp_path / 'a.py'): mapped})
+    for start in range(1, 15):
+        for end in range(start, 15):
+            assert selection.matches('a.py', start, end) == any(a <= end and start < b for a, b in expected)

@@ -495,7 +495,7 @@ class TestImpactWithDiff:
             '@@ -2 +2 @@\n--- a/fake.py\n+++ b/fake.py\n'
         )
         assert changed.paths == ["space name.py", "space name.py"]
-        assert changed.lines == [[2], [2]]
+        assert [lines.intervals for lines in changed.lines] == [[(2, 3)], [(2, 3)]]
 
 
 class TestFindImpactFactGraph:
@@ -852,3 +852,25 @@ class TestTypeScriptImpact:
         assert len(result.impacted_tests) > 0
         test_names = " ".join(result.impacted_tests)
         assert "describe" in test_names
+
+
+def test_impact_interval_ownership_preserves_nested_and_overlapping_symbols():
+    from emend.git_diff import LineIntervals
+    from emend.ast_utils import find_symbol_by_line
+    from emend.component_selector import NestedSymbol
+    from emend.transform.impact import _symbols_in_intervals
+
+    def symbol(name, start, end, children=()):
+        return NestedSymbol(name, 'function', start, end, 0, [name], children=list(children))
+
+    symbols = [symbol('outer', 1, 20, [symbol('nested', 3, 8)]),
+               symbol('overlapping', 7, 12), symbol('last', 25, 1000000)]
+    for spans in ([(4, 6)], [(4, 15)], [(1, 30)], [(21, 25)], [(999999, 1000001)]):
+        expected = []
+        # Only the bounded fixture portion needs an explicit per-line oracle.
+        for line in (range(1, 31) if spans[0][0] < 31 else [999999, 1000000]):
+            if any(a <= line < b for a, b in spans):
+                sym = find_symbol_by_line(symbols, line)
+                if sym is not None and sym.name not in expected:
+                    expected.append(sym.name)
+        assert [sym.name for sym in _symbols_in_intervals(symbols, LineIntervals(spans))] == expected
