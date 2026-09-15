@@ -222,6 +222,7 @@ set = ""
 dict = "object"
 binary_operator = "binary_expression"
 boolean_operator = "binary_expression"
+conditional_expression = "ternary_expression"
 unary_operator = "unary_expression"
 comparison_operator = "binary_expression"
 subscript = "subscript_expression"
@@ -252,6 +253,10 @@ elt_field = "body"
 # ---------------------------------------------------------------------------
 # Control flow graph (CFG) construction
 # ---------------------------------------------------------------------------
+[[bindings.exception]]
+node = "catch_clause"
+target = "parameter"
+
 [cfg]
 string_nodes = ["string", "template_string"]
 function_nodes = ["function_declaration", "method_definition", "arrow_function", "function_expression"]

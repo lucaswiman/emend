@@ -1,8 +1,8 @@
 """The single occurrence-based evaluator for compiled flow rules.
 
 All public flow surfaces end here. Value propagation uses exact events and
-edges emitted by ``emend_core.build_flow_facts``; control edges are used only
-for executable-path and sanitizer quantification.
+edges emitted by ``emend_core.build_flow_facts``. Sanitizer coverage follows
+control paths together with the value generations surviving on those paths.
 """
 
 from __future__ import annotations
@@ -422,6 +422,28 @@ def _call_transition(
     return stack
 
 
+def _is_control_edge(kind: str) -> bool:
+    return kind == "control" or kind.startswith("control;")
+
+
+def _finally_transition(kind, event, pending):
+    if ";" not in kind:
+        return pending
+    reasons = dict(pending)
+    for encoded in kind.split(";")[1:]:
+        operation, scope, reason = encoded.split(",")
+        marker = (event.file_path, event.func_id, int(scope))
+        reason = int(reason)
+        if operation == "enter":
+            reasons[marker] = reason
+        else:
+            # A source can begin inside a finalizer, with no observed entry.
+            if operation == "resume" and marker in reasons and reasons[marker] != reason:
+                return None
+            reasons.pop(marker, None)
+    return tuple(sorted(reasons.items()))
+
+
 def _walk(
     start: tuple[str, int],
     adjacency: dict[tuple[str, int], list[tuple[tuple[str, int], str]]],
@@ -430,26 +452,31 @@ def _walk(
     *,
     blocked: frozenset[tuple[str, int]] = frozenset(),
     max_call_depth: int | None = None,
+    initial_state: Any = None,
 ) -> tuple[set[Any], dict[Any, Any]]:
-    initial = (start, ())
+    initial = initial_state if initial_state is not None else (start, (), ())
     queue = deque([initial])
     seen = {initial}
     predecessor: dict[Any, Any] = {}
     while queue:
-        node, stack = queue.popleft()
+        current = queue.popleft()
+        node, stack, pending = current
         for target, kind in adjacency.get(node, ()):
-            if kind not in allowed or target in blocked:
+            if (kind not in allowed and not (_is_control_edge(kind) and "control" in allowed)) or target in blocked:
                 continue
             next_stack = _call_transition(
                 kind, events[node], events[target], stack, max_call_depth,
             )
             if next_stack is None:
                 continue
-            state = (target, next_stack)
+            next_pending = _finally_transition(kind, events[node], pending)
+            if next_pending is None:
+                continue
+            state = (target, next_stack, next_pending)
             if state in seen:
                 continue
             seen.add(state)
-            predecessor[state] = ((node, stack), kind)
+            predecessor[state] = (current, kind)
             queue.append(state)
     return seen, predecessor
 
@@ -478,12 +505,26 @@ def _can_reach(
     )[0])
 
 
-def _is_sanitized(
+def _source_starts_clean(source, sanitizers, value_adjacency, events,
+                         value_edges, max_call_depth=None):
+    # A source pattern enclosing a sanitizer denotes its already-clean output.
+    return any(
+        sanitizer.span.file_path == source.span.file_path
+        and source.span.start_byte <= sanitizer.span.start_byte
+        and sanitizer.span.end_byte <= source.span.end_byte
+        and _can_reach(
+            sanitizer.node, source.node, value_adjacency, events, value_edges,
+            max_call_depth=max_call_depth,
+        )
+        for sanitizer in sanitizers
+    )
+
+
+def _has_sanitized_path(
     source: _EndpointMatch,
     sink: _EndpointMatch,
     sanitizers: list[_EndpointMatch],
     scope_sanitizers: list[_EndpointMatch],
-    quantifier: str,
     value_adjacency: dict[tuple[str, int], list[tuple[tuple[str, int], str]]],
     control_adjacency: dict[tuple[str, int], list[tuple[tuple[str, int], str]]],
     events: dict[tuple[str, int], "FlowEventFact"],
@@ -494,65 +535,243 @@ def _is_sanitized(
 ) -> bool:
     # Pure-return sanitizers clean the returned generation, never their input.
     # In particular, evaluating escape(x) must not clean a later use of x.
-    # Return and validation coverage remain separate: mixed branch coverage
-    # can conservatively warn without control-conditioned value edges.
     outputs = frozenset(match.node for match in return_sanitizers)
     if source.node in outputs:
         return True
-    if outputs and (
-        any(_can_reach(source.node, node, value_adjacency, events, value_edges,
-                       max_call_depth=max_call_depth)
-            and _can_reach(node, sink.node, value_adjacency, events, value_edges,
-                           max_call_depth=max_call_depth)
-            for node in outputs)
-        if quantifier == "some_path" else
-        not _can_reach(source.node, sink.node, value_adjacency, events, value_edges,
-                       blocked=outputs, max_call_depth=max_call_depth)
-    ):
+    if any(_can_reach(source.node, node, value_adjacency, events, value_edges,
+                      max_call_depth=max_call_depth)
+           and _can_reach(node, sink.node, value_adjacency, events, value_edges,
+                         max_call_depth=max_call_depth)
+           for node in outputs):
         return True
     # Value sanitizers only affect the generation which reaches their exact
     # argument occurrence. Scope sanitizers apply to every value in the scope.
-    # A source pattern can wrap a sanitizer (for example
-    # ``password = redact(password)``).  In that case the matched source is the
-    # sanitizer's output generation, so it starts clean rather than becoming a
-    # new tainted value after the nested call.
-    if any(
-        sanitizer.span.file_path == source.span.file_path
-        and source.span.start_byte <= sanitizer.span.start_byte
-        and sanitizer.span.end_byte <= source.span.end_byte
-        and _can_reach(
-            sanitizer.node, source.node, value_adjacency, events, value_edges,
-            max_call_depth=max_call_depth,
-        )
-        for sanitizer in sanitizers
-    ):
+    if _source_starts_clean(source, sanitizers, value_adjacency, events,
+                            value_edges, max_call_depth):
         return True
     relevant = [sanitizer for sanitizer in sanitizers if _can_reach(
         source.node, sanitizer.node, value_adjacency, events, value_edges,
         max_call_depth=max_call_depth,
     )]
     relevant.extend(scope_sanitizers)
-    on_a_path = [sanitizer for sanitizer in relevant if (
-        _can_reach(
-            source.node, sanitizer.control_node, control_adjacency, events, control_edges,
-            max_call_depth=max_call_depth,
-        )
-        and _can_reach(
-            sanitizer.control_node, sink.node, control_adjacency, events, control_edges,
-            max_call_depth=max_call_depth,
-        )
-    )]
-    if not on_a_path:
+    if not relevant:
         return False
-    if quantifier == "some_path":
-        return True
-    # all_paths suppresses only if deleting every applicable sanitizer makes
-    # the source-to-sink execution path unreachable.
-    return not _can_reach(
-        source.node, sink.node, control_adjacency, events, control_edges,
-        blocked=frozenset(sanitizer.control_node for sanitizer in on_a_path),
-        max_call_depth=max_call_depth,
-    )
+    reachable, _ = _walk(source.node, control_adjacency, events, control_edges,
+                         max_call_depth=max_call_depth)
+    for sanitizer in relevant:
+        for state in reachable:
+            if state[0] != sanitizer.control_node:
+                continue
+            onward, _ = _walk(state[0], control_adjacency, events, control_edges,
+                              max_call_depth=max_call_depth, initial_state=state)
+            if any(candidate[0] == sink.node for candidate in onward):
+                return True
+    return False
+
+
+# Allow this many additional states beyond one visit per occurrence. Exact
+# correlation can grow exponentially at joins; exhaustion retains a warning
+# without claiming a witness. Recursive re-entry uses the same fallback.
+_VALUE_STATE_LIMIT = 10_000
+
+
+def _value_path_walker(sanitizers, scope_sanitizers,
+                           return_sanitizers, value_adjacency,
+                           control_adjacency, events, interprocedural, max_call_depth):
+    """Follow live value identities along occurrence-level control paths.
+
+    Copies share identity; evaluations create derived values. Distinct states
+    at a control join remain separate, so a handler overwrite cannot provide
+    a sanitizer bypass for a value surviving only on the normal path.
+    Resolved calls enter after argument evaluation and return to their own
+    caller. Recursive re-entry conservatively retains a warning.
+    """
+    nodes = list(events)
+    indices = {node: index for index, node in enumerate(nodes)}
+    count = len(nodes)
+    incoming = [set() for _ in nodes]
+    successors = [set() for _ in nodes]
+    predecessors = [set() for _ in nodes]
+    bindings = defaultdict(int)
+    functions = defaultdict(list)
+    call_targets = defaultdict(set)
+    parameter_inputs = defaultdict(lambda: defaultdict(set))
+    transitions = {}
+    final_actions = defaultdict(set)
+    resolved_results = set()
+    call_results = {}
+    function = [(events[node].file_path, events[node].func_id) for node in nodes]
+    for node, index in indices.items():
+        event = events[node]
+        functions[function[index]].append(index)
+        if event.role == "call_result":
+            call_results[indices[(event.file_path, event.call_id)]] = index
+        if event.role in {"def", "param_in", "mutation"}:
+            bindings[(function[index], event.access_path or event.var)] |= 1 << index
+        for target, kind in value_adjacency.get(node, ()):
+            if kind in _CALL_EDGES and not interprocedural:
+                continue
+            incoming[indices[target]].add(index)
+            if kind == "call_arg":
+                marker = indices[(event.file_path, event.call_id)]
+                call_targets[marker].add(function[indices[target]])
+                parameter_inputs[indices[target]][marker].add(index)
+            elif kind == "call_return":
+                result = indices[target]
+                marker = indices[(events[target].file_path, events[target].call_id)]
+                call_targets[marker].add(function[index])
+                successors[index].add(result)
+                transitions[index, result] = ("return", marker)
+                resolved_results.add(result)
+        for target, kind in control_adjacency.get(node, ()):
+            if _is_control_edge(kind):
+                successors[index].add(indices[target])
+                final_actions[index, indices[target]].add(kind)
+    for marker, targets in call_targets.items():
+        result = call_results[marker]
+        resolved_results.add(result)
+        successors[marker].discard(result)
+        for target in targets:
+            members = functions[target]
+            entry = min(members, key=lambda i: events[nodes[i]].ordinal)
+            successors[marker].add(entry)
+            transitions[marker, entry] = ("enter", marker)
+    for index, targets in enumerate(successors):
+        for target in targets:
+            predecessors[target].add(index)
+    validators = defaultdict(set)
+    for match in sanitizers:
+        if match.node in indices and match.control_node in indices:
+            validators[indices[match.control_node]].add(indices[match.node])
+    scopes = {indices[m.control_node] for m in scope_sanitizers if m.control_node in indices}
+    outputs = {indices[m.node] for m in return_sanitizers if m.node in indices}
+    kills = [bindings[(function[index], events[node].access_path or events[node].var)]
+             if events[node].role in {"def", "param_in", "mutation"} else 0
+             for index, node in enumerate(nodes)]
+    required = [sum(1 << i for i in inputs | validators[index])
+                for index, inputs in enumerate(incoming)]
+    # Backward liveness includes backedges and sanitizer arguments. It removes
+    # obsolete temporaries before state interning, keeping long blocks linear.
+    live = required.copy()
+    pending = deque(reversed(range(count)))
+    queued = set(pending)
+    while pending:
+        index = pending.popleft()
+        queued.remove(index)
+        after = 0
+        for target in successors[index]:
+            after |= live[target]
+        before = required[index] | (after & ~(kills[index] | (1 << index)))
+        if before != live[index]:
+            live[index] = before
+            for previous in predecessors[index] - queued:
+                pending.append(previous)
+                queued.add(previous)
+
+    def walk(source, sinks):
+        def advance(index, values, stack):
+            inputs = incoming[index]
+            if index in parameter_inputs:
+                inputs = parameter_inputs[index].get(stack[-1], ()) if stack else ()
+            parents = [i for i in inputs if i in values]
+            identities = {values[i] for i in parents}
+            fresh = max(values.values(), default=-1) + 1
+            identity = next(iter(identities)) if len(identities) == 1 else fresh
+            event = events[nodes[index]]
+            if event.role in {"evaluate", "mutation"} or (
+                event.role == "call_result" and index not in resolved_results
+            ):
+                identity = fresh
+            cleaned = {values[i] for i in validators[index] if i in values}
+            values = {i: value for i, value in values.items()
+                      if not (kills[index] & (1 << i)) and value not in cleaned}
+            if index == indices[source.node]:
+                values[index] = fresh
+            elif parents and index not in outputs and not cleaned:
+                values[index] = identity
+            if index in scopes:
+                values.clear()
+            return values, parents
+
+        if indices[source.node] in outputs or _source_starts_clean(
+            source, sanitizers, value_adjacency, events,
+            _INTRA_VALUE_EDGES | {_OPAQUE_CALL_EDGE} | (
+                _CALL_EDGES if interprocedural else frozenset()
+            ), max_call_depth,
+        ):
+            return {}
+        initial = (indices[source.node], (), (), ())
+        queue = deque([initial])
+        previous = {initial: None}
+        visited_nodes = {initial[0]}
+        paths = {}
+        wanted = {indices[node] for node in sinks if node in indices}
+        while queue:
+            state = queue.popleft()
+            index, frozen, stack, pending_finally = state
+            values, _ = advance(index, dict(frozen), stack)
+            if index in wanted and index in values and nodes[index] not in paths:
+                route = []
+                cursor = state
+                while cursor is not None:
+                    route.append(cursor)
+                    cursor = previous[cursor]
+                provenance = {}
+                for step, snapshot, frame, _pending in reversed(route):
+                    active, parents = advance(step, dict(snapshot), frame)
+                    if step == indices[source.node]:
+                        provenance[step] = (1, source.node, None)
+                    elif step in active:
+                        parent = min((provenance[i] for i in parents), key=lambda record: record[0])
+                        provenance[step] = (parent[0] + 1, nodes[step], parent)
+                record = provenance[index]
+                path = []
+                while record is not None:
+                    _, node, record = record
+                    path.append(node)
+                paths[nodes[index]] = list(reversed(path))
+                if len(paths) == len(wanted):
+                    return paths
+            if not values:
+                continue
+            for target in successors[index]:
+                kind, marker = transitions.get((index, target), ("control", None))
+                next_stack = stack
+                carried = values
+                if kind == "enter":
+                    if function[target] in {function[index], *(function[m] for m in stack)}:
+                        return None
+                    if max_call_depth is not None and len(stack) >= max_call_depth:
+                        continue
+                    next_stack = (*stack, marker)
+                    carried = {i: value for i, value in values.items()
+                               if function[i] != function[target]}
+                elif kind == "return" and stack:
+                    if stack[-1] != marker:
+                        continue
+                    next_stack = stack[:-1]
+                for action in final_actions.get((index, target), ("control",)):
+                    next_pending = _finally_transition(action, events[nodes[index]], pending_finally)
+                    if next_pending is None:
+                        continue
+                    if kind == "enter":
+                        next_pending = tuple((scope, reason) for scope, reason in next_pending
+                                             if scope[:2] != function[target])
+                    # Renumber live identities, preserving alias classes without
+                    # confusing separate executions of the same loop occurrence.
+                    names = {}
+                    next_state = (target, tuple(
+                        (i, names.setdefault(value, len(names)))
+                        for i, value in sorted(carried.items()) if live[target] & (1 << i)
+                    ), next_stack, next_pending)
+                    if next_state not in previous:
+                        if len(previous) - len(visited_nodes) >= _VALUE_STATE_LIMIT:
+                            return None
+                        visited_nodes.add(target)
+                        previous[next_state] = state
+                        queue.append(next_state)
+        return paths
+    return walk
 
 
 def _rule_applies(rule: CompiledFlowRule, path: str, language: str, root: str) -> bool:
@@ -673,7 +892,7 @@ def _add_cross_file_calls(
                         existing.add(edge)
         results = [node for node, event in caller_events if event.role == "call_result"]
         for return_node, returned in callee_events:
-            if returned.role != "return_out":
+            if returned.role != "function_exit":
                 continue
             for result_node in results:
                 edge = (return_node, result_node, "call_return")
@@ -882,7 +1101,7 @@ def evaluate_compiled_flow(
         target_node = (edge.file_path, edge.to_event)
         if source_node not in all_events or target_node not in all_events:
             continue
-        if edge.edge_kind == "control":
+        if _is_control_edge(edge.edge_kind):
             control_adjacency[source_node].append((target_node, edge.edge_kind))
         else:
             value_adjacency[source_node].append((target_node, edge.edge_kind))
@@ -892,6 +1111,25 @@ def evaluate_compiled_flow(
         all_events, value_adjacency, control_adjacency, graph,
     )
     _add_container_mutations(all_events, value_adjacency, language)
+    # Finalizer continuations affect the whole connected call component, even
+    # when the pending control path carries no value into the callee.
+    function_of = {node: (event.file_path, event.func_id)
+                   for node, event in all_events.items()}
+    finally_functions = {function_of[node] for node, outgoing in control_adjacency.items()
+                         if any(kind.startswith("control;") for _target, kind in outgoing)}
+    if finally_functions and interprocedural:
+        callers = defaultdict(set)
+        for node, outgoing in value_adjacency.items():
+            for target, kind in outgoing:
+                if kind in _CALL_EDGES:
+                    left, right = function_of[node], function_of[target]
+                    callers[left].add(right)
+                    callers[right].add(left)
+        pending_functions = list(finally_functions)
+        while pending_functions:
+            for target in callers[pending_functions.pop()] - finally_functions:
+                finally_functions.add(target)
+                pending_functions.append(target)
     if interprocedural:
         for source_node, outgoing in value_adjacency.items():
             source_event = all_events[source_node]
@@ -1000,6 +1238,7 @@ def evaluate_compiled_flow(
         control_edges = frozenset({"control"}) | (
             _CALL_EDGES if interprocedural else frozenset()
         )
+        value_walker = None
         for source in sources:
             states, predecessor = _walk(
                 source.node, value_adjacency, all_events, value_edges,
@@ -1044,10 +1283,33 @@ def evaluate_compiled_flow(
                         event.access_path or event.var or text,
                     )))
 
+            reachable_sinks = {sink.node for _, sink in candidates
+                               if sink.node in states_by_node}
+            if not reachable_sinks:
+                continue
+            correlate = function_of[source.node] in finally_functions or (rule.quantifier == "all_paths" and bool(
+                sanitizers or scope_sanitizers or return_sanitizers))
+            surviving = {}
+            if correlate:
+                if value_walker is None:
+                    value_walker = _value_path_walker(
+                        sanitizers if rule.quantifier == "all_paths" else [],
+                        scope_sanitizers if rule.quantifier == "all_paths" else [],
+                        return_sanitizers if rule.quantifier == "all_paths" else [],
+                        value_adjacency, control_adjacency, all_events,
+                        interprocedural, max_call_depth,
+                    )
+                surviving = value_walker(source, reachable_sinks)
             for sink_endpoint, sink in candidates:
                 sink_states = states_by_node.get(sink.node, ())
-                if not sink_states or _is_sanitized(
-                    source, sink, sanitizers, scope_sanitizers, rule.quantifier,
+                if not sink_states:
+                    continue
+                if correlate:
+                    if surviving is not None and sink.node not in surviving:
+                        continue
+                    event_path = surviving[sink.node] if surviving is not None else []
+                if (not correlate or rule.quantifier == "some_path") and _has_sanitized_path(
+                    source, sink, sanitizers, scope_sanitizers,
                     value_adjacency, control_adjacency, all_events,
                     value_edges, control_edges,
                     max_call_depth,
@@ -1059,8 +1321,9 @@ def evaluate_compiled_flow(
                 if key in seen:
                     continue
                 seen.add(key)
-                state = min(sink_states, key=lambda item: len(_path_to(item, predecessor)))
-                event_path = _path_to(state, predecessor)
+                if not correlate:
+                    state = min(sink_states, key=lambda item: len(_path_to(item, predecessor)))
+                    event_path = _path_to(state, predecessor)
                 from emend.trace import TraceStep
                 trace = [TraceStep(
                     file_path=stored_to_actual.get(event.file_path, event.file_path),
@@ -1084,16 +1347,16 @@ def evaluate_compiled_flow(
                         event.access_path or event.var
                     ),
                 ) for node in event_path for event in [all_events[node]]]
-                if not trace or (
+                if event_path and (not trace or (
                     trace[0].file_path != source.span.file_path
                     or trace[0].line != source.span.start_line + 1
                     or trace[0].col != source.span.start_col
-                ):
+                )):
                     trace.insert(0, TraceStep(
                         source.span.file_path, source.span.start_line + 1,
                         source.span.start_col, f"source: {source.span.text}", source.variable,
                     ))
-                if not trace[-1].description.startswith("sink:"):
+                if trace and not trace[-1].description.startswith("sink:"):
                     trace.append(TraceStep(
                         sink.span.file_path, sink.span.start_line + 1,
                         sink.span.start_col, f"sink: {sink.span.text}", sink.variable,
@@ -1105,7 +1368,9 @@ def evaluate_compiled_flow(
                         " (via function call)"
                         if len({all_events[node].func_id for node in event_path}) > 1
                         else ""
-                    ), trace, rule_id=rule.rule_id,
+                    ) + (" (control/value correlation limit reached; witness unavailable)" if not event_path else ""),
+                    trace, engine="occurrence" if event_path else "occurrence-budget",
+                    rule_id=rule.rule_id,
                     rule_name=rule.name, severity=rule.severity,
                 ))
     return sorted(results, key=lambda row: (

@@ -66,6 +66,13 @@ pub struct BasicBlock {
     pub uses: Vec<(String, u32, u32, String)>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FinallyTransition {
+    pub scope: u32,
+    pub reason: u32,
+    pub entering: bool,
+}
+
 /// A control-flow edge.
 #[derive(Debug, Clone)]
 pub struct CfgEdge {
@@ -74,6 +81,13 @@ pub struct CfgEdge {
     pub kind: EdgeKind,
     /// For conditional edges: byte range of the condition expression.
     pub condition: Option<(usize, usize)>,
+    /// Immutable syntactic region whose evaluations may enter this handler.
+    pub protected_range: Option<(usize, usize)>,
+    pub shadows_outer: bool,
+    pub resume_from: Option<BlockId>,
+    pub finally_transitions: Vec<FinallyTransition>,
+    /// Return evaluation block whose value this normal completion commits.
+    pub return_value_from: Option<BlockId>,
 }
 
 /// The complete CFG for one function.
@@ -261,6 +275,7 @@ struct CfgBuilder<'a> {
     exit_block: BlockId,
     /// Stack of (loop_header, loop_exit) for break/continue.
     loop_stack: Vec<(BlockId, BlockId)>,
+    finally_jumps: Vec<usize>,
 }
 
 impl<'a> CfgBuilder<'a> {
@@ -273,6 +288,7 @@ impl<'a> CfgBuilder<'a> {
             next_id: 0,
             exit_block: BlockId(0), // placeholder
             loop_stack: Vec::new(),
+            finally_jumps: Vec::new(),
         };
         // Allocate entry block
         let _entry = builder.new_block_at(0, 0, 0);
@@ -322,7 +338,52 @@ impl<'a> CfgBuilder<'a> {
             to,
             kind,
             condition: cond,
+            protected_range: None,
+            shadows_outer: false,
+            resume_from: None,
+            finally_transitions: Vec::new(),
+            return_value_from: None,
         });
+    }
+
+    fn add_exception_edge(&mut self, from: BlockId, to: BlockId, region: tree_sitter::Node, shadows_outer: bool) {
+        self.edges.push(CfgEdge {
+            from, to, kind: EdgeKind::Exception, condition: None,
+            protected_range: Some((region.start_byte(), region.end_byte())),
+            shadows_outer, resume_from: None, finally_transitions: Vec::new(),
+            return_value_from: None,
+        });
+    }
+
+    fn tag_finally_edge(&mut self, scope: BlockId, reason: u32, entering: bool) {
+        self.edges.last_mut().unwrap().finally_transitions.push(FinallyTransition {
+            scope: scope.0, reason, entering,
+        });
+    }
+
+    fn route_finally_jumps(&mut self, region: tree_sitter::Node, finalizer: BlockId) -> Vec<(BlockId, EdgeKind, u32)> {
+        let inside = |block: &BasicBlock| region.start_byte() <= block.start_byte
+            && block.start_byte < region.end_byte();
+        let mut continuations = Vec::new();
+        for &index in &self.finally_jumps {
+            let edge = &mut self.edges[index];
+            if inside(&self.blocks[edge.from.0 as usize]) && !inside(&self.blocks[edge.to.0 as usize]) {
+                let reason = continuations.len() as u32 + 2;
+                continuations.push((edge.to, edge.kind, reason));
+                edge.finally_transitions.push(FinallyTransition { scope: finalizer.0, reason, entering: true });
+                edge.to = finalizer;
+                edge.kind = EdgeKind::Finally;
+            }
+        }
+        continuations
+    }
+
+    fn resume_finally_jumps(&mut self, end: BlockId, scope: BlockId, continuations: Vec<(BlockId, EdgeKind, u32)>) {
+        for (target, kind, reason) in continuations {
+            self.add_edge(end, target, kind);
+            self.tag_finally_edge(scope, reason, false);
+            self.finally_jumps.push(self.edges.len() - 1);
+        }
     }
 
     fn block_mut(&mut self, block_id: BlockId) -> &mut BasicBlock {
@@ -699,13 +760,24 @@ impl<'a> CfgBuilder<'a> {
         {
             self.add_statement(current, node);
             self.collect_defs_uses(current, node);
-            self.add_edge(current, self.exit_block, EdgeKind::Jump);
+            if self.cfg_sec.return_nodes.iter().any(|n| n == kind) {
+                // Outside every protected source span: finalizers intercept the
+                // evaluation-to-completion jump, preserving this exact return.
+                let completion = self.new_block_at(0, 0, 0);
+                self.add_edge(completion, self.exit_block, EdgeKind::Fallthrough);
+                self.edges.last_mut().unwrap().return_value_from = Some(current);
+                self.add_edge(current, completion, EdgeKind::Jump);
+                self.finally_jumps.push(self.edges.len() - 1);
+            } else {
+                self.add_edge(current, self.exit_block, EdgeKind::Jump);
+            }
             return None;
         }
         if self.cfg_sec.break_nodes.iter().any(|n| n == kind) {
             self.add_statement(current, node);
             if let Some(&(_, loop_exit)) = self.loop_stack.last() {
                 self.add_edge(current, loop_exit, EdgeKind::Jump);
+                self.finally_jumps.push(self.edges.len() - 1);
             }
             return None;
         }
@@ -713,6 +785,7 @@ impl<'a> CfgBuilder<'a> {
             self.add_statement(current, node);
             if let Some(&(loop_header, _)) = self.loop_stack.last() {
                 self.add_edge(current, loop_header, EdgeKind::BackEdge);
+                self.finally_jumps.push(self.edges.len() - 1);
             }
             return None;
         }
@@ -1185,34 +1258,34 @@ impl<'a> CfgBuilder<'a> {
             try_end = self.walk_body(body, try_block);
         }
 
+        let exhaustive_catch = except_clauses.iter().any(|clause| {
+            clause.child_by_field_name(&self.cfg_sec.exception_type_field)
+                .map(|value| self.cfg_sec.exhaustive_exception_types
+                     .iter().any(|name| name == self.node_text(value)))
+                .unwrap_or(true)
+        });
+
+        let mut handler_ends = Vec::new();
         let except_target = if !except_clauses.is_empty() {
             let first_except = self.new_block_from_node(except_clauses[0]);
 
             if let Some(te) = try_entry {
-                self.add_edge(te, first_except, EdgeKind::Exception);
+                self.add_exception_edge(te, first_except, try_body.unwrap(), exhaustive_catch);
             }
 
-            let mut prev_handler: Option<BlockId> = None;
+            let mut prev_dispatch: Option<BlockId> = None;
             for (i, except) in except_clauses.iter().enumerate() {
-                // Reuse the pre-created first_except block for the first
-                // clause so the exception edge connects to the handler body.
-                // Subsequent handlers get new blocks chained from the previous
-                // handler (modelling Python's sequential except matching).
-                let handler_block = if i == 0 {
-                    first_except
-                } else {
-                    let hb = self.new_block_from_node(*except);
-                    if let Some(prev) = prev_handler {
-                        self.add_edge(prev, hb, EdgeKind::FalseBranch);
-                    }
-                    hb
-                };
-                prev_handler = Some(handler_block);
+                let dispatch = if i == 0 { first_except }
+                    else { self.new_block_from_node(*except) };
+                if let Some(previous) = prev_dispatch {
+                    self.add_edge(previous, dispatch, EdgeKind::FalseBranch);
+                }
+                prev_dispatch = Some(dispatch);
                 let mut ec = except.walk();
                 for c in except.children(&mut ec) {
                     if !id_node.is_empty() && c.kind() == id_node.as_str() {
                         let name = self.node_text(c).to_string();
-                        self.block_mut(handler_block).defs.push((
+                        self.block_mut(dispatch).defs.push((
                             name,
                             c.start_position().row as u32,
                             c.start_position().column as u32,
@@ -1220,7 +1293,13 @@ impl<'a> CfgBuilder<'a> {
                         ));
                     }
                     if !try_body_kind.is_empty() && c.kind() == try_body_kind.as_str() {
-                        if let Some(end) = self.walk_body(c, handler_block) {
+                        // A mismatch skips the body and its writes. Keep header
+                        // expressions in dispatch, separate from body occurrences.
+                        self.block_mut(dispatch).end_byte = c.start_byte();
+                        let body = self.new_block_from_node(c);
+                        self.add_edge(dispatch, body, EdgeKind::TrueBranch);
+                        if let Some(end) = self.walk_body(c, body) {
+                            handler_ends.push(end);
                             if finally_clause.is_none() {
                                 self.add_edge(end, join, EdgeKind::Fallthrough);
                             }
@@ -1266,30 +1345,35 @@ impl<'a> CfgBuilder<'a> {
                     let fin_block = self.new_block_from_node(c);
                     if let Some(te) = try_end {
                         self.add_edge(te, fin_block, EdgeKind::Finally);
+                        self.tag_finally_edge(fin_block, 0, true);
                     }
-                    if let Some(et) = except_target {
-                        self.add_edge(et, fin_block, EdgeKind::Finally);
+                    for &end in &handler_ends {
+                        self.add_edge(end, fin_block, EdgeKind::Finally);
+                        self.tag_finally_edge(fin_block, 0, true);
                     }
+                    let continuations = self.route_finally_jumps(node, fin_block);
+                    let exception_start = self.edges.len();
                     if let Some(protected) = except_target.or(try_entry) {
-                        self.add_edge(protected, fin_block, EdgeKind::Exception);
-                    }
-                    // If both try_end and except_target are None, all paths
-                    // through the try terminated (return/raise/break), but
-                    // finally still executes.  Connect from the try entry
-                    // block so the finally body is reachable.
-                    if try_end.is_none() && except_target.is_none() {
-                        if let Some(body) = try_body {
-                            let te = self.blocks.iter()
-                                .find(|b| b.start_byte == body.start_byte())
-                                .map(|b| b.id);
-                            if let Some(te) = te {
-                                self.add_edge(te, fin_block, EdgeKind::Finally);
-                            }
+                        for region in except_clauses.iter().copied().chain(else_clause).chain(
+                            try_body.into_iter().filter(|_| !exhaustive_catch)
+                        ) {
+                            self.add_exception_edge(protected, fin_block, region, true);
+                            self.tag_finally_edge(fin_block, 1, true);
                         }
                     }
+                    let exception_end = self.edges.len();
                     if let Some(end) = self.walk_body(c, fin_block) {
-                        self.add_edge(end, join, EdgeKind::Fallthrough);
-                        all_terminated = false;
+                        self.resume_finally_jumps(end, fin_block, continuations);
+                        for edge in &mut self.edges[exception_start..exception_end] {
+                            edge.resume_from = Some(end);
+                        }
+                        all_terminated = try_end.is_none() && handler_ends.is_empty();
+                        if !all_terminated {
+                            self.add_edge(end, join, EdgeKind::Fallthrough);
+                            self.tag_finally_edge(fin_block, 0, false);
+                        }
+                    } else {
+                        all_terminated = true;
                     }
                 }
             }
@@ -1323,7 +1407,7 @@ impl<'a> CfgBuilder<'a> {
                 if let Some(handler) = node.child_by_field_name(catch_field) {
                     let handler_block = self.new_block_from_node(handler);
                     handler_entry = Some(handler_block);
-                    self.add_edge(try_block, handler_block, EdgeKind::Exception);
+                    self.add_exception_edge(try_block, handler_block, body, true);
 
                     // Walk handler body
                     if let Some(hbody) = handler.child_by_field_name(body_field) {
@@ -1358,25 +1442,34 @@ impl<'a> CfgBuilder<'a> {
                 let fin_block = self.new_block_from_node(fin);
                 if let Some(te) = try_end {
                     self.add_edge(te, fin_block, EdgeKind::Finally);
+                        self.tag_finally_edge(fin_block, 0, true);
                 }
                 if let Some(end) = handler_end {
                     self.add_edge(end, fin_block, EdgeKind::Finally);
+                        self.tag_finally_edge(fin_block, 0, true);
                 }
+                let continuations = self.route_finally_jumps(node, fin_block);
+                let exception_start = self.edges.len();
                 if let Some(protected) = handler_entry.or(try_entry) {
-                    self.add_edge(protected, fin_block, EdgeKind::Exception);
+                    let region = node.child_by_field_name(catch_field)
+                        .or_else(|| node.child_by_field_name(body_field)).unwrap();
+                    self.add_exception_edge(protected, fin_block, region, true);
+                            self.tag_finally_edge(fin_block, 1, true);
                 }
-                // Walk finalizer body
-                if let Some(fbody) = fin.child_by_field_name(body_field) {
-                    if let Some(end) = self.walk_body(fbody, fin_block) {
+                let exception_end = self.edges.len();
+                let body = fin.child_by_field_name(body_field).unwrap_or(fin);
+                if let Some(end) = self.walk_body(body, fin_block) {
+                    self.resume_finally_jumps(end, fin_block, continuations);
+                    for edge in &mut self.edges[exception_start..exception_end] {
+                        edge.resume_from = Some(end);
+                    }
+                    all_terminated = try_end.is_none() && handler_end.is_none();
+                    if !all_terminated {
                         self.add_edge(end, join, EdgeKind::Fallthrough);
-                        all_terminated = false;
+                        self.tag_finally_edge(fin_block, 0, false);
                     }
                 } else {
-                    // Finalizer may have its body as direct children
-                    if let Some(end) = self.walk_body(fin, fin_block) {
-                        self.add_edge(end, join, EdgeKind::Fallthrough);
-                        all_terminated = false;
-                    }
+                    all_terminated = true;
                 }
             }
         }
@@ -1886,8 +1979,19 @@ impl<'a> FlowExtractor<'a> {
         if let Some(path) = self.path(node) {
             return vec![self.emit(node, "use", Some(path), None, None)];
         }
-        if node.kind() == self.lang.pattern_matching.binary_operator
-            || node.kind() == self.lang.pattern_matching.unary_operator {
+        let pm = &self.lang.pattern_matching;
+        // Composite results are not definite aliases of their tainted inputs.
+        // Selection expressions may return an untainted alternative; retaining
+        // a distinct identity is conservative until their branches are modeled.
+        if [&pm.binary_operator, &pm.unary_operator, &pm.boolean_operator,
+            &pm.not_operator, &pm.comparison_operator, &pm.conditional_expression,
+            &pm.list, &pm.tuple, &pm.set, &pm.dict, &pm.dict_comprehension,
+            &pm.string].iter().any(|kind| kind.as_str() == node.kind())
+            || self.lang.cfg.string_nodes.iter().any(|kind| kind == node.kind())
+            || self.lang.symbols.receiver_constructor_node() == Some(node.kind())
+            || self.lang.scoping.scope_creators.iter().any(|creator| {
+                creator.kind == crate::scope::ScopeKind::Comprehension && creator.node_type == node.kind()
+            }) {
             let inputs = self.generic(node);
             let result = self.emit(node, "evaluate", None, None, None);
             for input in inputs { self.edge(input, result, "transfer"); }
@@ -1898,6 +2002,21 @@ impl<'a> FlowExtractor<'a> {
 
     fn walk(&mut self, node: tree_sitter::Node) {
         if self.is_function(node) { return; }
+        let catch_binding = self.lang.bindings.exception.iter()
+            .find(|rule| rule.node == node.kind())
+            .and_then(|rule| node.child_by_field_name(&rule.target));
+        if catch_binding.is_some() || self.lang.cfg.except_clauses.iter().any(|kind| kind == node.kind()) {
+            let named_type = node.child_by_field_name(&self.lang.cfg.exception_type_field)
+                .filter(|value| self.lang.cfg.nonthrowing_exception_types
+                        .iter().any(|name| name == self.text(*value)));
+            // Known built-in catch types describe dispatch. Custom and dynamic
+            // type expressions remain evaluated; catch parameters are definitions.
+            for child in Self::children(node) {
+                if Some(child) == catch_binding { self.targets(child, &[], false); }
+                else if Some(child) != named_type { self.walk(child); }
+            }
+            return;
+        }
         if self.lang.cfg.throw_nodes.iter().any(|kind| kind == node.kind()) {
             for child in Self::children(node) { self.expr(child); }
             self.emit(node, "throw", None, None, None);
@@ -1937,32 +2056,99 @@ impl<'a> FlowExtractor<'a> {
             values.sort_unstable();
             additions.extend(values.windows(2).map(|p| FlowEdge { from: p[0].1, to: p[1].1, kind: "control".into() }));
         }
-        let successors: HashMap<u32, Vec<u32>> = self.cfg.blocks.iter().map(|b| {
+        type Target = (u32, Vec<FinallyTransition>);
+        let mut successors: HashMap<u32, Vec<Target>> = self.cfg.blocks.iter().map(|b| {
             (b.id.0, self.cfg.edges.iter().filter(|edge| edge.from == b.id && edge.kind != EdgeKind::Exception)
-             .map(|edge| edge.to.0).collect())
+             .map(|edge| (edge.to.0, edge.finally_transitions.clone())).collect())
         }).collect();
-        let mut exits: Vec<(u32, Vec<u32>)> = by_block.iter().filter_map(|(&block, values)| {
-            values.last().map(|&(_, last)| (last, successors.get(&block).cloned().unwrap_or_default()))
-        }).collect();
-        // A throwing evaluation leaves before its result or assignment exists. The
-        // exceptional CFG edge identifies the protected region, not its exit.
-        for edge in self.cfg.edges.iter().filter(|edge| edge.kind == EdgeKind::Exception) {
-            let protected = &self.cfg.blocks[edge.from.0 as usize];
-            for event in &self.events {
-                if matches!(event.role.as_str(), "call" | "throw" | "use" | "evaluate")
-                    && protected.start_byte <= event.start_byte && event.end_byte <= protected.end_byte {
-                    exits.push((event.id, vec![edge.to.0]));
+        let regions: Vec<_> = self.cfg.edges.iter()
+            .filter_map(|edge| edge.protected_range.map(|range| (range, edge)))
+            .collect();
+        let handlers = |start: usize, end: usize, enclosing: bool| {
+            let contains = |left: usize, right: usize| left <= start && end <= right
+                && (!enclosing || right - left > end - start);
+            let nearest = regions.iter().filter(|((left, right), edge)|
+                contains(*left, *right) && edge.shadows_outer)
+                .map(|((left, right), _)| right - left).min().unwrap_or(usize::MAX);
+            regions.iter().filter(|((left, right), _)|
+                contains(*left, *right) && right - left <= nearest)
+                .map(|(_, edge)| (edge.to.0, edge.finally_transitions.clone())).collect::<Vec<_>>()
+        };
+        for ((start, end), edge) in &regions {
+            if let Some(resume) = edge.resume_from {
+                let entered = edge.finally_transitions.last().unwrap();
+                for (target, mut actions) in handlers(*start, *end, true) {
+                    actions.insert(0, FinallyTransition { entering: false, ..*entered });
+                    successors.entry(resume.0).or_default().push((target, actions));
                 }
             }
         }
+        // The public CFG shares an exit block for return and throw, but a
+        // throwing occurrence can only take an exceptional continuation.
+        let throws: HashSet<_> = self.events.iter().filter(|event| event.role == "throw")
+            .map(|event| event.id).collect();
+        let mut exits: Vec<(u32, Vec<Target>)> = by_block.iter().filter_map(|(&block, values)| {
+            values.last().filter(|(_, last)| !throws.contains(last))
+                .map(|&(_, last)| (last, successors.get(&block).cloned().unwrap_or_default()))
+        }).collect();
+        for event in &self.events {
+            if matches!(event.role.as_str(), "call" | "throw" | "use" | "evaluate") {
+                let targets = handlers(event.start_byte, event.end_byte, false);
+                if !targets.is_empty() { exits.push((event.id, targets)); }
+            }
+        }
+        // Canonicalize transitions through empty blocks. Each scope is an
+        // independent pending reason; a balanced empty finalizer clears it.
+        // This bounds empty-loop traversal without dropping distinct reasons.
+        let compose = |actions: Vec<FinallyTransition>| -> Option<Vec<FinallyTransition>> {
+            let mut scopes = std::collections::BTreeMap::new();
+            for action in actions {
+                let state = scopes.entry(action.scope).or_insert((None, None, false));
+                if action.entering {
+                    state.1 = Some(action.reason);
+                } else {
+                    if action.reason != u32::MAX {
+                        if state.2 && state.1.is_some_and(|reason| reason != action.reason) { return None; }
+                        if !state.2 { state.0 = Some(action.reason); }
+                    }
+                    state.1 = None;
+                }
+                state.2 = true;
+            }
+            let mut result = Vec::new();
+            for (scope, (required, current, _)) in scopes {
+                if let Some(reason) = required {
+                    result.push(FinallyTransition { scope, reason, entering: false });
+                }
+                if let Some(reason) = current {
+                    result.push(FinallyTransition { scope, reason, entering: true });
+                } else if required.is_none() {
+                    result.push(FinallyTransition { scope, reason: u32::MAX, entering: false });
+                }
+            }
+            Some(result)
+        };
         for (last, targets) in exits {
-            let mut queue: VecDeque<u32> = targets.into();
+            let mut queue: VecDeque<Target> = targets.into();
             let mut seen = HashSet::new();
-            while let Some(next) = queue.pop_front() {
-                if !seen.insert(next) { continue; }
+            while let Some((next, actions)) = queue.pop_front() {
+                let Some(actions) = compose(actions) else { continue; };
+                if !seen.insert((next, actions.clone())) { continue; }
                 if let Some(&(_, first)) = by_block.get(&next).and_then(|v| v.first()) {
-                    additions.push(FlowEdge { from: last, to: first, kind: "control".into() });
-                } else if let Some(more) = successors.get(&next) { queue.extend(more); }
+                    let mut kind = String::from("control");
+                    for action in actions {
+                        let operation = if action.entering { "enter" }
+                            else if action.reason == u32::MAX { "clear" } else { "resume" };
+                        kind.push_str(&format!(";{},{},{}", operation, action.scope, action.reason));
+                    }
+                    additions.push(FlowEdge { from: last, to: first, kind });
+                } else if let Some(more) = successors.get(&next) {
+                    queue.extend(more.iter().map(|(target, extra)| {
+                        let mut combined = actions.clone();
+                        combined.extend(extra);
+                        (*target, combined)
+                    }));
+                }
             }
         }
         self.edges.extend(additions);
@@ -1976,7 +2162,7 @@ impl<'a> FlowExtractor<'a> {
         let indices: HashMap<_, _> = self.events.iter().enumerate().map(|(i, event)| (event.id, i)).collect();
         let mut successors = vec![Vec::new(); self.events.len()];
         let mut predecessors = vec![Vec::new(); self.events.len()];
-        for edge in self.edges.iter().filter(|edge| edge.kind == "control") {
+        for edge in self.edges.iter().filter(|edge| edge.kind == "control" || edge.kind.starts_with("control;")) {
             let (from, to) = (indices[&edge.from], indices[&edge.to]);
             successors[from].push(to);
             predecessors[to].push(from);
@@ -2057,6 +2243,17 @@ impl<'a> FlowExtractor<'a> {
         self.edges.extend(additions);
     }
 
+    fn emit_completion(&mut self, body: tree_sitter::Node, role: &str, block: BlockId) -> u32 {
+        let id = self.emit(body, role, None, None, None);
+        let event = self.events.last_mut().unwrap();
+        event.block = block.0;
+        event.text.clear();
+        event.start_byte = body.end_byte();
+        event.start_line = body.end_position().row as u32;
+        event.start_col = body.end_position().column as u32;
+        id
+    }
+
     fn finish(mut self) -> (Vec<FlowEvent>, Vec<FlowEdge>, Vec<CallRecord>) {
         self.control_edges(); self.reaching_edges();
         let mut seen = HashSet::new();
@@ -2077,6 +2274,20 @@ fn extract_scope(
     };
     if let Some(function) = function { extractor.parameters(function); }
     extractor.walk(body);
+    // Each return completes only after its finalizers. A nested return may be
+    // canceled by a caught exception, leaving an earlier pending return intact.
+    let returns: HashMap<_, _> = extractor.events.iter().filter(|event| event.role == "return_out")
+        .map(|event| (event.block, event.id)).collect();
+    let mut completed = Vec::new();
+    for edge in &cfg.edges {
+        if let Some(returned) = edge.return_value_from.and_then(|block| returns.get(&block.0)) {
+            let completion = extractor.emit_completion(body, "return_complete", edge.from);
+            extractor.edge(*returned, completion, "transfer");
+            completed.push(completion);
+        }
+    }
+    let exit = extractor.emit_completion(body, "function_exit", cfg.exit);
+    for returned in completed { extractor.edge(returned, exit, "transfer"); }
     extractor.finish()
 }
 
@@ -2125,7 +2336,7 @@ pub fn build_analysis_from_tree(
         let start = node.start_byte();
         let (e, d, c) = extract_scope(bytes, lang, cfg, name.clone(), start, body, Some(node), &mut next_id);
         let params = e.iter().filter(|v| v.role == "param_in").map(|v| v.id).collect();
-        let returns = e.iter().filter(|v| v.role == "return_out").map(|v| v.id).collect();
+        let returns = e.iter().filter(|v| v.role == "function_exit").map(|v| v.id).collect();
         functions.entry(name).or_default().push((params, returns));
         events.extend(e); edges.extend(d); calls.extend(c);
     }
