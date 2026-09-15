@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 /// All directories starting with '.' are skipped automatically.
 pub const SKIP_DIRS: &[&str] = &[
     "__pycache__",
-    "venv",
+    "venv*",
     "node_modules",
     "dist",
     "build",
@@ -18,7 +18,8 @@ pub const SKIP_DIRS: &[&str] = &[
 /// Collect all files under `root` with specific extensions, skipping non-project directories.
 ///
 /// Follows symlinks to both directories and files, skipping directory cycles.
-/// `skip_dirs` matches directory names, with an optional leading `*` for suffixes.
+/// `skip_dirs` matches directory names, with an optional leading `*` for suffixes
+/// or trailing `*` for prefixes.
 pub fn collect_files(root: &Path, extensions: &[&str], skip_dirs: &[&str]) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![(root.to_path_buf(), false)];
@@ -66,9 +67,13 @@ pub fn collect_files(root: &Path, extensions: &[&str], skip_dirs: &[&str]) -> Ve
                 // Skip all dot-directories (e.g. .venv, .poetry_cache, .git)
                 // as well as explicitly listed non-dot directories.
                 let excluded = skip_dirs.iter().any(|pattern| {
-                    pattern
-                        .strip_prefix('*')
-                        .map_or(name_str == *pattern, |suffix| name_str.ends_with(suffix))
+                    if let Some(prefix) = pattern.strip_suffix('*') {
+                        name_str.starts_with(prefix)
+                    } else if let Some(suffix) = pattern.strip_prefix('*') {
+                        name_str.ends_with(suffix)
+                    } else {
+                        name_str == *pattern
+                    }
                 });
                 if !name_str.starts_with('.') && !excluded {
                     stack.push((entry.path(), false));

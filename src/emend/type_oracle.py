@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -458,6 +459,9 @@ class TypeOracle(ABC):
     # visible to their subprocess.  LSP adapters set this to True because
     # they receive the overlay through didOpen below.
     _uses_overlay_source = False
+    # Indexing can deliberately omit installed environment sources. Direct
+    # type queries retain the historical environment-aware default.
+    _include_environment = True
 
     @property
     def supports_source_overrides(self) -> bool:
@@ -478,6 +482,11 @@ class TypeOracle(ABC):
         cache = getattr(self, "_cache", None)
         if cache is not None:
             cache.close()
+
+    @contextmanager
+    def precompute_batch(self, paths, project_root):
+        """Optionally overlap independent inference with index preparation."""
+        yield
 
     def type_at(self, path: Path, line: int, col: int,
                 project_root: Path | None = None) -> TypeBinding | None:
@@ -519,6 +528,7 @@ class TypeOracle(ABC):
         return _file_cache_key(
             path, project_root=project_root,
             include_overlays=self._uses_overlay_source,
+            include_environment=self._include_environment,
         )
 
     def _publish_result(self, path, result, key, current_key):
@@ -540,6 +550,7 @@ class TypeOracle(ABC):
         if inputs is None:
             inputs = AnalysisStore.open(root).type_file_inputs(
                 paths, include_overlays=self._uses_overlay_source,
+                include_environment=self._include_environment,
             )
         identities, sources, project_paths = inputs
         if self._uses_overlay_source:
@@ -1181,6 +1192,7 @@ def _file_cache_key(
     project_root: Path | None = None,
     *,
     include_overlays: bool = False,
+    include_environment: bool = True,
 ) -> str:
     """Key type results by logical path, content, and local dependencies."""
     from emend.analysis_store import AnalysisStore
@@ -1195,7 +1207,10 @@ def _file_cache_key(
             content_hash = None
     store = AnalysisStore.open(project_root or path)
     return store.type_file_identity(
-        path, content_hash, include_overlays=include_overlays
+        path,
+        content_hash,
+        include_overlays=include_overlays,
+        include_environment=include_environment,
     )
 
 
@@ -1349,6 +1364,31 @@ class PyreflyAdapter(TypeOracle):
 
     _uses_overlay_source = False
 
+    @contextmanager
+    def precompute_batch(self, paths, project_root):
+        from concurrent.futures import ThreadPoolExecutor
+        from emend.analysis_store import AnalysisStore
+
+        store = AnalysisStore.open(project_root)
+        # Warm indexes should use their type cache, not speculatively rerun it.
+        # Environment dependency closure still requires prepared identities.
+        if store.facts_path.exists() or self._include_environment or not paths:
+            yield
+            return
+
+        def generation():
+            return store._scan_disk().snapshot.snapshot_id, _type_shared_context(project_root)
+
+        before = generation()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            self._precomputed_batch = (pool.submit(
+                self._run_batch, [p.resolve() for p in paths], project_root,
+            ), before, generation)
+            try:
+                yield
+            finally:
+                del self._precomputed_batch
+
     def __init__(
         self,
         pyrefly_path: str | None = None,
@@ -1386,55 +1426,13 @@ class PyreflyAdapter(TypeOracle):
         if cached is not None:
             return cached
 
-        # Run pyrefly
-        logger.info("Building type index for %s via pyrefly", path)
-        debug_json = self._run_pyrefly(path, project_root)
-        ft = (_parse_pyrefly_debug(debug_json, str(path))
-              if debug_json is not None else None)
+        ft = self._run_batch([path], project_root).get(str(path))
         return self._publish_result(
             path, ft, content_hash, self._current_file_key(path, project_root)
         )
 
     def clear_cache(self) -> None:
         self._cache.clear()
-
-    def _run_pyrefly(self, path: Path, project_root: Path | None) -> dict | None:
-        """Run pyrefly check on a single file and return debug-info JSON."""
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-            debug_path = tmp.name
-
-        try:
-            cmd = [
-                self._pyrefly, "check",
-                "--output-format", "json",
-                "--debug-info", debug_path,
-                "--summary=none",
-                *self._extra_args,
-                str(path),
-            ]
-
-            cwd = str(project_root) if project_root else str(path.parent)
-
-            subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                cwd=cwd,
-            )
-            # pyrefly may return non-zero for type errors — that's fine,
-            # we still get debug-info
-            if os.path.exists(debug_path) and os.path.getsize(debug_path) > 0:
-                with open(debug_path) as f:
-                    return json.load(f)
-            return None
-        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
-            return None
-        finally:
-            try:
-                os.unlink(debug_path)
-            except OSError:
-                pass
 
     def infer_batch(
         self, paths: list[Path], project_root: Path | None = None, *,
@@ -1472,6 +1470,34 @@ class PyreflyAdapter(TypeOracle):
         if not to_check:
             return results
 
+        precomputed = getattr(self, "_precomputed_batch", None)
+        if precomputed is not None:
+            future, before, generation = precomputed
+            computed = future.result()
+            if generation() != before:
+                computed = self._run_batch(to_check, project_root)
+        else:
+            computed = self._run_batch(to_check, project_root)
+
+        from emend.analysis_store import AnalysisStore
+
+        current = AnalysisStore.open(
+            project_root or to_check[0].parent
+        ).type_file_identities(
+            to_check,
+            include_overlays=False,
+            include_environment=self._include_environment,
+        )
+        for path_obj in to_check:
+            key = str(path_obj)
+            results[key] = self._publish_result(
+                path_obj, computed.get(key), hashes[key], current.get(key)
+            )
+        return results
+
+    def _run_batch(self, to_check, project_root):
+        """Run the checker without reading or writing analysis caches."""
+        results = {}
         logger.info(
             "Building type indexes for %d files via pyrefly (batch)",
             len(to_check),
@@ -1504,14 +1530,7 @@ class PyreflyAdapter(TypeOracle):
                     debug_json = json.load(f)
 
                 for path_obj in to_check:
-                    try:
-                        ft = _parse_pyrefly_debug(debug_json, str(path_obj))
-                    except BUG_EXCEPTIONS:
-                        raise
-                    except Exception:
-                        logger.debug("pyrefly parse failed for %s", path_obj, exc_info=True)
-                        continue
-                    results[str(path_obj)] = ft
+                    results[str(path_obj)] = _parse_pyrefly_debug(debug_json, str(path_obj))
         except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
             pass
         finally:
@@ -1519,17 +1538,6 @@ class PyreflyAdapter(TypeOracle):
                 os.unlink(debug_path)
             except OSError:
                 pass
-
-        from emend.analysis_store import AnalysisStore
-
-        current = AnalysisStore.open(
-            project_root or to_check[0].parent
-        ).type_file_identities(to_check, include_overlays=False)
-        for path_obj in to_check:
-            key = str(path_obj)
-            results[key] = self._publish_result(
-                path_obj, results.get(key), hashes[key], current.get(key)
-            )
 
         return results
 
@@ -1642,7 +1650,9 @@ class _LSPTypeOracle(TypeOracle):
             identities, sources, project_paths = AnalysisStore.open(
                 project_root or path.parent
             ).type_file_inputs(
-                [path], include_overlays=True
+                [path],
+                include_overlays=True,
+                include_environment=self._include_environment,
             )
             if str(path) not in identities:
                 content_hash = self._file_key(path, project_root)

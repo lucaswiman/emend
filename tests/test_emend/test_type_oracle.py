@@ -721,14 +721,17 @@ class TestFileTypeCache:
         adapter = PyreflyAdapter(pyrefly_path="pyrefly")
         calls = []
 
-        def fake_pyrefly(path, _project_root):
+        def fake_pyrefly(paths, _project_root):
+            path, = paths
             calls.append(path)
             raw_type = path.read_text().split("=", 1)[1].strip()
-            return {"modules": {"__unknown__": {"bindings": [
+            debug = {"modules": {"__unknown__": {"bindings": [
                 {"key": "Key::Definition(value 1:1-6)", "result": raw_type},
             ]}}}
 
-        monkeypatch.setattr(adapter, "_run_pyrefly", fake_pyrefly)
+            return {str(path): _parse_pyrefly_debug(debug, str(path))}
+
+        monkeypatch.setattr(adapter, "_run_batch", fake_pyrefly)
         assert adapter.infer_file(target, tmp_path).bindings[0].raw_type == "int"
         store.remove_overlay(target, owner=owner)
         target.write_text("value = str\n")
@@ -744,17 +747,20 @@ class TestFileTypeCache:
         adapter = PyreflyAdapter(pyrefly_path="pyrefly")
         calls = 0
 
-        def fake_pyrefly(path, _project_root):
+        def fake_pyrefly(paths, _project_root):
+            path, = paths
             nonlocal calls
             calls += 1
             if calls == 1:
                 path.write_text("value = str\n")
             raw_type = path.read_text().split("=", 1)[1].strip()
-            return {"modules": {"__unknown__": {"bindings": [
+            debug = {"modules": {"__unknown__": {"bindings": [
                 {"key": "Key::Definition(value 1:1-6)", "result": raw_type},
             ]}}}
 
-        monkeypatch.setattr(adapter, "_run_pyrefly", fake_pyrefly)
+            return {str(path): _parse_pyrefly_debug(debug, str(path))}
+
+        monkeypatch.setattr(adapter, "_run_batch", fake_pyrefly)
         assert adapter.infer_file(target, tmp_path).bindings[0].raw_type == "str"
         target.write_text("value = int\n")
         assert adapter.infer_file(target, tmp_path).bindings[0].raw_type == "int"

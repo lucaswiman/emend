@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.4
+
+- Fixed virtualenv exclusion during source discovery and stopped `index` from
+  traversing installed dependencies by default.
+- Faster cold indexing: Pyrefly now overlaps source extraction, with results
+  revalidated before caching. Warm indexing continues to reuse cached types.
+
 ## 0.5.3
 
 - Added `--diff [RANGE]` to analysis commands and checks. Without a range,

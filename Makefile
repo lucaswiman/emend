@@ -18,9 +18,10 @@ $(VENV)/bin/activate:
 	uv pip install --python $(VENV) maturin
 	touch $(VENV)/bin/activate
 
-# Rebuild Rust extension when source files change
-$(VENV)/lib/emend_core: pyproject.toml $(RUST_SOURCES) $(LANGUAGE_CONFIGS) rust/Cargo.toml | $(VENV)/bin/activate
-	$(VENV)/bin/maturin develop --extras dev
+# Keep local indexing representative of wheels: parsing/fact extraction needs
+# optimized Rust even in an editable install.
+$(VENV)/lib/emend_core: Makefile pyproject.toml $(RUST_SOURCES) $(LANGUAGE_CONFIGS) rust/Cargo.toml | $(VENV)/bin/activate
+	$(VENV)/bin/maturin develop --release --extras dev
 	@mkdir -p $(@D) && touch $@
 
 test: $(VENV)/bin/activate $(VENV)/lib/emend_core
@@ -47,9 +48,9 @@ $(MCP_VENV)/bin/activate:
 	uv pip install --python $(MCP_VENV) maturin
 	@touch $@
 
-$(MCP_VENV)/lib/emend_core: pyproject.toml $(RUST_SOURCES) $(LANGUAGE_CONFIGS) rust/Cargo.toml | $(MCP_VENV)/bin/activate
+$(MCP_VENV)/lib/emend_core: Makefile pyproject.toml $(RUST_SOURCES) $(LANGUAGE_CONFIGS) rust/Cargo.toml | $(MCP_VENV)/bin/activate
 	VIRTUAL_ENV=$(CURDIR)/$(MCP_VENV) PATH=$(CURDIR)/$(MCP_VENV)/bin:$$PATH \
-		$(MCP_VENV)/bin/maturin develop --extras dev,mcp
+		$(MCP_VENV)/bin/maturin develop --release --extras dev,mcp
 	@mkdir -p $(@D) && touch $@
 
 test-mcp: $(MCP_VENV)/lib/emend_core

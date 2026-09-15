@@ -1033,6 +1033,26 @@ def test_type_batch_uses_one_snapshot_and_reuses_linked_worktree_payload(
     assert main_store.type_file_identity(target) == before
 
 
+def test_type_inputs_can_exclude_environment_sources(tmp_path):
+    app = tmp_path / "app.py"
+    app.write_text("from dependency import value\nresult = value\n")
+    site_packages = tmp_path / ".venv" / "lib" / "python3.14" / "site-packages"
+    site_packages.mkdir(parents=True)
+    dependency = site_packages / "dependency.py"
+    dependency.write_text("value = 1\n")
+
+    store = AnalysisStore.open(tmp_path)
+    included = store.type_file_inputs([app])
+    excluded = store.type_file_inputs([app], include_environment=False)
+
+    assert str(dependency) in included[1]
+    assert set(excluded[1]) == {str(app.resolve())}
+    assert included[0] != excluded[0]
+    dependency.write_text("value = 'changed'\n")
+    assert store.type_file_inputs([app])[0] != included[0]
+    assert store.type_file_inputs([app], include_environment=False)[0] == excluded[0]
+
+
 @pytest.mark.parametrize("extension", ["py", "pyi"])
 @pytest.mark.parametrize("package", [False, True])
 @pytest.mark.parametrize("configuration", ["environment", "pyrefly.toml", "pyproject.toml"])
