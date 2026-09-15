@@ -414,6 +414,8 @@ try_nodes = ["try_statement"]
 try_style = "children"
 try_body_node = "block"
 except_clauses = ["except_clause", "except_group_clause"]
+exception_type_field = "value"
+exhaustive_exception_types = ["Exception", "BaseException"]
 try_else_clause = "else_clause"
 try_finally_clause = "finally_clause"
 

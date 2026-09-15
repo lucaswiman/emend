@@ -74,6 +74,11 @@ pub struct CfgEdge {
     pub kind: EdgeKind,
     /// For conditional edges: byte range of the condition expression.
     pub condition: Option<(usize, usize)>,
+    /// Immutable syntactic region whose evaluations may enter this handler.
+    pub protected_range: Option<(usize, usize)>,
+    pub exhaustive_handler: bool,
+    pub is_finally: bool,
+    pub resume_from: Option<BlockId>,
 }
 
 /// The complete CFG for one function.
@@ -322,6 +327,18 @@ impl<'a> CfgBuilder<'a> {
             to,
             kind,
             condition: cond,
+            protected_range: None,
+            exhaustive_handler: false,
+            is_finally: false,
+            resume_from: None,
+        });
+    }
+
+    fn add_exception_edge(&mut self, from: BlockId, to: BlockId, region: tree_sitter::Node, exhaustive: bool, is_finally: bool) {
+        self.edges.push(CfgEdge {
+            from, to, kind: EdgeKind::Exception, condition: None,
+            protected_range: Some((region.start_byte(), region.end_byte())),
+            exhaustive_handler: exhaustive, is_finally, resume_from: None,
         });
     }
 
@@ -1185,11 +1202,18 @@ impl<'a> CfgBuilder<'a> {
             try_end = self.walk_body(body, try_block);
         }
 
+        let exhaustive_catch = except_clauses.iter().any(|clause| {
+            clause.child_by_field_name(&self.cfg_sec.exception_type_field)
+                .map(|value| self.cfg_sec.exhaustive_exception_types
+                     .iter().any(|name| name == self.node_text(value)))
+                .unwrap_or(true)
+        });
+
         let except_target = if !except_clauses.is_empty() {
             let first_except = self.new_block_from_node(except_clauses[0]);
 
             if let Some(te) = try_entry {
-                self.add_edge(te, first_except, EdgeKind::Exception);
+                self.add_exception_edge(te, first_except, try_body.unwrap(), exhaustive_catch, false);
             }
 
             let mut prev_handler: Option<BlockId> = None;
@@ -1270,9 +1294,15 @@ impl<'a> CfgBuilder<'a> {
                     if let Some(et) = except_target {
                         self.add_edge(et, fin_block, EdgeKind::Finally);
                     }
+                    let exception_start = self.edges.len();
                     if let Some(protected) = except_target.or(try_entry) {
-                        self.add_edge(protected, fin_block, EdgeKind::Exception);
+                        for region in except_clauses.iter().copied().chain(else_clause).chain(
+                            try_body.into_iter().filter(|_| !exhaustive_catch)
+                        ) {
+                            self.add_exception_edge(protected, fin_block, region, false, true);
+                        }
                     }
+                    let exception_end = self.edges.len();
                     // If both try_end and except_target are None, all paths
                     // through the try terminated (return/raise/break), but
                     // finally still executes.  Connect from the try entry
@@ -1288,6 +1318,9 @@ impl<'a> CfgBuilder<'a> {
                         }
                     }
                     if let Some(end) = self.walk_body(c, fin_block) {
+                        for edge in &mut self.edges[exception_start..exception_end] {
+                            edge.resume_from = Some(end);
+                        }
                         self.add_edge(end, join, EdgeKind::Fallthrough);
                         all_terminated = false;
                     }
@@ -1323,7 +1356,7 @@ impl<'a> CfgBuilder<'a> {
                 if let Some(handler) = node.child_by_field_name(catch_field) {
                     let handler_block = self.new_block_from_node(handler);
                     handler_entry = Some(handler_block);
-                    self.add_edge(try_block, handler_block, EdgeKind::Exception);
+                    self.add_exception_edge(try_block, handler_block, body, true, false);
 
                     // Walk handler body
                     if let Some(hbody) = handler.child_by_field_name(body_field) {
@@ -1362,18 +1395,28 @@ impl<'a> CfgBuilder<'a> {
                 if let Some(end) = handler_end {
                     self.add_edge(end, fin_block, EdgeKind::Finally);
                 }
+                let exception_start = self.edges.len();
                 if let Some(protected) = handler_entry.or(try_entry) {
-                    self.add_edge(protected, fin_block, EdgeKind::Exception);
+                    let region = node.child_by_field_name(catch_field)
+                        .or_else(|| node.child_by_field_name(body_field)).unwrap();
+                    self.add_exception_edge(protected, fin_block, region, false, true);
                 }
+                let exception_end = self.edges.len();
                 // Walk finalizer body
                 if let Some(fbody) = fin.child_by_field_name(body_field) {
                     if let Some(end) = self.walk_body(fbody, fin_block) {
+                        for edge in &mut self.edges[exception_start..exception_end] {
+                            edge.resume_from = Some(end);
+                        }
                         self.add_edge(end, join, EdgeKind::Fallthrough);
                         all_terminated = false;
                     }
                 } else {
                     // Finalizer may have its body as direct children
                     if let Some(end) = self.walk_body(fin, fin_block) {
+                        for edge in &mut self.edges[exception_start..exception_end] {
+                            edge.resume_from = Some(end);
+                        }
                         self.add_edge(end, join, EdgeKind::Fallthrough);
                         all_terminated = false;
                     }
@@ -1898,6 +1941,16 @@ impl<'a> FlowExtractor<'a> {
 
     fn walk(&mut self, node: tree_sitter::Node) {
         if self.is_function(node) { return; }
+        if self.lang.cfg.except_clauses.iter().any(|kind| kind == node.kind()) {
+            let builtin = node.child_by_field_name(&self.lang.cfg.exception_type_field)
+                .filter(|value| self.lang.cfg.exhaustive_exception_types
+                        .iter().any(|name| name == self.text(*value)));
+            // Built-in catch types describe dispatch, not a throwing value read.
+            for child in Self::children(node) {
+                if Some(child) != builtin { self.walk(child); }
+            }
+            return;
+        }
         if self.lang.cfg.throw_nodes.iter().any(|kind| kind == node.kind()) {
             for child in Self::children(node) { self.expr(child); }
             self.emit(node, "throw", None, None, None);
@@ -1937,22 +1990,42 @@ impl<'a> FlowExtractor<'a> {
             values.sort_unstable();
             additions.extend(values.windows(2).map(|p| FlowEdge { from: p[0].1, to: p[1].1, kind: "control".into() }));
         }
-        let successors: HashMap<u32, Vec<u32>> = self.cfg.blocks.iter().map(|b| {
+        let mut successors: HashMap<u32, Vec<u32>> = self.cfg.blocks.iter().map(|b| {
             (b.id.0, self.cfg.edges.iter().filter(|edge| edge.from == b.id && edge.kind != EdgeKind::Exception)
              .map(|edge| edge.to.0).collect())
         }).collect();
+        let regions: Vec<_> = self.cfg.edges.iter()
+            .filter_map(|edge| edge.protected_range.map(|range| (range, edge)))
+            .collect();
+        let handlers = |start: usize, end: usize, enclosing: bool| {
+            let contains = |left: usize, right: usize| left <= start && end <= right
+                && (!enclosing || right - left > end - start);
+            let nearest = regions.iter().filter(|((left, right), edge)|
+                contains(*left, *right) && (edge.exhaustive_handler || edge.is_finally))
+                .map(|((left, right), _)| right - left).min().unwrap_or(usize::MAX);
+            regions.iter().filter(|((left, right), _)|
+                contains(*left, *right) && right - left <= nearest)
+                .map(|(_, edge)| edge.to.0).collect::<Vec<_>>()
+        };
+        // A finalizer executes before an enclosing handler. Its ordinary exit
+        // may resume an exception as well as normal control; both preserve its
+        // writes. No pending-exception state is needed for this overapproximation.
+        for ((start, end), edge) in &regions {
+            if let Some(resume) = edge.resume_from {
+                successors.entry(resume.0).or_default().extend(handlers(*start, *end, true));
+            }
+        }
         let mut exits: Vec<(u32, Vec<u32>)> = by_block.iter().filter_map(|(&block, values)| {
             values.last().map(|&(_, last)| (last, successors.get(&block).cloned().unwrap_or_default()))
         }).collect();
-        // A throwing evaluation leaves before its result or assignment exists. The
-        // exceptional CFG edge identifies the protected region, not its exit.
-        for edge in self.cfg.edges.iter().filter(|edge| edge.kind == EdgeKind::Exception) {
-            let protected = &self.cfg.blocks[edge.from.0 as usize];
-            for event in &self.events {
-                if matches!(event.role.as_str(), "call" | "throw" | "use" | "evaluate")
-                    && protected.start_byte <= event.start_byte && event.end_byte <= protected.end_byte {
-                    exits.push((event.id, vec![edge.to.0]));
-                }
+        // A throwing evaluation leaves before its result or assignment exists.
+        // Inner exhaustive handlers shadow outer handlers; narrower catches can
+        // also let an exception escape. Regions retain their full AST spans even
+        // when the try entry contains no ordinary statement.
+        for event in &self.events {
+            if matches!(event.role.as_str(), "call" | "throw" | "use" | "evaluate") {
+                let targets = handlers(event.start_byte, event.end_byte, false);
+                if !targets.is_empty() { exits.push((event.id, targets)); }
             }
         }
         for (last, targets) in exits {

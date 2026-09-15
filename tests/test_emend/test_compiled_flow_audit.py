@@ -289,3 +289,198 @@ def test_repeated_rules_share_pattern_matches_within_one_query(tmp_path, monkeyp
     )
     assert len(evaluate_flow_config(config, [str(path)], project_path=str(tmp_path))) == 2
     assert calls == ["source()", "sink($X)"]
+
+
+@pytest.mark.parametrize("extension", ["py", "ts"])
+@pytest.mark.parametrize("alias,handler,reports", [
+    (False, "x = 0", False),
+    (True, "x = 0", True),
+    (True, "y = 0", False),
+    (False, "x = risky()", False),
+])
+def test_sanitizer_bypass_must_carry_sink_generation(tmp_path, extension, alias, handler, reports):
+    if extension == "py":
+        setup = "\n    y = x" if alias else ""
+        text = f"def f():\n    x = source(){setup}\n    try:\n        clean(x)\n    except Exception:\n        {handler}\n    sink({'y' if alias else 'x'})\n"
+    else:
+        setup = "let y = x;" if alias else ""
+        text = f"function f() {{ let x = source(); {setup} try {{ clean(x); }} catch(e) {{ {handler}; }} sink({'y' if alias else 'x'}); }}"
+    path = tmp_path / f"app.{extension}"
+    path.write_text(text)
+    violations = evaluate_flow_config(_rule(sanitizers=[FlowSanitizer("clean($X)", "value")]), [str(path)], project_path=str(tmp_path))
+    assert bool(violations) is reports
+    if reports:
+        assert violations[0].trace[0].description.startswith("source:")
+        assert violations[0].trace[-1].description.startswith("sink:")
+
+
+@pytest.mark.parametrize("body,reports", [
+    ("y = x\n    if flag:\n        x = 0\n    clean(x)\n    sink(y)", True),
+    ("y = transform(x)\n    clean(y)\n    sink(x)", True),
+    ("y = x\n    clean(y)\n    sink(x)", False),
+    ("if flag:\n        x = escape(x)\n    else:\n        clean(x)\n    sink(x)", False),
+])
+def test_sanitizer_tracks_aliases_and_derived_values(tmp_path, body, reports):
+    violations = _run(tmp_path, "def f():\n    x = source()\n    " + body + "\n", _rule(sanitizers=[
+        FlowSanitizer("clean($X)", "value"),
+        FlowSanitizer("escape($X)", "value", effect="returns"),
+    ]))
+    assert bool(violations) is reports
+
+
+@pytest.mark.parametrize("callee,body,reports", [
+    ("def consume(v):\n    sink(v)\n", "try:\n        clean(x)\n    except Exception:\n        x = 0\n    consume(x)", False),
+    ("def consume(v):\n    sink(v)\n", "y = x\n    try:\n        clean(x)\n    except Exception:\n        x = 0\n    consume(y)", True),
+    ("def clean(v):\n    pass\n", "try:\n        clean(x)\n    except Exception:\n        x = 0\n    sink(x)", False),
+    ("def noop(v):\n    pass\n", "noop(0)\n    noop(x)\n    sink(x)", True),
+    ("def identity(v):\n    return v\n", "y = identity(x)\n    sink(y)", True),
+    ("def identity(v):\n    return v\n", "y = identity(x)\n    clean(y)\n    sink(x)", False),
+    ("def pair(a, b):\n    clean(a)\n    sink(b)\n", "pair(0, x)", True),
+    ("def pair(a, b):\n    clean(a)\n    sink(b)\n", "pair(x, x)", False),
+    ("def pair(a, b):\n    clean(a)\n    sink(b)\n", "pair(transform(x), x)", True),
+    ("def choose(a, b):\n    return b\n", "sink(choose(0, x))", True),
+    ("def choose(a, b):\n    return b\n", "sink(choose(x, 0))", False),
+    ("def identity(v):\n    return v\n", "y = identity(x)\n    clean(y)\n    sink(identity(0))", False),
+])
+def test_correlated_sanitizers_across_calls(tmp_path, callee, body, reports):
+    assert bool(_run(tmp_path, callee + "def f():\n    clean(0)\n    x = source()\n    " + body + "\n",
+                     _rule(sanitizers=[FlowSanitizer("clean($X)", "value")]))) is reports
+
+
+def test_loop_keeps_old_alias_distinct_from_new_source_generation(tmp_path):
+    rows = _run(tmp_path, """def f():
+    x = 0
+    while flag:
+        y = x
+        x = source()
+        clean(x)
+        sink(y)
+""", _rule(sanitizers=[FlowSanitizer("clean($X)", "value")]))
+    # Every generation was validated before becoming the next iteration's y.
+    assert rows == []
+    rows = _run(tmp_path, """def f():
+    x = 0
+    while flag:
+        y = x
+        x = source()
+        if flag:
+            clean(x)
+            sink(y)
+""", _rule(sanitizers=[FlowSanitizer("clean($X)", "value")]))
+    assert rows and rows[0].trace
+
+
+def test_correlation_budget_retains_warning_without_inventing_witness(tmp_path, monkeypatch):
+    import emend.checks.flow as flow
+    monkeypatch.setattr(flow, "_VALUE_STATE_LIMIT", 0)
+    rows = _run(tmp_path, "def f():\n    x = source()\n    if flag:\n        clean(x)\n    sink(x)\n",
+                _rule(sanitizers=[FlowSanitizer("clean($X)", "value")]))
+    assert rows[0].trace == []
+    assert rows[0].engine == "occurrence-budget"
+    assert "correlation limit" in rows[0].message
+
+
+@pytest.mark.parametrize("extension,head,condition", [
+    ("ts", "function f()", "(flag)"),
+    ("rs", "fn f()", "flag"),
+])
+@pytest.mark.parametrize("body,reports", [
+    ("let y = x; clean(y); sink(x);", False),
+    ("let y = transform(x); clean(y); sink(x);", True),
+    ("let y = x; if CONDITION { x = 0; } clean(x); sink(y);", True),
+])
+def test_generation_validation_other_languages(tmp_path, extension, head, condition, body, reports):
+    path = tmp_path / f"app.{extension}"
+    mutable = "mut " if extension == "rs" else ""
+    path.write_text(f"{head} {{ let {mutable}x = source(); {body.replace('CONDITION', condition)} }}")
+    assert bool(evaluate_flow_config(_rule(sanitizers=[FlowSanitizer("clean($X)", "value")]),
+                                    [str(path)], project_path=str(tmp_path))) is reports
+
+
+@pytest.mark.parametrize("replacement,reports", [("0", False), ("risky()", True)])
+def test_outer_handler_preserves_failed_inner_handler_assignment(tmp_path, replacement, reports):
+    rows = _run(tmp_path, f"""def f():
+    x = source()
+    try:
+        try:
+            clean(x)
+        except Exception:
+            x = {replacement}
+    except Exception:
+        pass
+    finally:
+        sink(x)
+""", _rule(sanitizers=[FlowSanitizer("clean($X)", "value")]))
+    assert bool(rows) is reports
+
+
+@pytest.mark.parametrize("handler,reports", [("Exception", False), ("ValueError", True)])
+def test_narrow_inner_handler_can_let_exception_escape(tmp_path, handler, reports):
+    rows = _run(tmp_path, f"""def f():
+    x = source()
+    try:
+        try:
+            clean(x)
+        except {handler}:
+            x = 0
+    except Exception:
+        pass
+    sink(x)
+""", _rule(sanitizers=[FlowSanitizer("clean($X)", "value")]))
+    assert bool(rows) is reports
+
+
+@pytest.mark.parametrize("extension", ["py", "ts"])
+def test_mandatory_finalizer_overwrite_precedes_outer_handler(tmp_path, extension):
+    source = """def f():
+    x = source()
+    try:
+        try:
+            clean(x)
+        finally:
+            x = 0
+    except Exception:
+        pass
+    sink(x)
+""" if extension == "py" else """function f() {
+    let x = source();
+    try { try { clean(x); } finally { x = 0; } } catch(e) {}
+    sink(x);
+}"""
+    path = tmp_path / f"app.{extension}"
+    path.write_text(source)
+    assert evaluate_flow_config(_rule(sanitizers=[FlowSanitizer("clean($X)", "value")]),
+                                [str(path)], project_path=str(tmp_path)) == []
+
+
+@pytest.mark.parametrize("finalizer,reports", [("pass", True), ("x = 0", False)])
+def test_unmatched_inner_exception_executes_finalizer(tmp_path, finalizer, reports):
+    rows = _run(tmp_path, f"""def f():
+    x = source()
+    try:
+        try:
+            clean(x)
+        except ValueError:
+            x = 0
+        finally:
+            {finalizer}
+    except Exception:
+        pass
+    sink(x)
+""", _rule(sanitizers=[FlowSanitizer("clean($X)", "value")]))
+    assert bool(rows) is reports
+
+
+def test_exception_in_else_executes_finalizer(tmp_path):
+    rows = _run(tmp_path, """def f():
+    x = source()
+    try:
+        harmless()
+    except Exception:
+        x = 0
+    else:
+        x = clean(x)
+    finally:
+        sink(x)
+""", _rule(sanitizers=[FlowSanitizer("clean($X)", "value", effect="returns")]))
+    assert rows
