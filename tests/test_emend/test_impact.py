@@ -332,64 +332,6 @@ class TestFindImpact:
         assert set(json.loads(output.output)) == keys
 
 
-class TestParseDiffToChangedFiles:
-    """Tests for diff parsing helper."""
-
-    def test_parse_simple_diff(self):
-        """Parse a simple unified diff to extract file and lines."""
-        from emend.transform import _parse_diff_to_changed_files
-
-        diff_text = (
-            "diff --git a/lib.py b/lib.py\n"
-            "index abc..def 100644\n"
-            "--- a/lib.py\n"
-            "+++ b/lib.py\n"
-            "@@ -1,3 +1,4 @@\n"
-            " def foo():\n"
-            "-    return 1\n"
-            "+    x = 1\n"
-            "+    return x\n"
-        )
-
-        result = _parse_diff_to_changed_files(diff_text)
-
-        assert len(result) == 1
-        file_path, lines = result[0]
-        assert file_path == "lib.py"
-        assert 1 in lines  # Lines in the hunk range
-
-    def test_parse_multi_file_diff(self):
-        """Parse a diff with multiple files."""
-        from emend.transform import _parse_diff_to_changed_files
-
-        diff_text = (
-            "diff --git a/a.py b/a.py\n"
-            "--- a/a.py\n"
-            "+++ b/a.py\n"
-            "@@ -5,2 +5,3 @@\n"
-            " some code\n"
-            "+new line\n"
-            "diff --git a/b.py b/b.py\n"
-            "--- a/b.py\n"
-            "+++ b/b.py\n"
-            "@@ -10,1 +10,2 @@\n"
-            "+another line\n"
-        )
-
-        result = _parse_diff_to_changed_files(diff_text)
-
-        assert len(result) == 2
-        files = {r[0] for r in result}
-        assert files == {"a.py", "b.py"}
-
-    def test_parse_empty_diff(self):
-        """Parse an empty diff."""
-        from emend.transform import _parse_diff_to_changed_files
-
-        result = _parse_diff_to_changed_files("")
-        assert result == []
-
-
 class TestImpactHelpers:
     """Tests for _is_test_file and _is_test_symbol helpers."""
 
@@ -488,14 +430,14 @@ class TestImpactWithDiff:
         assert _parse_diff_to_selectors("HEAD~1..HEAD", str(project)) == [f"{lib}::greet"]
 
     def test_diff_headers_are_not_hunk_payload(self):
-        from emend.transform.impact import _parse_diff
+        from emend.git_diff import _parse_diff
         [changed] = _parse_diff(
             'diff --git a/space name.py b/space name.py\n'
             '--- a/space name.py\t\n+++ b/space name.py\t\n'
             '@@ -2 +2 @@\n--- a/fake.py\n+++ b/fake.py\n'
         )
         assert changed.paths == ["space name.py", "space name.py"]
-        assert changed.lines == [[2], [2]]
+        assert [lines.intervals for lines in changed.lines] == [[(2, 3)], [(2, 3)]]
 
 
 class TestFindImpactFactGraph:
@@ -852,3 +794,25 @@ class TestTypeScriptImpact:
         assert len(result.impacted_tests) > 0
         test_names = " ".join(result.impacted_tests)
         assert "describe" in test_names
+
+
+def test_impact_interval_ownership_preserves_nested_and_overlapping_symbols():
+    from emend.git_diff import LineIntervals
+    from emend.ast_utils import find_symbol_by_line
+    from emend.component_selector import NestedSymbol
+    from emend.transform.impact import _symbols_in_intervals
+
+    def symbol(name, start, end, children=()):
+        return NestedSymbol(name, 'function', start, end, 0, [name], children=list(children))
+
+    symbols = [symbol('outer', 1, 20, [symbol('nested', 3, 8)]),
+               symbol('overlapping', 7, 12), symbol('last', 25, 1000000)]
+    for spans in ([(4, 6)], [(4, 15)], [(1, 30)], [(21, 25)], [(999999, 1000001)]):
+        expected = []
+        # Only the bounded fixture portion needs an explicit per-line oracle.
+        for line in (range(1, 31) if spans[0][0] < 31 else [999999, 1000000]):
+            if any(a <= line < b for a, b in spans):
+                sym = find_symbol_by_line(symbols, line)
+                if sym is not None and sym.name not in expected:
+                    expected.append(sym.name)
+        assert [sym.name for sym in _symbols_in_intervals(symbols, LineIntervals(spans))] == expected

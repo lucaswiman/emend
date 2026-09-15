@@ -159,7 +159,6 @@ from .impact import (
     _find_impact_via_fact_graph,
     _is_test_file,
     _is_test_symbol,
-    _parse_diff_to_changed_files,
     _parse_diff_to_selectors,
     _try_relative,
     find_impact,
@@ -244,7 +243,7 @@ __all__ = [
     "find_dead_code", "safe_delete", "semantic_context",
     # impact
     "ImpactEdge", "ImpactResult", "_find_impact_via_fact_graph", "_is_test_file",
-    "_is_test_symbol", "_parse_diff_to_changed_files", "_parse_diff_to_selectors",
+    "_is_test_symbol", "_parse_diff_to_selectors",
     "_try_relative", "find_impact",
     # rename_move
     "_replace_module_in_strings", "_rename_module_references", "_resolve_relative_import_qn",

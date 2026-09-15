@@ -18,10 +18,37 @@ def _run(root, *args, required=True):
 
 
 @dataclass
+class LineIntervals:
+    """Sorted, disjoint half-open intervals of 1-based lines."""
+
+    intervals: list[tuple[int, int]] = field(default_factory=list)
+
+    def add(self, start, stop):
+        """Append in source order, coalescing adjacent or overlapping spans."""
+        if start >= stop:
+            return
+        if self.intervals and start <= self.intervals[-1][1]:
+            previous, end = self.intervals[-1]
+            self.intervals[-1] = (previous, max(end, stop))
+        else:
+            self.intervals.append((start, stop))
+
+    def intersects(self, start, end):
+        """Whether an inclusive finding span touches selected lines."""
+        if not self.intervals or end < self.intervals[0][0] or start >= self.intervals[-1][1]:
+            return False
+        index = bisect_left(self.intervals, (end + 1,)) - 1
+        return index >= 0 and self.intervals[index][1] > start
+
+    def __bool__(self):
+        return bool(self.intervals)
+
+
+@dataclass
 class _DiffFile:
     paths: list[str | None] = field(default_factory=lambda: [None, None])
     blobs: list[str] = field(default_factory=lambda: ["", ""])
-    lines: list[list[int]] = field(default_factory=lambda: [[], []])
+    lines: list[LineIntervals] = field(default_factory=lambda: [LineIntervals(), LineIntervals()])
     hunks: list[tuple[int, int, int, int]] = field(default_factory=list)
 
 
@@ -41,7 +68,7 @@ def _parse_diff(diff_text: str) -> list[_DiffFile]:
                 current.hunks.append(hunk)
                 for side in (0, 1):
                     start, count = hunk[side * 2:side * 2 + 2]
-                    current.lines[side].extend(range(start, start + count))
+                    current.lines[side].add(start, start + count)
             elif in_hunk:
                 continue
             elif line.startswith("index "):
@@ -106,27 +133,45 @@ def resolve_diff(spec, path="."):
     raise ValueError("Cannot resolve the PR/default base locally; provide --diff RANGE")
 
 
-def _map_lines(lines, hunks):
-    """Translate selected 1-based lines through zero-context Git hunks."""
-    lines = sorted(lines)
-    mapped, cursor, offset = [], 0, 0
+def _map_lines(lines: LineIntervals, hunks) -> LineIntervals:
+    """Translate intervals through zero-context Git hunks in one sweep.
+
+    Insertions shift surviving lines but are not selected; a replacement is
+    selected in full if any of its old lines were selected.
+    """
+    mapped = LineIntervals()
+    spans = iter(lines.intervals)
+    start, stop = next(spans, (None, None))
+    offset = 0
     for old, old_count, new, new_count in hunks:
         # Empty hunks name the preceding line, unlike nonempty hunks.
-        old -= bool(old_count)
-        new -= bool(new_count)
-        start, stop = bisect_left(lines, old + 1), bisect_left(lines, old + old_count + 1)
-        mapped.extend(line + offset for line in lines[cursor:start])
-        if start < stop:
-            mapped.extend(range(new + 1, new + new_count + 1))
-        cursor, offset = stop, new + new_count - old - old_count
-    mapped.extend(line + offset for line in lines[cursor:])
+        old += not old_count
+        new += not new_count
+        old_stop = old + old_count
+        while start is not None and start < old:
+            end = min(stop, old)
+            mapped.add(start + offset, end + offset)
+            start = end
+            if start == stop:
+                start, stop = next(spans, (None, None))
+        if start is not None and start < old_stop:
+            mapped.add(new, new + new_count)
+            while start is not None and start < old_stop:
+                start = min(stop, old_stop)
+                if start == stop:
+                    start, stop = next(spans, (None, None))
+        offset = new + new_count - old_stop
+    if start is not None:
+        mapped.add(start + offset, stop + offset)
+        for start, stop in spans:
+            mapped.add(start + offset, stop + offset)
     return mapped
 
 
 @dataclass
 class DiffSelection:
     root: Path
-    lines: dict[str, list[int]]
+    lines: dict[str, LineIntervals]
     _paths: dict[str, str] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     @classmethod
@@ -160,8 +205,7 @@ class DiffSelection:
             return False
         if line is None or line <= 0:
             return True
-        index = bisect_left(changed, line)
-        return index < len(changed) and changed[index] <= (end_line or line)
+        return changed.intersects(line, end_line or line)
 
     def filter(self, values, *, relative_to=None):
         if relative_to is not None:

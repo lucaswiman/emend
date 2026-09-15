@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from ..component_selector import ExtendedSelector
 
 from emend.errors import BUG_EXCEPTIONS
-from emend.git_diff import _parse_diff, read_diff, repository_root
+from emend.git_diff import LineIntervals, read_diff, repository_root
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +66,42 @@ def impact_projection(
     return data
 
 
-def _parse_diff_to_changed_files(diff_text: str) -> list[tuple[str, list[int]]]:
-    """Compatibility projection of changed lines in the new version only."""
-    return [(f.paths[1], f.lines[1]) for f in _parse_diff(diff_text) if f.paths[1] is not None]
+def _symbols_in_intervals(symbols, lines: LineIntervals):
+    """Yield innermost owners in first-changed-line order, without visiting lines.
+
+    The last matching symbol in depth-first traversal owns a line, matching
+    find_symbol_by_line even when sibling spans overlap.
+    """
+    from heapq import heappush, heappop
+    from itertools import groupby
+
+    events = []
+
+    def visit(symbols, lower, upper):
+        for sym in symbols:
+            start, stop = max(lower, sym.line_start), min(upper, sym.line_end + 1)
+            if start < stop:
+                priority = len(events)
+                events.append((start, priority, stop, sym))
+                events.append((stop, -1, stop, None))
+                visit(sym.children, start, stop)
+
+    visit(symbols, 1, float("inf"))
+    active = []
+    seen = set()
+    previous = None
+    for boundary, group in groupby(sorted(events, key=lambda event: event[0]), key=lambda event: event[0]):
+        if active and lines.intersects(previous, boundary - 1):
+            priority, _, sym = active[0]
+            if priority not in seen:
+                seen.add(priority)
+                yield sym
+        for _, priority, stop, sym in group:
+            if sym is not None:
+                heappush(active, (-priority, stop, sym))
+        while active and active[0][1] <= boundary:
+            heappop(active)
+        previous = boundary
 
 
 def _parse_diff_to_selectors(
@@ -89,7 +122,7 @@ def _parse_diff_to_selectors(
     root = repository_root(project_path)
     changes = read_diff(root, diff_spec)
 
-    from emend.ast_utils import find_nested_definitions, find_symbol_by_line
+    from emend.ast_utils import find_nested_definitions
     from emend.language_registry import is_source_file
     from emend.project_config import module_name_for_file
     from emend.analysis_linking import _normalize_qn
@@ -112,17 +145,15 @@ def _parse_diff_to_selectors(
             # however, must be parsed from their blobs, not today's worktree.
             source = Path(file_path).read_text() if blob.returncode else blob.stdout
             symbols = find_nested_definitions(file_path, source_override=source)
-            for line_no in changed.lines[side]:
-                sym = find_symbol_by_line(symbols, line_no)
-                if sym is not None:
-                    local_name = '.'.join(sym.path)
-                    sel = f"{file_path}::{local_name}"
-                    if identities is not None:
-                        module = _normalize_qn(module_name_for_file(file_path, project_path))
-                        identities[sel] = '.'.join(filter(None, (module, local_name)))
-                    if sel not in seen:
-                        seen.add(sel)
-                        selectors.append(sel)
+            for sym in _symbols_in_intervals(symbols, changed.lines[side]):
+                local_name = '.'.join(sym.path)
+                sel = f"{file_path}::{local_name}"
+                if identities is not None:
+                    module = _normalize_qn(module_name_for_file(file_path, project_path))
+                    identities[sel] = '.'.join(filter(None, (module, local_name)))
+                if sel not in seen:
+                    seen.add(sel)
+                    selectors.append(sel)
 
     return selectors
 
