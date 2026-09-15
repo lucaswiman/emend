@@ -1047,6 +1047,10 @@ def test_type_inputs_can_exclude_environment_sources(tmp_path):
 
     assert str(dependency) in included[1]
     assert set(excluded[1]) == {str(app.resolve())}
+    assert included[0] != excluded[0]
+    dependency.write_text("value = 'changed'\n")
+    assert store.type_file_inputs([app])[0] != included[0]
+    assert store.type_file_inputs([app], include_environment=False)[0] == excluded[0]
 
 
 @pytest.mark.parametrize("extension", ["py", "pyi"])

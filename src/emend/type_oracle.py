@@ -1426,55 +1426,13 @@ class PyreflyAdapter(TypeOracle):
         if cached is not None:
             return cached
 
-        # Run pyrefly
-        logger.info("Building type index for %s via pyrefly", path)
-        debug_json = self._run_pyrefly(path, project_root)
-        ft = (_parse_pyrefly_debug(debug_json, str(path))
-              if debug_json is not None else None)
+        ft = self._run_batch([path], project_root).get(str(path))
         return self._publish_result(
             path, ft, content_hash, self._current_file_key(path, project_root)
         )
 
     def clear_cache(self) -> None:
         self._cache.clear()
-
-    def _run_pyrefly(self, path: Path, project_root: Path | None) -> dict | None:
-        """Run pyrefly check on a single file and return debug-info JSON."""
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
-            debug_path = tmp.name
-
-        try:
-            cmd = [
-                self._pyrefly, "check",
-                "--output-format", "json",
-                "--debug-info", debug_path,
-                "--summary=none",
-                *self._extra_args,
-                str(path),
-            ]
-
-            cwd = str(project_root) if project_root else str(path.parent)
-
-            subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                cwd=cwd,
-            )
-            # pyrefly may return non-zero for type errors — that's fine,
-            # we still get debug-info
-            if os.path.exists(debug_path) and os.path.getsize(debug_path) > 0:
-                with open(debug_path) as f:
-                    return json.load(f)
-            return None
-        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
-            return None
-        finally:
-            try:
-                os.unlink(debug_path)
-            except OSError:
-                pass
 
     def infer_batch(
         self, paths: list[Path], project_root: Path | None = None, *,
@@ -1572,14 +1530,7 @@ class PyreflyAdapter(TypeOracle):
                     debug_json = json.load(f)
 
                 for path_obj in to_check:
-                    try:
-                        ft = _parse_pyrefly_debug(debug_json, str(path_obj))
-                    except BUG_EXCEPTIONS:
-                        raise
-                    except Exception:
-                        logger.debug("pyrefly parse failed for %s", path_obj, exc_info=True)
-                        continue
-                    results[str(path_obj)] = ft
+                    results[str(path_obj)] = _parse_pyrefly_debug(debug_json, str(path_obj))
         except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
             pass
         finally:
