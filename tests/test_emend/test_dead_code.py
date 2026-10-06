@@ -2021,63 +2021,7 @@ class TestDeadCodeUnreachableBlocks:
         )
 
 
-class TestExtractAllExportsText:
-    """Unit tests for _extract_all_exports_text (Phase 2: tree-sitter migration)."""
-
-    def test_basic_list(self):
-        """Basic __all__ = ['foo', 'bar'] is extracted correctly."""
-        from emend.transform import _extract_all_exports_text
-
-        source = "__all__ = ['foo', 'bar']\n"
-        result = _extract_all_exports_text(source)
-        assert result == {"foo", "bar"}
-
-    def test_basic_double_quotes(self):
-        """Double-quoted names in __all__ are extracted."""
-        from emend.transform import _extract_all_exports_text
-
-        source = '__all__ = ["alpha", "beta"]\n'
-        result = _extract_all_exports_text(source)
-        assert result == {"alpha", "beta"}
-
-    def test_multiline_tuple(self):
-        """Multi-line tuple assignment is handled correctly."""
-        from emend.transform import _extract_all_exports_text
-
-        source = '__all__ = (\n    "foo",\n    "bar",\n)\n'
-        result = _extract_all_exports_text(source)
-        assert result == {"foo", "bar"}
-
-    def test_multiline_list(self):
-        """Multi-line list assignment is handled correctly."""
-        from emend.transform import _extract_all_exports_text
-
-        source = "__all__ = [\n    'alpha',\n    'beta',\n    'gamma',\n]\n"
-        result = _extract_all_exports_text(source)
-        assert result == {"alpha", "beta", "gamma"}
-
-    def test_no_all(self):
-        """Files without __all__ return an empty set."""
-        from emend.transform import _extract_all_exports_text
-
-        source = "def foo():\n    pass\n"
-        result = _extract_all_exports_text(source)
-        assert result == set()
-
-    def test_all_in_docstring_no_false_positive(self):
-        """__all__ appearing inside a string literal must not be detected."""
-        from emend.transform import _extract_all_exports_text
-
-        source = (
-            'def helper():\n'
-            '    """Example: __all__ = ["not_exported"]"""\n'
-            '    pass\n'
-        )
-        result = _extract_all_exports_text(source)
-        assert result == set(), (
-            "False positive: __all__ inside a docstring should not be detected"
-        )
-
+class TestExports:
     def test_all_exports_used_by_dead_code_detection(self, tmp_path):
         """Integration: symbols in __all__ (multi-line tuple) must not be flagged as dead.
 

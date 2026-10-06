@@ -335,6 +335,79 @@ class TestCheckDuplicates:
 # ---------------------------------------------------------------------------
 
 
+def test_cold_server_serves_files_until_background_index_is_ready(tmp_path, monkeypatch, capsys):
+    import threading
+    from emend import editor_search
+    from emend.transform import index
+
+    (tmp_path / "main.py").write_text("def navigate_workspace():\n    pass\n")
+    entered, release = (threading.Event() for _ in range(2))
+    ensure = index.ensure_search_index
+    def delayed_index(project):
+        entered.set()
+        assert release.wait(10)
+        return ensure(project)
+    monkeypatch.setattr(index, "ensure_search_index", delayed_index)
+    write = editor_search._write_json
+    def observe_response(message):
+        write(message)
+        if message.get("id") == 1:
+            release.set()
+    monkeypatch.setattr(editor_search, "_write_json", observe_response)
+
+    def requests():
+        assert entered.wait(10), "cold server never started its background index"
+        yield '{"id":1,"method":"search","params":{"query":"main"}}\n'
+        assert running[0]._index_thread is not None
+        running[0]._index_thread.join(timeout=10)
+        assert not running[0].is_indexing
+        yield '{"id":2,"method":"search","params":{"query":"workspace","file_scope":"main.py"}}\n'
+        yield '{"id":3,"method":"shutdown"}\n'
+    running = []
+    engine_type = editor_search.EditorSearchEngine
+    def capture_engine(project):
+        engine = engine_type(project)
+        running.append(engine)
+        return engine
+    monkeypatch.setattr(editor_search, "EditorSearchEngine", capture_engine)
+    monkeypatch.setattr("sys.stdin", requests())
+    try:
+        editor_search.run_editor_server(str(tmp_path))
+    finally:
+        release.set()
+        if running and running[0]._index_thread:
+            running[0]._index_thread.join(timeout=10)
+    messages = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    replies = {message["id"]: message["result"] for message in messages if "id" in message}
+    assert [item["name"] for item in replies[1]["items"]] == ["main.py"]
+    assert replies[1]["indexing"] is True
+    assert [(item["name"], item["kind"]) for item in replies[2]["items"]] == [
+        ("navigate_workspace", "function")
+    ]
+    assert any(message.get("method") == "indexing_complete" for message in messages)
+
+
+def test_failed_background_search_preparation_keeps_file_picker_usable(tmp_path, monkeypatch):
+    import sqlite3
+
+    (tmp_path / "main.py").write_text("def navigate_workspace():\n    pass\n")
+    def failed_fts(conn):
+        raise sqlite3.OperationalError("disk full")
+    monkeypatch.setattr("emend.editor_search.rebuild_fts", failed_fts)
+    engine = EditorSearchEngine(str(tmp_path))
+    try:
+        assert engine.start_background_reindex()
+        engine._index_thread.join(timeout=10)
+        assert not engine.is_indexing
+        assert not engine.check_index_complete()
+        assert _dispatch(engine, "indexing_status", {}) == {
+            "indexing": False, "indexing_error": "disk full",
+        }
+        assert [item["name"] for item in engine.search("main").items] == ["main.py"]
+    finally:
+        engine.close()
+
+
 class TestIncrementalSearch:
     """Tests for the background reindex and incremental search protocol."""
 

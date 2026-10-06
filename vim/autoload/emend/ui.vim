@@ -21,6 +21,7 @@ let s:last_result = {}    " full result dict (mode, elapsed_ms, etc.)
 let s:all_line_hl = []    " per-line highlight ranges for re-application
 let s:is_interactive = 0
 let s:search_timer = -1
+let s:search_generation = 0
 let s:focus = 'list'
 
 " Outline mode state: when active, typing filters cached file symbols locally
@@ -88,12 +89,14 @@ function! emend#ui#prompt(...) abort
 endfunction
 
 function! emend#ui#interactive() abort
+  let s:outline_mode = 0
   let s:is_interactive = 1
   let s:query = ''
   let s:results = []
   let s:selected = 0
   
   call s:ensure_ui_open()
+  call s:search('')
   
   " In interactive mode, start focus in the input window
   if s:input_win >= 0
@@ -102,11 +105,23 @@ function! emend#ui#interactive() abort
   endif
 endfunction
 
+function! s:search(query, ...) abort
+  let s:search_generation += 1
+  call emend#search(a:query, a:0 > 0 ? a:1 : {},
+        \ function('s:on_search_result', [s:search_generation]))
+endfunction
+
+function! s:on_search_result(generation, result) abort
+  if a:generation == s:search_generation
+    call emend#ui#on_search_result(a:result)
+  endif
+endfunction
+
 function! emend#ui#search(query, ...) abort
   let s:query = a:query
   let s:is_interactive = 0
   let l:params = a:0 > 0 ? a:1 : {}
-  call emend#search(a:query, l:params)
+  call s:search(a:query, l:params)
 endfunction
 
 " ---------------------------------------------------------------------------
@@ -114,10 +129,9 @@ endfunction
 " ---------------------------------------------------------------------------
 
 function! emend#ui#on_indexing_complete() abort
-  " If the search UI is open and we have a query, auto-refresh results
-  " now that the index is fresh.
-  if s:ui_is_open() && s:query !=# ''
-    call emend#search(s:query)
+  " Refresh the picker, including the initial empty query.
+  if s:ui_is_open() && !s:outline_mode
+    call s:search(s:query)
   endif
 endfunction
 
@@ -128,10 +142,6 @@ endfunction
 function! emend#ui#on_search_result(result) abort
   if has_key(a:result, 'error')
     let l:msg = get(get(a:result, 'error', {}), 'message', '')
-    if l:msg =~# 'no such table\|symbol_index\|unable to open'
-      call s:show_cache_warming(s:query)
-      return
-    endif
     echohl ErrorMsg
     echom 'emend: ' . l:msg
     echohl None
@@ -160,118 +170,6 @@ function! emend#ui#on_search_result(result) abort
   endif
 
   call s:open_ui()
-endfunction
-
-" ---------------------------------------------------------------------------
-" Cache warming display
-" ---------------------------------------------------------------------------
-
-let s:cache_timer = -1
-let s:cache_start = 0
-let s:cache_job = v:null
-
-function! s:show_cache_warming(query) abort
-  call s:open_ui()
-
-  call s:set_buf_lines(s:list_buf, [
-        \ '  emend — Warming cache...',
-        \ '',
-        \ '  The index has not been built yet.',
-        \ '  Running: emend index -vv',
-        \ '',
-        \ '  This only needs to happen once.',
-        \ '  Subsequent searches will be fast.',
-        \ '',
-        \ ])
-
-  call s:set_buf_lines(s:preview_buf, ['  Waiting for index to complete...'])
-
-  let s:cache_start = reltime()
-
-  let l:emend = emend#find_executable()
-  if l:emend ==# ''
-    let l:emend = 'emend'
-  endif
-  let l:root = emend#project_root()
-
-  if has('nvim')
-    let s:cache_job = jobstart([l:emend, 'index', l:root, '-vv'], {
-          \ 'on_stdout': {id, data, ev -> s:append_cache_output(data)},
-          \ 'on_stderr': {id, data, ev -> s:append_cache_output(data)},
-          \ 'on_exit':   function('s:on_cache_exit', [a:query]),
-          \ 'stdout_buffered': v:false,
-          \ })
-  else
-    let s:cache_job = job_start([l:emend, 'index', l:root, '-vv'], {
-          \ 'out_cb':  {ch, msg -> s:append_cache_output(msg)},
-          \ 'err_cb':  {ch, msg -> s:append_cache_output(msg)},
-          \ 'exit_cb': {job, status -> s:on_cache_exit(a:query, job, status)},
-          \ })
-  endif
-
-  let s:cache_timer = timer_start(500, function('s:update_cache_ticker'), {'repeat': -1})
-endfunction
-
-function! s:append_cache_output(data) abort
-  if s:preview_buf < 0 || !bufexists(s:preview_buf)
-    return
-  endif
-  let l:lines = type(a:data) == v:t_list ? a:data : split(a:data, "\n")
-  call s:append_buf_lines(s:preview_buf, l:lines)
-endfunction
-
-function! s:on_cache_exit(query, job_id, exit_code, ...) abort
-  if s:cache_timer >= 0
-    call timer_stop(s:cache_timer)
-    let s:cache_timer = -1
-  endif
-  let s:cache_job = v:null
-
-  if s:list_buf >= 0 && bufexists(s:list_buf)
-    call s:set_buf_lines(s:list_buf, [
-          \ '  emend — Cache ready!',
-          \ '',
-          \ '  Searching for: ' . a:query,
-          \ ])
-  endif
-
-  " Restart the server (it may not have been running or the old one had no index).
-  call emend#stop()
-  call timer_start(300, {_ -> s:retry_search(a:query)})
-endfunction
-
-function! s:retry_search(query) abort
-  call emend#start()
-  call timer_start(500, {_ -> s:wait_and_search(a:query, 0)})
-endfunction
-
-function! s:wait_and_search(query, attempt) abort
-  if emend#is_ready()
-    call emend#search(a:query)
-    return
-  endif
-  if a:attempt < 20
-    call timer_start(250, {_ -> s:wait_and_search(a:query, a:attempt + 1)})
-  else
-    if s:list_buf >= 0 && bufexists(s:list_buf)
-      call s:set_buf_lines(s:list_buf, [
-            \ '  emend — Server did not become ready.',
-            \ '  Try :EmendStart and search again.',
-            \ ])
-    endif
-  endif
-endfunction
-
-function! s:update_cache_ticker(timer) abort
-  if s:list_buf < 0 || !bufexists(s:list_buf)
-    call timer_stop(a:timer)
-    return
-  endif
-  let l:elapsed = reltimefloat(reltime(s:cache_start))
-  let l:secs = float2nr(l:elapsed)
-  let l:ticks = repeat('.', (l:secs % 3) + 1)
-  call s:set_buf_line(s:list_buf, 0,
-        \ '  emend — Warming cache' . l:ticks . ' (' . l:secs . 's)')
 endfunction
 
 " ---------------------------------------------------------------------------
@@ -456,29 +354,12 @@ function! s:close_ui() abort
 endfunction
 
 function! s:close_ui_silent() abort
+  let s:search_generation += 1
   call s:close_history_overlay()
 
-  if s:cache_timer >= 0
-    call timer_stop(s:cache_timer)
-    let s:cache_timer = -1
-  endif
-  
   if s:search_timer >= 0
     call timer_stop(s:search_timer)
     let s:search_timer = -1
-  endif
-
-  " Kill any running cache-warming job.
-  if s:cache_job isnot v:null
-    try
-      if has('nvim')
-        call jobstop(s:cache_job)
-      else
-        call job_stop(s:cache_job, 'kill')
-      endif
-    catch
-    endtry
-    let s:cache_job = v:null
   endif
 
   call s:close_win(s:preview_win)
@@ -588,6 +469,7 @@ function! emend#ui#on_input_change() abort
   endif
 
   let s:query = l:query
+  let s:search_generation += 1
 
   if s:search_timer >= 0
     call timer_stop(s:search_timer)
@@ -604,9 +486,7 @@ function! emend#ui#on_input_change() abort
       call s:render_list()
       call s:render_preview()
     else
-      let s:results = []
-      call s:render_list()
-      call s:render_preview()
+      call s:trigger_search()
     endif
     return
   endif
@@ -621,8 +501,8 @@ endfunction
 
 function! s:trigger_search() abort
   let s:search_timer = -1
-  if s:is_interactive && s:query !=# ''
-    call emend#search(s:query)
+  if s:is_interactive && !s:outline_mode
+    call s:search(s:query)
   endif
 endfunction
 
@@ -632,6 +512,7 @@ endfunction
 
 " Enter outline mode: sets up interactive UI with local filtering.
 function! emend#ui#enter_outline(file_path) abort
+  let s:search_generation += 1
   let s:outline_mode = 1
   let s:outline_file = a:file_path
   let s:is_interactive = 1

@@ -28,7 +28,7 @@ Features:
 - Auto-detecting search: symbols, patterns (`$`), selectors (`::`)
 - Split-pane UI: navigable result list + file preview
 - Async communication: non-blocking searches via job channels
-- Cache warming: automatic index build with progress display
+- File browsing while the search index builds in the background
 - Works in both Vim 8+ and Neovim
 
 ==============================================================================
@@ -383,9 +383,9 @@ via newline-delimited JSON-RPC over stdin/stdout pipes.
 The server keeps a SQLite database (with FTS5 trigram indexing) warm in
 memory, enabling sub-5ms symbol lookups and fast pattern searches.
 
-On first use, if the index does not exist, the plugin automatically runs
-`emend index -vv` and displays progress in the preview pane.  This one-time
-index build typically takes 5-15 seconds for a medium-sized codebase.
+When the index is missing, the picker lists ordinary project files immediately.
+The server builds the search index in the background, then refreshes the current
+query with indexed results. File navigation stays available throughout the build.
 
 JSON-RPC methods:~
 
@@ -398,6 +398,7 @@ JSON-RPC methods:~
     file_symbols    File outline (all symbols in a file)
     query_history   Recent query history
     status          Index statistics
+    indexing_status Background index progress or failure
     reindex         Refresh stale files + rebuild FTS
     shutdown        Clean server exit
 

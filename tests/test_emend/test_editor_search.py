@@ -389,9 +389,9 @@ class TestReferenceSearch:
         with _engine(indexed_project) as engine:
             engine._store.write(lambda conn: conn.execute(
                 "INSERT INTO reference_index "
-                "(content_hash, target_qn, file_path, line, col, ref_kind) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (b"h", "sample.greet", "sample.py", 6, 15, "call"),
+                "(target_qn, file_path, line, col, ref_kind) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("sample.greet", "sample.py", 6, 15, "call"),
             ).close())
 
             result = engine.search_references("sample.greet")
@@ -411,10 +411,10 @@ class TestReferenceSearch:
             def seed(conn):
                 conn.executemany(
                     "INSERT INTO reference_index "
-                    "(content_hash, target_qn, file_path, line, col, ref_kind) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "(target_qn, file_path, line, col, ref_kind) "
+                    "VALUES (?, ?, ?, ?, ?)",
                     [
-                        (b"h", "sample.greet", "f.py", line, 0, ref_kind)
+                        ("sample.greet", "f.py", line, 0, ref_kind)
                         for ref_kind, line in [("call", 10), ("read", 11), ("call", 12)]
                     ],
                 )
@@ -717,9 +717,10 @@ def test_editor_reindex_builds_cold_and_large_updates(tmp_path, background, monk
             else:
                 assert engine.reindex().items[0]["fresh"]
             assert len(engine.search_symbols(name).items) == expected
-            rows = engine._get_conn().execute("SELECT module_qn FROM symbol_index").fetchall()
-            assert {row[0] for row in rows} == {
-                symbol.qualified_name for symbol in engine._store.query_facts().symbols()
+            rows = engine._get_conn().execute("SELECT file_path, name FROM symbol_index").fetchall()
+            assert set(rows) == {
+                (str(tmp_path / symbol.file_path), symbol.name)
+                for symbol in engine._store.query_facts().symbols()
             }
 
 
@@ -999,11 +1000,11 @@ class TestSearchLiteralsWildcards:
         with _engine(proj) as engine:
             engine._store.write(lambda conn: conn.executemany(
                 "INSERT INTO reference_index "
-                "(content_hash, target_qn, file_path, line, col, ref_kind) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(target_qn, file_path, line, col, ref_kind) "
+                "VALUES (?, ?, ?, ?, ?)",
                 [
-                    (b"h", "abc", "f.py", 1, 0, "read"),
-                    (b"h", "a_c", "f.py", 2, 0, "read"),
+                    ("abc", "f.py", 1, 0, "read"),
+                    ("a_c", "f.py", 2, 0, "read"),
                 ],
             ).close())
             result = engine._search_literals(["a_c"])

@@ -8,7 +8,7 @@ A Vim/Neovim plugin for searching and navigating code with [emend](https://githu
 - **Split-pane UI**: navigable result list + file preview with syntax highlighting
 - **Definition jumps**: `:EmendGoto` resolves locals, imports, and mapped cross-project symbols
 - **Async RPC**: non-blocking communication with `emend editor-server` over stdio
-- **Auto cache warming**: builds the index on first use with progress display
+- **Background indexing**: browse ordinary files while the search index builds
 - **Works in Vim 8+ and Neovim**
 
 ## Installation
@@ -123,8 +123,9 @@ sub-5ms symbol lookups.
                                 └─────────────────┘
 ```
 
-On first use, if no index exists, the plugin runs `emend index -vv` and
-displays the output in the preview pane with an elapsed-time ticker.
+When no index exists, the picker shows ordinary project files while the server
+builds the search index in the background. It refreshes the current query when
+the index is ready, without requiring another keystroke.
 
 ## Testing
 

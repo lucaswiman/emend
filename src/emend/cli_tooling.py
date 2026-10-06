@@ -77,7 +77,6 @@ def index_cmd(
         print(f"  Indexed at:      {info.get('indexed_at', 'unknown')}", file=sys.stderr)
         print(f"  Files:           {info.get('file_manifest_count', 0)}", file=sys.stderr)
         print(f"  Symbols:         {info.get('symbol_index_count', 0)}", file=sys.stderr)
-        print(f"  Import edges:    {info.get('import_graph_count', 0)}", file=sys.stderr)
         print(f"  References:      {info.get('reference_index_count', 0)}", file=sys.stderr)
         head_str = " (HEAD changed)" if info.get("git_head_changed") else ""
         stale = info.get("changed_files", 0) + info.get("new_files", 0)

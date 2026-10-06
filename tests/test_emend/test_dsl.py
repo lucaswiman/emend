@@ -848,57 +848,6 @@ class TestDslSearchCommand:
         assert "[sql" in result.output or "users" in result.output
 
 
-class TestDslIndexTables:
-    """Tests for dsl_symbols and dsl_links tables in parse.db."""
-
-    def test_dsl_tables_created(self, tmp_path):
-        """parse.db schema includes dsl_symbols and dsl_links tables."""
-        import sqlite3
-        from emend.transform import _init_cache_schema
-
-        db_path = tmp_path / "parse.db"
-        conn = sqlite3.connect(str(db_path))
-        _init_cache_schema(conn)
-
-        # Check dsl_symbols table exists
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='dsl_symbols'"
-        )
-        assert cursor.fetchone() is not None
-
-        # Check dsl_links table exists
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='dsl_links'"
-        )
-        assert cursor.fetchone() is not None
-
-        conn.close()
-
-    def test_dsl_symbols_insertable(self, tmp_path):
-        """Can insert DSL symbols into dsl_symbols table."""
-        import sqlite3
-        from emend.transform import _init_cache_schema
-
-        db_path = tmp_path / "parse.db"
-        conn = sqlite3.connect(str(db_path))
-        _init_cache_schema(conn)
-
-        conn.execute(
-            "INSERT INTO dsl_symbols "
-            "(name, kind, dsl, host_file, host_start_line, host_start_col, "
-            "host_end_line, host_end_col, content_hash) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("users", "table", "sql", "app.py", 1, 0, 1, 30, b"abc123"),
-        )
-        conn.commit()
-
-        rows = conn.execute("SELECT name, kind, dsl FROM dsl_symbols").fetchall()
-        assert len(rows) == 1
-        assert rows[0] == ("users", "table", "sql")
-
-        conn.close()
-
-
 # ====================================================================
 # Jinja2 / Django template support (Phase 4)
 # ====================================================================

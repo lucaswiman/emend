@@ -229,6 +229,38 @@ Execute (history overlay function exists):
   Assert exists('*emend#ui#history_dismiss'), 'history_dismiss should exist'
   Assert exists('*emend#ui#recall_query'), 'recall_query should exist'
 
+Execute (pending file results respect closing and outline mode):
+  runtime autoload/emend.vim
+  let g:emend_test_requests = []
+  function! emend#send(method, params, Callback) abort
+    call add(g:emend_test_requests, {'method': a:method, 'params': a:params, 'Callback': a:Callback})
+  endfunction
+  let original_windows = winnr('$')
+  try
+    call emend#ui#interactive()
+    AssertEqual 'search', g:emend_test_requests[0].method
+    AssertEqual '', g:emend_test_requests[0].params.query
+    let response = {
+          \ 'items': [{'name': 'main.py', 'kind': 'file', 'file_path': '/tmp/main.py', 'line': 1}],
+          \ 'mode': 'symbol', 'query': '', 'elapsed_ms': 0}
+    call emend#ui#enter_outline('/tmp/main.py')
+    call emend#ui#set_outline_items({'items': [
+          \ {'name': 'outline_entry', 'kind': 'function', 'file_path': '/tmp/main.py', 'line': 1}],
+          \ 'mode': 'file_symbols', 'query': '/tmp/main.py', 'elapsed_ms': 0})
+    call call(g:emend_test_requests[0].Callback, [response])
+    Assert join(getbufline('emend://results', 1, '$'), "\n") =~# 'outline_entry'
+    call emend#ui#interactive()
+    call call(g:emend_test_requests[1].Callback, [response])
+    Assert join(getbufline('emend://results', 1, '$'), "\n") =~# 'main.py'
+    call emend#ui#close()
+    call call(g:emend_test_requests[1].Callback, [response])
+    AssertEqual original_windows, winnr('$')
+  finally
+    call emend#ui#close()
+    runtime autoload/emend.vim
+    unlet g:emend_test_requests
+  endtry
+
 Execute (recall_query updates the interactive picker input):
   call emend#ui#interactive()
   let input_buf = bufnr('%')

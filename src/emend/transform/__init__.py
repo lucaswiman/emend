@@ -22,12 +22,9 @@ from .cache import (
 # index.py
 # ---------------------------------------------------------------------------
 from .index import (
-    _NOQA_RE,
     _compute_duplicate_payloads,
     _ensure_cache_ignore_files,
     _ensure_index_fresh,
-    _extract_all_exports_text,
-    _extract_noqa_lines,
     _get_cached_qnames,
     _index_batch,
     _lookup_via_modmap,
@@ -141,8 +138,6 @@ from .deadcode import (
     _ENTRY_POINT_NAMES,
     _get_entry_point_config,
     _get_last_reference_commit,
-    _is_dunder,
-    _is_likely_entry_point,
     _parse_decorator_name,
     _string_literal_filter,
     find_dead_code,
@@ -207,9 +202,9 @@ __all__ = [
     "_SCHEMA_VERSION", "_cache_db_dir", "_knowledge_db_dir",
     "_get_disk_cache", "_get_worktree_id", "_init_cache_schema",
     # index
-    "_NOQA_RE", "_compute_duplicate_payloads", "_ensure_cache_ignore_files",
-    "_ensure_index_fresh", "_ensure_venv_index", "_extract_all_exports_text",
-    "_extract_noqa_lines", "_get_cached_qnames", "_index_batch", "_lookup_via_modmap",
+    "_compute_duplicate_payloads", "_ensure_cache_ignore_files",
+    "_ensure_index_fresh", "_ensure_venv_index",
+    "_get_cached_qnames", "_index_batch", "_lookup_via_modmap",
     "_query_symbol_index_cozo", "_scan_manifest", "_venv_db_path", "ManifestScanResult",
     "get_index_status", "lookup_venv_symbol", "query_import_graph", "query_reference_index",
     "query_symbol_index", "warm_caches",
@@ -238,8 +233,8 @@ __all__ = [
     "DeadBlock", "DeadModule", "DeadSymbol", "DeletePlan",
     "dead_code_result_details", "dead_code_result_to_dict",
     "_ENTRY_POINT_DECORATOR_BASENAMES", "_ENTRY_POINT_DECORATORS", "_ENTRY_POINT_NAMES",
-    "_get_entry_point_config", "_get_last_reference_commit", "_is_dunder",
-    "_is_likely_entry_point", "_parse_decorator_name", "_string_literal_filter",
+    "_get_entry_point_config", "_get_last_reference_commit",
+    "_parse_decorator_name", "_string_literal_filter",
     "find_dead_code", "safe_delete", "semantic_context",
     # impact
     "ImpactEdge", "ImpactResult", "_find_impact_via_fact_graph", "_is_test_file",
