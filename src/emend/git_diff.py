@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import json
 import re
+import io
+import tempfile
 
 
 def _run(root, *args, required=True):
@@ -52,11 +54,12 @@ class _DiffFile:
     hunks: list[tuple[int, int, int, int]] = field(default_factory=list)
 
 
-def _parse_diff(diff_text: str) -> list[_DiffFile]:
+def _parse_diff(diff_text) -> list[_DiffFile]:
     """Keep both coordinate spaces and blob identities of a Git patch."""
     files: list[_DiffFile] = []
     in_hunk = False
-    for line in diff_text.splitlines():
+    for line in io.StringIO(diff_text) if isinstance(diff_text, str) else diff_text:
+        line = line.removesuffix("\n").removesuffix("\r")
         if line.startswith("diff --git "):
             files.append(_DiffFile())
             in_hunk = False
@@ -83,9 +86,20 @@ def _parse_diff(diff_text: str) -> list[_DiffFile]:
 
 def read_diff(root, *revisions):
     """Read machine-format hunks independently of Git presentation settings."""
-    return _parse_diff(_run(root, "-c", "core.quotepath=false", "diff", "--no-ext-diff",
-                           "--no-textconv", "--no-renames", "--full-index", "--no-color", "-U0",
-                           "--src-prefix=a/", "--dst-prefix=b/", "--inter-hunk-context=0", *revisions, "--"))
+    # Spool payload rather than retaining every added/deleted source line.
+    # subprocess.run owns termination and timeout cleanup before parsing.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="surrogateescape") as patch:
+        result = subprocess.run(
+            ["git", "-c", "core.quotepath=false", "diff", "--no-ext-diff",
+             "--no-textconv", "--no-renames", "--full-index", "--no-color", "-U0",
+             "--src-prefix=a/", "--dst-prefix=b/", "--inter-hunk-context=0", *revisions, "--"],
+            cwd=root, stdout=patch, stderr=subprocess.PIPE, text=True,
+            errors="surrogateescape", timeout=30,
+        )
+        if result.returncode:
+            raise ValueError(result.stderr.strip() or "Git command failed")
+        patch.seek(0)
+        return _parse_diff(patch)
 
 
 def _gh(root, *args):

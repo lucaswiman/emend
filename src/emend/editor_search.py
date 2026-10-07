@@ -421,6 +421,10 @@ class EditorSearchEngine:
                 logger.debug("Search index not ready; using files", exc_info=True)
         self._overlay_owner = object()
         self._conn: sqlite3.Connection | None = None
+        self._file_inventory: list[str] | None = None
+        self._file_inventory_stamp: tuple = ()
+        self._file_inventory_watch: tuple[Path, ...] = ()
+        self._indexed_file_paths: tuple[int, list[str]] | None = None
         self._fts_ready = False
         self._fts_available: bool | None = None
 
@@ -454,6 +458,7 @@ class EditorSearchEngine:
             self._store.close_reader(self._conn)
         self._conn = None
         self._fts_ready = False
+        self._indexed_file_paths = None
 
         # Close KB if it was lazy-initialized
         if hasattr(self, "_kb"):
@@ -474,23 +479,33 @@ class EditorSearchEngine:
 
     def _collect_project_files(self) -> list[str]:
         root = Path(self.project_root).resolve()
+        def stamp(paths):
+            identities = []
+            for path in paths:
+                try:
+                    stat = path.stat()
+                    identities.append((stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size))
+                except FileNotFoundError:
+                    identities.append(None)
+            return tuple(identities)
+
+        if self._file_inventory is not None and stamp(self._file_inventory_watch) == self._file_inventory_stamp:
+            return self._file_inventory
         files: list[str] = []
+        watched = {root: stamp((root,))[0]}
         try:
-            proc = subprocess.run(
-                ["git", "ls-files", "-z"],
-                capture_output=True,
-                check=False,
-                cwd=str(root),
-                timeout=5,
+            index = subprocess.run(
+                ["git", "rev-parse", "--git-path", "index"],
+                capture_output=True, check=True, cwd=str(root), timeout=5,
             )
-            if proc.returncode == 0:
-                files = [
-                    str(root / rel_path)
-                    for rel_path in proc.stdout.decode(
-                        "utf-8", errors="replace"
-                    ).split("\0")
-                    if rel_path
-                ]
+            git_index = root / os.fsdecode(index.stdout).strip()
+            watched[git_index] = stamp((git_index,))[0]
+            proc = subprocess.run(
+                ["git", "ls-files", "-z"], capture_output=True, check=True,
+                cwd=str(root), timeout=5,
+            )
+            files = [str(root / rel_path) for rel_path in
+                     os.fsdecode(proc.stdout).split("\0") if rel_path]
         except (subprocess.SubprocessError, OSError):
             logger.debug("git ls-files fallback failed", exc_info=True)
 
@@ -509,15 +524,29 @@ class EditorSearchEngine:
                 "target",
                 "venv",
             }
-            for dirpath, dirnames, filenames in os.walk(root):
-                dirnames[:] = [
-                    dirname
-                    for dirname in dirnames
-                    if dirname not in ignored_dirs
-                ]
-                for filename in filenames:
-                    files.append(str(Path(dirpath) / filename))
+            pending = [root]
+            while pending:
+                directory = pending.pop()
+                watched[directory] = stamp((directory,))[0]
+                try:
+                    with os.scandir(directory) as entries:
+                        for entry in entries:
+                            if entry.is_dir():
+                                if entry.name not in ignored_dirs and not entry.is_symlink():
+                                    pending.append(Path(entry.path))
+                            else:
+                                files.append(entry.path)
+                except (FileNotFoundError, NotADirectoryError, PermissionError):
+                    # A directory may disappear between parent and child scans.
+                    continue
 
+        # Publish only an inventory whose ownership metadata stayed unchanged
+        # during enumeration. A concurrent save must trigger the next refresh.
+        self._file_inventory_watch = tuple(sorted(watched))
+        self._file_inventory_stamp = tuple(watched[path] for path in self._file_inventory_watch)
+        files.sort()
+        self._file_inventory = (files if stamp(self._file_inventory_watch) == self._file_inventory_stamp
+                                else None)
         return files
 
     # -- FTS ----------------------------------------------------------------
@@ -681,7 +710,7 @@ class EditorSearchEngine:
             self._set_result_sources(result, "pattern")
         elif "/" in query or any(query.endswith(ext) for ext in (".py", ".ts", ".js", ".rs", ".go", ".c", ".cpp", ".h")):
             # Prioritize file search for path-like queries
-            result = self._search_files(query, limit=limit)
+            result = self._search_files(query, limit=limit, file_scope=file_scope)
             if not result.items:
                 result = self._search_symbols(
                     query, limit=limit, file_scope=file_scope, kind=kind
@@ -880,7 +909,7 @@ class EditorSearchEngine:
         ]
         
         # Include file matches
-        file_results = self._search_files(query, limit=limit)
+        file_results = self._search_files(query, limit=limit, file_scope=file_scope)
         for fr in file_results.items:
             scored.append((fr["score"], fr))
 
@@ -908,35 +937,36 @@ class EditorSearchEngine:
         """Search for files matching the query."""
         q_lower = query.lower()
 
-        candidates: set[str] = set()
+        candidates: dict[str, None] = {}
         candidate_cap = max(limit * 4, 200)
 
         if self._search_ready:
             conn = self._get_conn()
             # Strategy 1: exact basename or substring via the index when available.
             base_sql = "SELECT DISTINCT file_path FROM symbol_index"
+            scope_sql = " AND instr(file_path, ?) > 0" if file_scope else ""
+            scope_params = (file_scope,) if file_scope else ()
             try:
                 fts_ok = len(query) >= 3 and self._ensure_fts()
                 if fts_ok:
                     fts_q = '"' + query.replace('"', '""') + '"'
-                    sql = "SELECT file_path FROM file_fts WHERE file_path MATCH ? LIMIT ?"
-                    candidates.update(
-                        r[0] for r in conn.execute(sql, (fts_q, candidate_cap))
-                    )
+                    sql = "SELECT file_path FROM file_fts WHERE file_path MATCH ?" + scope_sql + " LIMIT ?"
+                    candidates.update((r[0], None) for r in conn.execute(
+                        sql, (fts_q, *scope_params, candidate_cap)))
                 else:
-                    sql = f"{base_sql} WHERE lower(file_path) LIKE ? LIMIT ?"
-                    candidates.update(
-                        r[0]
-                        for r in conn.execute(
-                            sql, ("%" + q_lower + "%", candidate_cap)
-                        )
-                    )
+                    sql = f"{base_sql} WHERE lower(file_path) LIKE ?" + scope_sql + " LIMIT ?"
+                    candidates.update((r[0], None) for r in conn.execute(
+                        sql, ("%" + q_lower + "%", *scope_params, candidate_cap)))
 
                 if len(candidates) < candidate_cap:
-                    for row in conn.execute(base_sql):
-                        fp = row[0]
+                    version = conn.execute("PRAGMA data_version").fetchone()[0]
+                    if self._indexed_file_paths is None or self._indexed_file_paths[0] != version:
+                        self._indexed_file_paths = (version, [row[0] for row in conn.execute(base_sql)])
+                    for fp in self._indexed_file_paths[1]:
+                        if file_scope and file_scope not in fp:
+                            continue
                         if is_fuzzy_subsequence(query, fp):
-                            candidates.add(fp)
+                            candidates[fp] = None
                             if len(candidates) >= candidate_cap:
                                 break
             except sqlite3.Error:
@@ -946,13 +976,15 @@ class EditorSearchEngine:
         # is stale, missing, or does not cover non-source files.
         if len(candidates) < candidate_cap:
             for fp in self._collect_project_files():
+                if file_scope and file_scope not in fp:
+                    continue
                 display_path = (
                     os.path.relpath(fp, self.project_root)
                     if os.path.isabs(fp)
                     else fp
                 )
                 if q_lower in display_path.lower() or is_fuzzy_subsequence(query, display_path):
-                    candidates.add(fp)
+                    candidates[fp] = None
                     if len(candidates) >= candidate_cap:
                         break
 
@@ -975,7 +1007,7 @@ class EditorSearchEngine:
                     "score": score,
                 })
         
-        items.sort(key=lambda x: -x["score"])
+        items.sort(key=lambda x: (-x["score"], x["file_path"]))
         return SearchResult(
             items=items[:limit],
             elapsed_ms=0,

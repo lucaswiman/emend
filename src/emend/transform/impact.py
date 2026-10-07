@@ -80,7 +80,7 @@ def _symbols_in_intervals(symbols, lines: LineIntervals):
     def visit(symbols, lower, upper):
         for sym in symbols:
             start, stop = max(lower, sym.line_start), min(upper, sym.line_end + 1)
-            if start < stop:
+            if start < stop and lines.intersects(start, stop - 1):
                 priority = len(events)
                 events.append((start, priority, stop, sym))
                 events.append((stop, -1, stop, None))
@@ -340,20 +340,17 @@ def _find_impact_via_fact_graph(
         if identity in mqn_to_sel:
             test_decorated_sels.add(mqn_to_sel[identity])
 
+    first_edge = {}
+    for edge in all_edges:
+        first_edge.setdefault(edge.target, edge)
     test_edges: list[ImpactEdge] = []
     for sel_str in all_impacted:
         file_part = sel_str.split('::', 1)[0] if '::' in sel_str else sel_str
         if _is_test_file(file_part) or _is_test_symbol(sel_str) or sel_str in test_decorated_sels:
             if sel_str not in impacted_tests:
                 impacted_tests.append(sel_str)
-                for edge in all_edges:
-                    if edge.target == sel_str:
-                        test_edges.append(ImpactEdge(
-                            source=edge.source,
-                            target=sel_str,
-                            kind="test",
-                        ))
-                        break
+                if edge := first_edge.get(sel_str):
+                    test_edges.append(ImpactEdge(source=edge.source, target=sel_str, kind="test"))
     all_edges.extend(test_edges)
 
     return ImpactResult(

@@ -15,6 +15,29 @@ import pytest
 SOURCE = "def hello():\n    return 42\n"
 
 
+def test_warm_skip_revalidates_module_context_after_parent_cache_probe(tmp_path, monkeypatch):
+    import pickle
+    import zlib
+    from emend.analysis_store import AnalysisStore
+    from emend.transform.index import warm_caches
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'context'\n")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app/hello.py").write_text(SOURCE)
+    warm_caches(str(tmp_path), type_engine="none", jobs=1)
+    prepare = AnalysisStore.prepare_index_facts
+
+    def change_context(store, *args, **kwargs):
+        (tmp_path / "setup.cfg").write_text("[options]\npackage_dir =\n    = app\n")
+        return prepare(store, *args, **kwargs)
+
+    monkeypatch.setattr(AnalysisStore, "prepare_index_facts", change_context)
+    warm_caches(str(tmp_path), type_engine="none", jobs=1)
+    with sqlite3.connect(tmp_path / ".emend/cache/parse.db") as conn:
+        payload = conn.execute("SELECT qnames FROM qn_index").fetchone()[0]
+        assert pickle.loads(zlib.decompress(payload)) == {"hello.hello"}
+
+
 def test_source_root_change_refreshes_editor_projection_without_content_edits(tmp_path, monkeypatch):
     import pickle
     import zlib

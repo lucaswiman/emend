@@ -8,6 +8,7 @@ control paths together with the value generations surviving on those paths.
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -265,6 +266,29 @@ class _EndpointMatch:
         return self.completion or self.node
 
 
+@dataclass
+class _EventIndex:
+    rows: list["FlowEventFact"]
+    completions: dict[int | None, "FlowEventFact"]
+    order: dict[int, int]
+
+    @classmethod
+    def build(cls, rows):
+        return cls(
+            sorted((row for row in rows if row.role not in {"control", "function_entry"}),
+                   key=lambda row: row.start_byte),
+            {row.call_id: row for row in rows if row.role == "call_result"},
+            {row.event_id: position for position, row in enumerate(rows)},
+        )
+
+    def within(self, span):
+        begin = bisect_left(self.rows, span.start_byte, key=lambda row: row.start_byte)
+        end = bisect_right(self.rows, span.end_byte, key=lambda row: row.start_byte)
+        # Ordinals repeat between scopes. Retain the original tie order when
+        # a pattern contains occurrences from more than one function.
+        return sorted(self.rows[begin:end], key=lambda row: self.order[row.event_id])
+
+
 def _pattern_spans(
     pattern: str, file_pairs: list[tuple[str, str]], language: str | None,
 ) -> list[_PatternSpan]:
@@ -343,7 +367,7 @@ def _resolve_endpoints(
     endpoint: CompiledEndpoint,
     purpose: str,
     file_pairs: list[tuple[str, str]],
-    events_by_actual: dict[str, list["FlowEventFact"]],
+    events_by_actual: dict[str, _EventIndex],
     actual_to_stored: dict[str, str],
     language: str | None,
     match_cache: dict[tuple[Any, ...], list[_PatternSpan]] | None = None,
@@ -358,13 +382,17 @@ def _resolve_endpoints(
         if match_cache is not None:
             match_cache[key] = spans
     for span in spans:
-        actual = str(Path(span.file_path).resolve())
+        actual = span.file_path
+        index = events_by_actual.get(actual)
+        if index is None:
+            continue
+        candidates = index.within(span)
         captures = [capture for capture in span.captures if capture[0] != "_"]
         targets = captures if purpose in {"sink", "sanitizer"} and captures else [None]
         seen_nodes: set[tuple[str, int]] = set()
         for capture in targets:
             event = _choose_event(
-                events_by_actual.get(actual, []), span, purpose,
+                candidates, span, purpose,
                 (capture[1], capture[2]) if capture is not None else None,
             )
             if event is None:
@@ -376,9 +404,8 @@ def _resolve_endpoints(
             captured_value = capture[7] if capture is not None else next(
                 (item[7] for item in captures), "",
             )
-            completion = next((row for row in events_by_actual.get(actual, ())
-                               if row.role == "call_result" and row.call_id == event.call_id), None) \
-                if purpose in {"sanitizer", "scope"} and event.call_id is not None else None
+            completion = index.completions.get(event.call_id) \
+                if purpose in {"sanitizer", "scope"} else None
             matches.append(_EndpointMatch(
                 node, span,
                 event.access_path or event.var or captured_value or span.text,
@@ -438,7 +465,7 @@ def _finally_transition(kind, event, pending):
             reasons[marker] = reason
         else:
             # A source can begin inside a finalizer, with no observed entry.
-            if operation == "resume" and marker in reasons and reasons[marker] != reason:
+            if marker in reasons and reasons[marker] != reason:
                 return None
             reasons.pop(marker, None)
     return tuple(sorted(reasons.items()))
@@ -452,11 +479,10 @@ def _walk(
     *,
     blocked: frozenset[tuple[str, int]] = frozenset(),
     max_call_depth: int | None = None,
-    initial_state: Any = None,
+    initial_states: Iterable[Any] | None = None,
 ) -> tuple[set[Any], dict[Any, Any]]:
-    initial = initial_state if initial_state is not None else (start, (), ())
-    queue = deque([initial])
-    seen = {initial}
+    queue = deque(initial_states if initial_states is not None else [(start, (), ())])
+    seen = set(queue)
     predecessor: dict[Any, Any] = {}
     while queue:
         current = queue.popleft()
@@ -509,7 +535,8 @@ def _source_starts_clean(source, sanitizers, value_adjacency, events,
                          value_edges, max_call_depth=None):
     # A source pattern enclosing a sanitizer denotes its already-clean output.
     return any(
-        sanitizer.span.file_path == source.span.file_path
+        sanitizer.node in events
+        and sanitizer.span.file_path == source.span.file_path
         and source.span.start_byte <= sanitizer.span.start_byte
         and sanitizer.span.end_byte <= source.span.end_byte
         and _can_reach(
@@ -520,9 +547,9 @@ def _source_starts_clean(source, sanitizers, value_adjacency, events,
     )
 
 
-def _has_sanitized_path(
+def _sanitized_nodes(
     source: _EndpointMatch,
-    sink: _EndpointMatch,
+    reachable_nodes: set,
     sanitizers: list[_EndpointMatch],
     scope_sanitizers: list[_EndpointMatch],
     value_adjacency: dict[tuple[str, int], list[tuple[tuple[str, int], str]]],
@@ -532,41 +559,36 @@ def _has_sanitized_path(
     control_edges: frozenset[str],
     max_call_depth: int | None,
     return_sanitizers: list[_EndpointMatch],
-) -> bool:
+) -> frozenset | None:
+    """Clean sink occurrences for this source; None means every sink is clean."""
     # Pure-return sanitizers clean the returned generation, never their input.
     # In particular, evaluating escape(x) must not clean a later use of x.
     outputs = frozenset(match.node for match in return_sanitizers)
     if source.node in outputs:
-        return True
-    if any(_can_reach(source.node, node, value_adjacency, events, value_edges,
-                      max_call_depth=max_call_depth)
-           and _can_reach(node, sink.node, value_adjacency, events, value_edges,
-                         max_call_depth=max_call_depth)
-           for node in outputs):
-        return True
+        return None
+    clean = set()
+    if outputs & reachable_nodes:
+        onward, _ = _walk(source.node, value_adjacency, events, value_edges,
+                         max_call_depth=max_call_depth,
+                         initial_states=((node, (), ()) for node in outputs & reachable_nodes))
+        clean.update(state[0] for state in onward)
     # Value sanitizers only affect the generation which reaches their exact
     # argument occurrence. Scope sanitizers apply to every value in the scope.
     if _source_starts_clean(source, sanitizers, value_adjacency, events,
                             value_edges, max_call_depth):
-        return True
-    relevant = [sanitizer for sanitizer in sanitizers if _can_reach(
-        source.node, sanitizer.node, value_adjacency, events, value_edges,
-        max_call_depth=max_call_depth,
-    )]
+        return None
+    relevant = [sanitizer for sanitizer in sanitizers if sanitizer.node in reachable_nodes]
     relevant.extend(scope_sanitizers)
     if not relevant:
-        return False
+        return frozenset(clean)
     reachable, _ = _walk(source.node, control_adjacency, events, control_edges,
                          max_call_depth=max_call_depth)
-    for sanitizer in relevant:
-        for state in reachable:
-            if state[0] != sanitizer.control_node:
-                continue
-            onward, _ = _walk(state[0], control_adjacency, events, control_edges,
-                              max_call_depth=max_call_depth, initial_state=state)
-            if any(candidate[0] == sink.node for candidate in onward):
-                return True
-    return False
+    controls = {sanitizer.control_node for sanitizer in relevant}
+    onward, _ = _walk(source.node, control_adjacency, events, control_edges,
+                     max_call_depth=max_call_depth,
+                     initial_states=(state for state in reachable if state[0] in controls))
+    clean.update(candidate[0] for candidate in onward)
+    return frozenset(clean)
 
 
 # Allow this many additional states beyond one visit per occurrence. Exact
@@ -575,7 +597,58 @@ def _has_sanitized_path(
 _VALUE_STATE_LIMIT = 10_000
 
 
-def _value_path_walker(sanitizers, scope_sanitizers,
+class _CallComponents:
+    """One call graph for finalizer activation and component-local value states."""
+
+    def __init__(self, events, value_adjacency, interprocedural):
+        self.members = defaultdict(dict)
+        self.neighbors = defaultdict(set)
+        self.components = {}
+        for node, event in events.items():
+            function = (event.file_path, event.func_id)
+            self.members[function][node] = event
+            if interprocedural:
+                for target, kind in value_adjacency.get(node, ()):
+                    if kind in _CALL_EDGES:
+                        other = (events[target].file_path, events[target].func_id)
+                        self.neighbors[function].add(other)
+                        self.neighbors[other].add(function)
+
+    def connected(self, function):
+        if function not in self.components:
+            component = {function}
+            pending = [function]
+            while pending:
+                for other in self.neighbors[pending.pop()] - component:
+                    component.add(other)
+                    pending.append(other)
+            component = frozenset(component)
+            for member in component:
+                self.components[member] = component
+        return self.components[function]
+
+
+def _value_path_walker(sanitizers, scope_sanitizers, return_sanitizers,
+                       value_adjacency, control_adjacency, events,
+                       interprocedural, max_call_depth, components):
+    walkers = {}
+
+    def walk(source, sinks):
+        event = events[source.node]
+        component = components.connected((event.file_path, event.func_id))
+        if component not in walkers:
+            local_events = {node: event for member in component
+                            for node, event in components.members[member].items()}
+            walkers[component] = _component_value_path_walker(
+                sanitizers, scope_sanitizers, return_sanitizers,
+                value_adjacency, control_adjacency, local_events,
+                interprocedural, max_call_depth,
+            )
+        return walkers[component](source, sinks)
+    return walk
+
+
+def _component_value_path_walker(sanitizers, scope_sanitizers,
                            return_sanitizers, value_adjacency,
                            control_adjacency, events, interprocedural, max_call_depth):
     """Follow live value identities along occurrence-level control paths.
@@ -785,10 +858,6 @@ def _rule_applies(rule: CompiledFlowRule, path: str, language: str, root: str) -
         and not any(path_matches_glob(path, pattern, project_root=root)
                     for pattern in rule.exclude_paths)
     )
-
-
-def _event_text(event: "FlowEventFact", source: str) -> str:
-    return source.encode()[event.start_byte:event.end_byte].decode(errors="replace")
 
 
 def _add_cross_file_calls(
@@ -1113,23 +1182,12 @@ def evaluate_compiled_flow(
     _add_container_mutations(all_events, value_adjacency, language)
     # Finalizer continuations affect the whole connected call component, even
     # when the pending control path carries no value into the callee.
-    function_of = {node: (event.file_path, event.func_id)
-                   for node, event in all_events.items()}
-    finally_functions = {function_of[node] for node, outgoing in control_adjacency.items()
+    components = _CallComponents(all_events, value_adjacency, interprocedural)
+    finally_functions = {(all_events[node].file_path, all_events[node].func_id)
+                         for node, outgoing in control_adjacency.items()
                          if any(kind.startswith("control;") for _target, kind in outgoing)}
-    if finally_functions and interprocedural:
-        callers = defaultdict(set)
-        for node, outgoing in value_adjacency.items():
-            for target, kind in outgoing:
-                if kind in _CALL_EDGES:
-                    left, right = function_of[node], function_of[target]
-                    callers[left].add(right)
-                    callers[right].add(left)
-        pending_functions = list(finally_functions)
-        while pending_functions:
-            for target in callers[pending_functions.pop()] - finally_functions:
-                finally_functions.add(target)
-                pending_functions.append(target)
+    finally_functions = set().union(*{components.connected(function)
+                                      for function in finally_functions})
     if interprocedural:
         for source_node, outgoing in value_adjacency.items():
             source_event = all_events[source_node]
@@ -1138,6 +1196,7 @@ def evaluate_compiled_flow(
                 outgoing[:] = [edge for edge in outgoing
                                if edge[1] != _OPAQUE_CALL_EDGE]
 
+    event_indices = {path: _EventIndex.build(rows) for path, rows in events_by_actual.items()}
     match_cache: dict[tuple[Any, ...], list[_PatternSpan]] = {}
 
     results: list[EvaluatedFlow] = []
@@ -1150,7 +1209,7 @@ def evaluate_compiled_flow(
         if not rule_pairs:
             continue
         allowed_actual = {path for path, _source in rule_pairs}
-        rule_events = {path: rows for path, rows in events_by_actual.items()
+        rule_events = {path: rows for path, rows in event_indices.items()
                        if path in allowed_actual}
         sources = [match for endpoint in rule.sources for match in _type_filter(
             _resolve_endpoints(
@@ -1173,7 +1232,7 @@ def evaluate_compiled_flow(
             elif any(endpoint.options.get("source_capture") for endpoint in rule.sources):
                 actual = str(Path(source.span.file_path).resolve())
                 capture_event = _choose_event(
-                    rule_events.get(actual, ()), source.span, "source_capture",
+                    rule_events[actual].within(source.span), source.span, "source_capture",
                 )
                 capture_node = (
                     (actual_to_stored.get(actual, capture_event.file_path), capture_event.event_id)
@@ -1238,6 +1297,42 @@ def evaluate_compiled_flow(
         control_edges = frozenset({"control"}) | (
             _CALL_EDGES if interprocedural else frozenset()
         )
+        effect_sinks = []
+        if any(endpoint.effect for endpoint in rule.sinks):
+            encoded_sources = {actual: contents[actual].encode() for actual in allowed_actual}
+            calls = defaultdict(list)
+            for event in all_events.values():
+                if event.role == "call":
+                    calls[(event.file_path, event.func_id, event.access_path)].append(event)
+            for endpoint in rule.sinks:
+                if not endpoint.effect:
+                    continue
+                effect = endpoint.effect.strip().split("(", 1)[0]
+                for node, event in all_events.items():
+                    actual = stored_to_actual.get(event.file_path)
+                    if actual not in allowed_actual:
+                        continue
+                    method_call = None
+                    if effect == "writes":
+                        if event.role == "use" and "." in (event.access_path or ""):
+                            method_call = next((call for call in calls[
+                                (event.file_path, event.func_id, event.access_path)]
+                                if call.start_byte <= event.start_byte
+                                and event.end_byte <= call.end_byte), None)
+                        if event.role != "mutation" and method_call is None:
+                            continue
+                    elif event.role != "use":
+                        continue
+                    location = method_call or event
+                    text = encoded_sources[actual][location.start_byte:location.end_byte].decode(errors="replace")
+                    effect_sinks.append((endpoint, _EndpointMatch(
+                        node, _PatternSpan(
+                            actual, location.start_byte, location.end_byte,
+                            location.start_line, location.start_column,
+                            location.end_line, location.end_column, text,
+                        ), event.access_path or event.var or text,
+                    )))
+        candidates = pattern_sinks + effect_sinks
         value_walker = None
         for source in sources:
             states, predecessor = _walk(
@@ -1248,46 +1343,12 @@ def evaluate_compiled_flow(
             for state in states:
                 states_by_node[state[0]].append(state)
 
-            candidates = list(pattern_sinks)
-            for endpoint in rule.sinks:
-                if not endpoint.effect:
-                    continue
-                effect = endpoint.effect.strip().split("(", 1)[0]
-                for node, event in all_events.items():
-                    actual = stored_to_actual.get(event.file_path)
-                    method_call = next((candidate for candidate in all_events.values()
-                        if effect == "writes" and event.role == "use"
-                        and "." in (event.access_path or "")
-                        and candidate.file_path == event.file_path
-                        and candidate.func_id == event.func_id
-                        and candidate.role == "call"
-                        and candidate.access_path == event.access_path
-                        and candidate.start_byte <= event.start_byte
-                        and event.end_byte <= candidate.end_byte), None)
-                    accepts_effect = (
-                        event.role == "mutation" or method_call is not None
-                        if effect == "writes" else event.role == "use"
-                    )
-                    if not accepts_effect or node not in states_by_node \
-                            or actual not in allowed_actual:
-                        continue
-                    location = method_call or event
-                    text = _event_text(location, contents[actual])
-                    candidates.append((endpoint, _EndpointMatch(
-                        node,
-                        _PatternSpan(
-                            actual, location.start_byte, location.end_byte,
-                            location.start_line, location.start_column,
-                            location.end_line, location.end_column, text,
-                        ),
-                        event.access_path or event.var or text,
-                    )))
-
             reachable_sinks = {sink.node for _, sink in candidates
                                if sink.node in states_by_node}
             if not reachable_sinks:
                 continue
-            correlate = function_of[source.node] in finally_functions or (rule.quantifier == "all_paths" and bool(
+            source_event = all_events[source.node]
+            correlate = (source_event.file_path, source_event.func_id) in finally_functions or (rule.quantifier == "all_paths" and bool(
                 sanitizers or scope_sanitizers or return_sanitizers))
             surviving = {}
             if correlate:
@@ -1297,9 +1358,16 @@ def evaluate_compiled_flow(
                         scope_sanitizers if rule.quantifier == "all_paths" else [],
                         return_sanitizers if rule.quantifier == "all_paths" else [],
                         value_adjacency, control_adjacency, all_events,
-                        interprocedural, max_call_depth,
+                        interprocedural, max_call_depth, components,
                     )
                 surviving = value_walker(source, reachable_sinks)
+            clean_nodes = frozenset()
+            if not correlate or rule.quantifier == "some_path":
+                clean_nodes = _sanitized_nodes(
+                    source, set(states_by_node), sanitizers, scope_sanitizers,
+                    value_adjacency, control_adjacency, all_events,
+                    value_edges, control_edges, max_call_depth, return_sanitizers,
+                )
             for sink_endpoint, sink in candidates:
                 sink_states = states_by_node.get(sink.node, ())
                 if not sink_states:
@@ -1308,13 +1376,7 @@ def evaluate_compiled_flow(
                     if surviving is not None and sink.node not in surviving:
                         continue
                     event_path = surviving[sink.node] if surviving is not None else []
-                if (not correlate or rule.quantifier == "some_path") and _has_sanitized_path(
-                    source, sink, sanitizers, scope_sanitizers,
-                    value_adjacency, control_adjacency, all_events,
-                    value_edges, control_edges,
-                    max_call_depth,
-                    return_sanitizers,
-                ):
+                if clean_nodes is None or sink.node in clean_nodes:
                     continue
                 key = (rule.rule_id, source.span.file_path, source.span.start_byte,
                        sink.span.file_path, sink.span.start_byte, sink.span.end_byte)

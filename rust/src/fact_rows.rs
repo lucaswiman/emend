@@ -459,6 +459,8 @@ fn add_cfg_rows(
             ]);
         }
 
+        let mut successors = vec![Vec::new(); graph.blocks.len()];
+        for edge in &graph.edges { successors[edge.from.0 as usize].push(edge.to); }
         let mut visited = HashSet::new();
         let mut stack = vec![graph.entry];
         while let Some(block) = stack.pop() {
@@ -470,9 +472,9 @@ fn add_cfg_rows(
                 func_qn.clone().into(),
                 block.0.into(),
             ]);
-            for edge in graph.edges.iter().filter(|edge| edge.from == block) {
-                if !visited.contains(&edge.to) {
-                    stack.push(edge.to);
+            for &target in &successors[block.0 as usize] {
+                if !visited.contains(&target) {
+                    stack.push(target);
                 }
             }
         }

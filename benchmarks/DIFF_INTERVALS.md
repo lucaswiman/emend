@@ -39,7 +39,7 @@ search after rejecting spans outside the overall selection. Impact selection
 sweeps symbol boundaries with depth-first ownership priority, preserving nested
 and overlapping symbol semantics without iterating selected lines.
 
-Git subprocess stdout and `_parse_diff`'s `splitlines()` still retain patch text.
-Avoiding that separate source of memory use would require streaming the patch
-boundary; this change bounds selection storage only. Synthetic header-only
-inputs deliberately exclude patch-body buffering, source parsing, and Git I/O.
+These original header-only measurements exclude patch-body buffering, source
+parsing, and Git I/O. The subsequent release-wide review spools Git output to
+a temporary file and parses it incrementally, bounding Python memory for real
+patch payloads as well. See [RELEASE_LATENCY.md](RELEASE_LATENCY.md) for that probe.

@@ -12,8 +12,9 @@ failed handler assignments, unmatched catches, else bodies, and mandatory
 finalizers preserve the value generations that actually survive. Finalizer edges
 carry their pending continuation: normal completion, an exception, or a particular
 return/loop jump. The evaluator only resumes a compatible continuation, including
-when no sanitizer matches. Transitions through empty blocks are composed so
-empty finalizers and eventless loops do not grow unbounded action sequences.
+when no sanitizer matches. Empty blocks remain neutral control occurrences,
+so extraction preserves sparse transitions instead of enumerating optional
+finalizer combinations. The evaluator follows these transitions lazily.
 Each return has a completion point reached only if it survives its finalizers.
 Calls receive completed return values at normal function exit. A canceled inner
 return cannot erase an outer pending return, and a throw cannot complete a call.
@@ -22,7 +23,7 @@ apply that handler's writes before the next clause. Normal handler completion
 and return/break/continue exits execute mandatory finalizers. Known built-in
 catch-type names and TypeScript catch-parameter bindings use language configuration;
 custom and dynamic catch-type expressions still participate in exception flow.
-Extraction artifact version 21 invalidates cached facts with the old routing.
+Extraction artifact version 22 invalidates cached facts with the old routing.
 
 Configured composite expressions (including containers, selections, interpolated
 strings, and comprehensions) produce distinct identities. Validating their output
@@ -31,7 +32,9 @@ uses the same interprocedural edges and depth limit as other value reachability.
 
 ## Bounds and limitations
 
-- Graph preparation and backward liveness are shared across sources for a rule.
+- Graph preparation and backward liveness are shared across sources for a rule
+  and limited to their connected call component. Finalizer activation shares
+  the same call graph across rules.
   Continuation validation is activated for functions connected by resolved calls
   to a finalizer, so an unrelated finalizer does not enable it for every source.
   Reaching-definition extraction still uses its existing shared dataflow; there
@@ -123,3 +126,8 @@ The added continuation semantics retain similar extraction costs in this panel.
 The follow-up regressions cover derived-expression identities, incompatible
 finalizer exits, sources created inside finalizers, returned aliases, explicit
 throws, and cancellation of nested returns.
+
+The later release-wide performance review replaces empty-block composition and
+improves reaching-definition extraction. See [RELEASE_LATENCY.md](RELEASE_LATENCY.md)
+for its separate baseline and measurements; the earlier tables above remain
+historical diagnostics.
