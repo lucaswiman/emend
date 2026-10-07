@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.5
+
 - The Vim/Neovim picker now shows ordinary files while indexing runs in the
   background, then refreshes the current query automatically when ready.
 - Fixed flow analysis across exception handlers, sanitizers, and surviving
