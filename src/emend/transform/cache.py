@@ -85,6 +85,43 @@ def _get_worktree_id(project_root: str) -> str:
     return str(AnalysisStore.open(project_root).project_root)
 
 
+def _drop_cache_columns(conn: sqlite3.Connection, table: str, obsolete: set[str]) -> None:
+    """Rebuild an owned cache table without requiring SQLite 3.35 DROP COLUMN."""
+    columns = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    kept = [column for column in columns if column[1] not in obsolete]
+    if len(kept) == len(columns):
+        return
+
+    names = ['"' + column[1].replace('"', '""') + '"' for column in kept]
+    definitions = [
+        f"{name} {column[2]}"
+        + (" NOT NULL" if column[3] else "")
+        + (f" DEFAULT {column[4]}" if column[4] is not None else "")
+        for name, column in zip(names, kept)
+    ]
+    keys = [name for _, name in sorted(
+        (column[5], name) for name, column in zip(names, kept) if column[5]
+    )]
+    if keys:
+        definitions.append(f"PRIMARY KEY ({', '.join(keys)})")
+    projection = ", ".join(["rowid", *names])
+    # Preserve rowids for FTS joins, and leave the original table intact if
+    # copying fails. The savepoint also works inside the owner's transaction.
+    conn.execute("SAVEPOINT cache_columns")
+    try:
+        conn.execute(f"CREATE TABLE {table}_new ({', '.join(definitions)})")
+        conn.execute(
+            f"INSERT INTO {table}_new ({projection}) SELECT {projection} FROM {table}"
+        )
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+    except BaseException:
+        conn.execute("ROLLBACK TO cache_columns")
+        raise
+    finally:
+        conn.execute("RELEASE cache_columns")
+
+
 def _init_cache_schema(conn: sqlite3.Connection) -> None:
     """Create all cache tables and indexes if they don't exist (idempotent).
 
@@ -111,9 +148,7 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
         ("file_manifest", {"mtime_ns", "size", "indexed_at"}),
         ("venv_files", {"content_hash"}),
     ):
-        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        for column in sorted(columns & obsolete):
-            conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        _drop_cache_columns(conn, table, obsolete)
 
     qn_columns = {
         row[1] for row in conn.execute("PRAGMA table_info(qn_index)").fetchall()

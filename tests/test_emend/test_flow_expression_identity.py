@@ -76,3 +76,14 @@ def test_source_wrapping_resolved_sanitizer_starts_clean(tmp_path):
         sanitizers=[FlowSanitizer("clean($X)", "value")],
     )
     assert evaluate_flow_config(config, [str(path)], project_path=str(tmp_path)) == []
+
+
+def test_enclosed_uninvoked_callback_sanitizer_does_not_clean_source(tmp_path):
+    path = tmp_path / "app.ts"
+    path.write_text("const value = request(() => { sanitize(input); }, other, another); sink(value);")
+    config = CompiledFlowConfig(
+        sources=[FlowSource("request($...ARGS)", "value")],
+        sinks=[FlowSink("sink($X)", "value", "unsafe")],
+        sanitizers=[FlowSanitizer("sanitize($X)", "value")],
+    )
+    assert evaluate_flow_config(config, [str(path)], language="typescript", project_path=str(tmp_path))

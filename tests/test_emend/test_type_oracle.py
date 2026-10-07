@@ -638,8 +638,9 @@ class TestFileTypeCache:
             assert adapter._get_lsp(tmp_path) is None
         assert client.stop.call_count == 2
 
-    @pytest.mark.parametrize("engine, previous_version", [("pyrefly", 2), ("typescript", 3)])
+    @pytest.mark.parametrize("engine, previous_version", [("pyrefly", 2), ("typescript", 3), ("typescript", 4)])
     def test_result_contract_upgrade_invalidates_cache_views(self, tmp_path, monkeypatch, engine, previous_version):
+        from emend.analysis_store import TYPE_RESULT_VERSION
         from emend.type_oracle import load_cached_file_types
 
         target = tmp_path / "target.py"
@@ -649,7 +650,7 @@ class TestFileTypeCache:
         key = old._file_key(target, tmp_path)
         old._cache.put(key, FileTypes(path=str(target)))
         assert load_cached_file_types(target, project_root=tmp_path).complete
-        monkeypatch.setattr("emend.analysis_store.TYPE_RESULT_VERSION", 4)
+        monkeypatch.setattr("emend.analysis_store.TYPE_RESULT_VERSION", TYPE_RESULT_VERSION)
         current = create_type_oracle(engine, tmp_path)
         assert current._cache.get(key, target) is None
         assert load_cached_file_types(target, project_root=tmp_path) is None
@@ -1431,6 +1432,84 @@ class TestPyreflyAdapterIntegration:
 # ---------------------------------------------------------------------------
 # CLI integration tests
 # ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("complete", [False, True])
+def test_types_cli_distinguishes_failed_inference_from_empty_success(
+    tmp_path, monkeypatch, json_output, complete
+):
+    from types import SimpleNamespace
+    from typer.testing import CliRunner
+    from emend.cli import app
+
+    target = tmp_path / "sample.ts"
+    target.write_text("// no bindings\n")
+    oracle = SimpleNamespace(
+        is_available=lambda: True,
+        infer_file=lambda path: FileTypes(path=str(path), complete=complete),
+    )
+    monkeypatch.setattr("emend.type_oracle.create_type_oracle", lambda **kwargs: oracle)
+    args = ["analyze", "types", str(target), "--engine", "typescript"]
+    if json_output:
+        args.append("--json")
+    result = CliRunner().invoke(app, args)
+    if complete:
+        assert result.exit_code == 0, result.output
+        assert result.stdout.strip() == ("[]" if json_output else "No type information found.")
+    else:
+        assert result.exit_code == 2, result.output
+        assert result.stdout == ""
+        assert "typescript" in result.stderr and str(target) in result.stderr
+        assert "inference failed" in result.stderr
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
+@pytest.mark.parametrize("compiler,diagnostic", [
+    (None, "npm install --save-dev typescript@5.9"),
+    ("module.exports = {version: '7.0.2'};", "Unsupported TypeScript Compiler API"),
+    ("""module.exports = {
+        sys: {fileExists: () => false}, findConfigFile: () => undefined,
+        ScriptTarget: {ES2020: 99}, ModuleKind: {CommonJS: 1},
+        createProgram: () => {throw new Error('compiler crashed');}
+    };""", "compiler crashed"),
+    ("""const identifier = {text: 'value', getStart: () => 0};
+    const source = {getLineAndCharacterOfPosition: () => ({line: 0, character: 0})};
+    module.exports = {
+        sys: {}, findConfigFile: () => undefined,
+        ScriptTarget: {ES2020: 99}, ModuleKind: {CommonJS: 1},
+        createProgram: () => ({getSourceFile: () => source, getTypeChecker: () => ({
+            getSymbolAtLocation: () => {throw new Error('identifier inference crashed');}
+        })}),
+        isIdentifier: node => node === identifier,
+        forEachChild: (node, visit) => {if (node === source) visit(identifier);}
+    };""", "identifier inference crashed"),
+    ("""module.exports = {
+        sys: {}, findConfigFile: () => 'tsconfig.json',
+        ScriptTarget: {ES2020: 99}, ModuleKind: {CommonJS: 1},
+        readConfigFile: () => {throw new Error('config loading crashed');},
+        createProgram: () => ({getSourceFile: () => ({text: ''}), getTypeChecker: () => ({})}),
+        isIdentifier: () => false, forEachChild: () => {}
+    };""", "config loading crashed"),
+])
+def test_types_cli_reports_real_node_compiler_failures(
+    tmp_path, monkeypatch, compiler, diagnostic
+):
+    from typer.testing import CliRunner
+    from emend.cli import app
+
+    target = tmp_path / "sample.ts"
+    target.write_text("const value: string = 'hello';\n")
+    package = tmp_path / "node_modules" / "typescript"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text(json.dumps({"name": "typescript", "main": "index.js"}))
+    if compiler is not None:
+        (package / "index.js").write_text(compiler)
+    monkeypatch.delenv("NODE_PATH", raising=False)
+    result = CliRunner().invoke(app, ["analyze", "types", str(target), "--json"])
+    assert result.exit_code == 2, result.output
+    assert result.stdout == ""
+    assert diagnostic in result.stderr and str(target) in result.stderr
+
 
 @pytest.mark.skipif(not _has_pyrefly, reason="pyrefly not installed")
 class TestTypesCLI:
@@ -2435,6 +2514,31 @@ class TestTypeScriptAdapterIntegration:
         if result.returncode:
             pytest.skip("TypeScript dependency is not installed")
         return Path(result.stdout.strip()).parent
+
+    @pytest.mark.parametrize("config,diagnostic", [
+        ('{"compilerOptions": {"unknownOption": true}}', "Unknown compiler option"),
+        ('{"compilerOptions":', "expected"),
+    ])
+    def test_invalid_configuration_is_failed_and_retryable(self, tmp_path, config, diagnostic):
+        target = tmp_path / "sample.ts"
+        target.write_text("const value: string = 'hello';\n")
+        config_path = tmp_path / "tsconfig.json"
+        config_path.write_text(config)
+        adapter = TypeScriptAdapter(db_path=None)
+        failed = adapter.infer_file(target, project_root=tmp_path)
+        assert not failed.complete and diagnostic in failed.error
+        assert len(adapter._cache) == 0
+        config_path.write_text("{}")
+        recovered = adapter.infer_file(target, project_root=tmp_path)
+        assert recovered.complete and recovered.types_for_name("value")
+
+    def test_requested_source_not_loaded_is_failed_inference(self, tmp_path):
+        target = tmp_path / "sample.txt"
+        target.write_text("const value = 'hello';\n")
+        adapter = TypeScriptAdapter(db_path=None)
+        result = adapter.infer_file(target, project_root=tmp_path)
+        assert not result.complete and "could not load" in result.error
+        assert len(adapter._cache) == 0
 
     def test_simple_variable(self, tmp_path, monkeypatch, require_typescript):
         modules = tmp_path / "node_modules"

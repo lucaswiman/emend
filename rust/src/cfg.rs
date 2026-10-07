@@ -4,7 +4,7 @@
 //! Language-specific tree-sitter node types and field names are driven by
 //! the `[cfg]` section of the language config TOML (see [`CfgSection`]).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use crate::scope::{config_for_ext, CfgSection, LanguageConfig};
 
 // ---------------------------------------------------------------------------
@@ -361,11 +361,11 @@ impl<'a> CfgBuilder<'a> {
         });
     }
 
-    fn route_finally_jumps(&mut self, region: tree_sitter::Node, finalizer: BlockId) -> Vec<(BlockId, EdgeKind, u32)> {
+    fn route_finally_jumps(&mut self, region: tree_sitter::Node, finalizer: BlockId, jump_start: usize) -> Vec<(BlockId, EdgeKind, u32)> {
         let inside = |block: &BasicBlock| region.start_byte() <= block.start_byte
             && block.start_byte < region.end_byte();
         let mut continuations = Vec::new();
-        for &index in &self.finally_jumps {
+        for &index in &self.finally_jumps[jump_start..] {
             let edge = &mut self.edges[index];
             if inside(&self.blocks[edge.from.0 as usize]) && !inside(&self.blocks[edge.to.0 as usize]) {
                 let reason = continuations.len() as u32 + 2;
@@ -1218,6 +1218,7 @@ impl<'a> CfgBuilder<'a> {
 
     /// Python-style try: except_clause / else_clause / finally_clause as children.
     fn walk_try_children(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
+        let jump_start = self.finally_jumps.len();
         let join = self.new_block_from_node(node);
         let mut all_terminated = true;
 
@@ -1351,7 +1352,7 @@ impl<'a> CfgBuilder<'a> {
                         self.add_edge(end, fin_block, EdgeKind::Finally);
                         self.tag_finally_edge(fin_block, 0, true);
                     }
-                    let continuations = self.route_finally_jumps(node, fin_block);
+                    let continuations = self.route_finally_jumps(node, fin_block, jump_start);
                     let exception_start = self.edges.len();
                     if let Some(protected) = except_target.or(try_entry) {
                         for region in except_clauses.iter().copied().chain(else_clause).chain(
@@ -1384,6 +1385,7 @@ impl<'a> CfgBuilder<'a> {
 
     /// TS-style try: handler/finalizer as named fields.
     fn walk_try_fields(&mut self, node: tree_sitter::Node, current: BlockId) -> Option<BlockId> {
+        let jump_start = self.finally_jumps.len();
         let join = self.new_block_from_node(node);
         let mut all_terminated = true;
 
@@ -1448,7 +1450,7 @@ impl<'a> CfgBuilder<'a> {
                     self.add_edge(end, fin_block, EdgeKind::Finally);
                         self.tag_finally_edge(fin_block, 0, true);
                 }
-                let continuations = self.route_finally_jumps(node, fin_block);
+                let continuations = self.route_finally_jumps(node, fin_block, jump_start);
                 let exception_start = self.edges.len();
                 if let Some(protected) = handler_entry.or(try_entry) {
                     let region = node.child_by_field_name(catch_field)
@@ -1771,10 +1773,55 @@ fn module_cfg(root: tree_sitter::Node, source: &[u8], cfg: &CfgSection) -> Funct
     }
 }
 
+/// Containment queries over immutable CFG spans, preserving original tie order.
+struct BlockSpans {
+    spans: Vec<(usize, usize, (usize, usize), u32)>,
+    max_end: Vec<usize>,
+}
+
+impl BlockSpans {
+    fn new(mut spans: Vec<(usize, usize, (usize, usize), u32)>) -> Self {
+        spans.sort_unstable_by_key(|row| row.0);
+        let mut index = Self { max_end: vec![0; spans.len() * 4], spans };
+        if !index.spans.is_empty() { index.build(0, 0, index.spans.len()); }
+        index
+    }
+
+    fn build(&mut self, node: usize, left: usize, right: usize) -> usize {
+        let end = if right - left == 1 { self.spans[left].1 } else {
+            let middle = (left + right) / 2;
+            self.build(node * 2 + 1, left, middle).max(self.build(node * 2 + 2, middle, right))
+        };
+        self.max_end[node] = end;
+        end
+    }
+
+    fn containing(&self, start: usize, end: usize) -> Option<u32> {
+        fn visit(index: &BlockSpans, node: usize, left: usize, right: usize,
+                 start: usize, end: usize, best: &mut Option<((usize, usize), u32)>) {
+            if index.max_end[node] < end || index.spans[left].0 > start { return; }
+            if right - left == 1 {
+                let (_, _, rank, block) = index.spans[left];
+                if best.is_none_or(|(previous, _)| rank < previous) { *best = Some((rank, block)); }
+            } else {
+                let middle = (left + right) / 2;
+                visit(index, node * 2 + 1, left, middle, start, end, best);
+                visit(index, node * 2 + 2, middle, right, start, end, best);
+            }
+        }
+        let mut best = None;
+        if !self.spans.is_empty() { visit(self, 0, 0, self.spans.len(), start, end, &mut best); }
+        best.map(|(_, block)| block)
+    }
+}
+
 struct FlowExtractor<'a> {
     source: &'a [u8],
     lang: &'a LanguageConfig,
     cfg: &'a FunctionCfg,
+    statement_spans: BlockSpans,
+    condition_spans: BlockSpans,
+    block_spans: BlockSpans,
     func_id: String,
     func_name: String,
     func_start: usize,
@@ -1822,17 +1869,10 @@ impl<'a> FlowExtractor<'a> {
 
     fn block(&self, node: tree_sitter::Node) -> u32 {
         let (start, end) = (node.start_byte(), node.end_byte());
-        let statement = self.cfg.blocks.iter().flat_map(|block| {
-            block.statements.iter().map(move |&(s, e)| (e.saturating_sub(s), block.id.0, s, e))
-        }).filter(|(_, _, s, e)| *s <= start && end <= *e).min_by_key(|row| row.0);
-        if let Some((_, id, _, _)) = statement { return id; }
-        if let Some(edge) = self.cfg.edges.iter().find(|edge| {
-            edge.condition.is_some_and(|(s, e)| s <= start && end <= e)
-        }) { return edge.from.0; }
-        self.cfg.blocks.iter()
-            .filter(|block| block.start_byte <= start && end <= block.end_byte)
-            .min_by_key(|block| block.end_byte.saturating_sub(block.start_byte))
-            .map(|block| block.id.0).unwrap_or(self.cfg.entry.0)
+        self.statement_spans.containing(start, end)
+            .or_else(|| self.condition_spans.containing(start, end))
+            .or_else(|| self.block_spans.containing(start, end))
+            .unwrap_or(self.cfg.entry.0)
     }
 
     fn emit(&mut self, node: tree_sitter::Node, role: &str, path: Option<String>, call_id: Option<u32>, arg_index: Option<u32>) -> u32 {
@@ -1947,9 +1987,8 @@ impl<'a> FlowExtractor<'a> {
         // Calls expose the full structural callee path for project-level
         // linking; ordinary value events keep ``var`` as the root binding.
         call_event.var = Some(callee.clone());
-        for event in &mut self.events {
-            if arg_events.contains(&event.id) { event.call_id = Some(call); }
-        }
+        let first_id = self.events[0].id;
+        for id in &arg_events { self.events[(*id - first_id) as usize].call_id = Some(call); }
         // Callee/argument evaluation is sequenced by control edges. It is not
         // an unconditional value transfer through a known function: resolved
         // calls flow through param_in/return_out instead.
@@ -2049,18 +2088,13 @@ impl<'a> FlowExtractor<'a> {
     }
 
     fn control_edges(&mut self) {
-        let mut by_block: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
-        for event in &self.events { by_block.entry(event.block).or_default().push((event.ordinal, event.id)); }
-        let mut additions = Vec::new();
-        for values in by_block.values_mut() {
-            values.sort_unstable();
-            additions.extend(values.windows(2).map(|p| FlowEdge { from: p[0].1, to: p[1].1, kind: "control".into() }));
-        }
         type Target = (u32, Vec<FinallyTransition>);
-        let mut successors: HashMap<u32, Vec<Target>> = self.cfg.blocks.iter().map(|b| {
-            (b.id.0, self.cfg.edges.iter().filter(|edge| edge.from == b.id && edge.kind != EdgeKind::Exception)
-             .map(|edge| (edge.to.0, edge.finally_transitions.clone())).collect())
-        }).collect();
+        let mut successors: Vec<Vec<Target>> = vec![Vec::new(); self.cfg.blocks.len()];
+        for edge in &self.cfg.edges {
+            if edge.kind != EdgeKind::Exception {
+                successors[edge.from.0 as usize].push((edge.to.0, edge.finally_transitions.clone()));
+            }
+        }
         let regions: Vec<_> = self.cfg.edges.iter()
             .filter_map(|edge| edge.protected_range.map(|range| (range, edge)))
             .collect();
@@ -2079,9 +2113,23 @@ impl<'a> FlowExtractor<'a> {
                 let entered = edge.finally_transitions.last().unwrap();
                 for (target, mut actions) in handlers(*start, *end, true) {
                     actions.insert(0, FinallyTransition { entering: false, ..*entered });
-                    successors.entry(resume.0).or_default().push((target, actions));
+                    successors[resume.0 as usize].push((target, actions));
                 }
             }
+        }
+        // Retain empty CFG blocks as neutral occurrences. Collapsing them
+        // enumerates optional finalizer subsets (or creates dense bypass
+        // edges); the evaluator follows the original sparse graph lazily.
+        let occupied: HashSet<_> = self.events.iter().map(|event| event.block).collect();
+        for block in &self.cfg.blocks {
+            if !occupied.contains(&block.id.0) { self.emit_control(block.id, "control"); }
+        }
+        let mut by_block: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+        for event in &self.events { by_block.entry(event.block).or_default().push((event.ordinal, event.id)); }
+        let mut additions = Vec::new();
+        for values in by_block.values_mut() {
+            values.sort_unstable();
+            additions.extend(values.windows(2).map(|p| FlowEdge { from: p[0].1, to: p[1].1, kind: "control".into() }));
         }
         // The public CFG shares an exit block for return and throw, but a
         // throwing occurrence can only take an exceptional continuation.
@@ -2089,7 +2137,7 @@ impl<'a> FlowExtractor<'a> {
             .map(|event| event.id).collect();
         let mut exits: Vec<(u32, Vec<Target>)> = by_block.iter().filter_map(|(&block, values)| {
             values.last().filter(|(_, last)| !throws.contains(last))
-                .map(|&(_, last)| (last, successors.get(&block).cloned().unwrap_or_default()))
+                .map(|&(_, last)| (last, successors[block as usize].clone()))
         }).collect();
         for event in &self.events {
             if matches!(event.role.as_str(), "call" | "throw" | "use" | "evaluate") {
@@ -2097,58 +2145,15 @@ impl<'a> FlowExtractor<'a> {
                 if !targets.is_empty() { exits.push((event.id, targets)); }
             }
         }
-        // Canonicalize transitions through empty blocks. Each scope is an
-        // independent pending reason; a balanced empty finalizer clears it.
-        // This bounds empty-loop traversal without dropping distinct reasons.
-        let compose = |actions: Vec<FinallyTransition>| -> Option<Vec<FinallyTransition>> {
-            let mut scopes = std::collections::BTreeMap::new();
-            for action in actions {
-                let state = scopes.entry(action.scope).or_insert((None, None, false));
-                if action.entering {
-                    state.1 = Some(action.reason);
-                } else {
-                    if action.reason != u32::MAX {
-                        if state.2 && state.1.is_some_and(|reason| reason != action.reason) { return None; }
-                        if !state.2 { state.0 = Some(action.reason); }
-                    }
-                    state.1 = None;
-                }
-                state.2 = true;
-            }
-            let mut result = Vec::new();
-            for (scope, (required, current, _)) in scopes {
-                if let Some(reason) = required {
-                    result.push(FinallyTransition { scope, reason, entering: false });
-                }
-                if let Some(reason) = current {
-                    result.push(FinallyTransition { scope, reason, entering: true });
-                } else if required.is_none() {
-                    result.push(FinallyTransition { scope, reason: u32::MAX, entering: false });
-                }
-            }
-            Some(result)
-        };
         for (last, targets) in exits {
-            let mut queue: VecDeque<Target> = targets.into();
-            let mut seen = HashSet::new();
-            while let Some((next, actions)) = queue.pop_front() {
-                let Some(actions) = compose(actions) else { continue; };
-                if !seen.insert((next, actions.clone())) { continue; }
-                if let Some(&(_, first)) = by_block.get(&next).and_then(|v| v.first()) {
-                    let mut kind = String::from("control");
-                    for action in actions {
-                        let operation = if action.entering { "enter" }
-                            else if action.reason == u32::MAX { "clear" } else { "resume" };
-                        kind.push_str(&format!(";{},{},{}", operation, action.scope, action.reason));
-                    }
-                    additions.push(FlowEdge { from: last, to: first, kind });
-                } else if let Some(more) = successors.get(&next) {
-                    queue.extend(more.iter().map(|(target, extra)| {
-                        let mut combined = actions.clone();
-                        combined.extend(extra);
-                        (*target, combined)
-                    }));
+            for (next, actions) in targets {
+                let first = by_block[&next][0].1;
+                let mut kind = String::from("control");
+                for action in actions {
+                    let operation = if action.entering { "enter" } else { "resume" };
+                    kind.push_str(&format!(";{},{},{}", operation, action.scope, action.reason));
                 }
+                additions.push(FlowEdge { from: last, to: first, kind });
             }
         }
         self.edges.extend(additions);
@@ -2161,11 +2166,35 @@ impl<'a> FlowExtractor<'a> {
         use std::rc::Rc;
         let indices: HashMap<_, _> = self.events.iter().enumerate().map(|(i, event)| (event.id, i)).collect();
         let mut successors = vec![Vec::new(); self.events.len()];
-        let mut predecessors = vec![Vec::new(); self.events.len()];
         for edge in self.edges.iter().filter(|edge| edge.kind == "control" || edge.kind.starts_with("control;")) {
-            let (from, to) = (indices[&edge.from], indices[&edge.to]);
-            successors[from].push(to);
-            predecessors[to].push(from);
+            successors[indices[&edge.from]].push(indices[&edge.to]);
+        }
+        for targets in &mut successors { targets.sort_unstable(); targets.dedup(); }
+        // Reaching definitions only observe reads and binding writes. Bypass
+        // single-successor evaluations/empty joins in this projection, while
+        // retaining every original occurrence in the public control graph.
+        let transparent: Vec<_> = self.events.iter().enumerate().map(|(i, event)|
+            successors[i].len() == 1 && !Self::is_def(event) && event.role != "use").collect();
+        let mut redirect = vec![None; self.events.len()];
+        for start in 0..self.events.len() {
+            if redirect[start].is_some() { continue; }
+            let mut chain = Vec::new();
+            let mut current = start;
+            while redirect[current].is_none() && transparent[current] {
+                redirect[current] = Some(start);
+                chain.push(current);
+                current = successors[current][0];
+            }
+            let target = redirect[current].unwrap_or(current);
+            redirect[current] = Some(target);
+            for node in chain { redirect[node] = Some(target); }
+        }
+        let mut predecessors = vec![Vec::new(); self.events.len()];
+        for (from, targets) in successors.iter_mut().enumerate() {
+            if redirect[from] != Some(from) { targets.clear(); continue; }
+            for target in targets.iter_mut() { *target = redirect[*target].unwrap(); }
+            targets.sort_unstable(); targets.dedup();
+            for &target in targets.iter() { predecessors[target].push(from); }
         }
         // Collapse straight-line event chains before dataflow. Exceptional
         // exits split chains at the evaluation, while large ordinary blocks
@@ -2173,7 +2202,7 @@ impl<'a> FlowExtractor<'a> {
         let mut owner = vec![usize::MAX; self.events.len()];
         let mut segments = Vec::new();
         for start in 0..self.events.len() {
-            if owner[start] != usize::MAX { continue; }
+            if owner[start] != usize::MAX || redirect[start] != Some(start) { continue; }
             let mut segment = Vec::new();
             let mut current = start;
             while owner[current] == usize::MAX {
@@ -2199,15 +2228,39 @@ impl<'a> FlowExtractor<'a> {
         // instead of copying a large environment at every possible throw.
         let mut incoming = vec![Rc::new(State::new()); segments.len()];
         let mut outgoing = incoming.clone();
+        let mut segment_successors = vec![Vec::new(); segments.len()];
+        for (target, sources) in incoming_segments.iter().enumerate() {
+            for &source in sources { segment_successors[source].push(target); }
+        }
+        // Process forward paths before their joins. Synthetic empty blocks
+        // are appended after extraction, so event order is not CFG order.
+        let mut order = Vec::new();
+        let mut visited = vec![false; segments.len()];
+        for root in 0..segments.len() {
+            if visited[root] { continue; }
+            let mut stack = vec![(root, false)];
+            let mut finished = Vec::new();
+            while let Some((node, returning)) = stack.pop() {
+                if returning { finished.push(node); continue; }
+                if visited[node] { continue; }
+                visited[node] = true;
+                stack.push((node, true));
+                for &target in &segment_successors[node] { stack.push((target, false)); }
+            }
+            order.extend(finished.into_iter().rev());
+        }
         let mut changed = true;
         while changed {
             changed = false;
-            for (index, segment) in segments.iter().enumerate() {
-                let mut state = incoming_segments[index].iter().next()
-                    .map(|&pred| outgoing[pred].clone()).unwrap_or_else(|| Rc::new(State::new()));
+            for &index in &order {
+                let segment = &segments[index];
+                let mut state = if incoming_segments[index].len() == 1 {
+                    outgoing[*incoming_segments[index].iter().next().unwrap()].clone()
+                } else { incoming[index].clone() };
                 for &pred in &incoming_segments[index] {
                     if !Rc::ptr_eq(&state, &outgoing[pred]) {
                         for (name, defs) in outgoing[pred].iter() {
+                            if state.get(name).is_some_and(|current| defs.is_subset(current)) { continue; }
                             Rc::make_mut(&mut state).entry(name.clone()).or_default().extend(defs);
                         }
                     }
@@ -2229,7 +2282,8 @@ impl<'a> FlowExtractor<'a> {
             for &i in segment {
                 let event = &self.events[i];
                 if matches!(event.role.as_str(), "use" | "mutation") {
-                    for name in [Self::binding(event), event.var.as_deref()].into_iter().flatten() {
+                    let binding = Self::binding(event);
+                    for name in binding.into_iter().chain(event.var.as_deref().filter(|&name| Some(name) != binding)) {
                         for &def in state.get(name).into_iter().flatten() {
                             additions.push(FlowEdge { from: def, to: event.id, kind: "reaching".into() });
                         }
@@ -2244,20 +2298,38 @@ impl<'a> FlowExtractor<'a> {
     }
 
     fn emit_completion(&mut self, body: tree_sitter::Node, role: &str, block: BlockId) -> u32 {
-        let id = self.emit(body, role, None, None, None);
+        let id = self.emit_control(block, role);
         let event = self.events.last_mut().unwrap();
-        event.block = block.0;
-        event.text.clear();
         event.start_byte = body.end_byte();
+        event.end_byte = body.end_byte();
         event.start_line = body.end_position().row as u32;
+        event.end_line = event.start_line;
         event.start_col = body.end_position().column as u32;
+        event.end_col = event.start_col;
+        id
+    }
+
+    fn emit_control(&mut self, block: BlockId, role: &str) -> u32 {
+        let id = *self.next_id;
+        *self.next_id += 1;
+        let position = &self.cfg.blocks[block.0 as usize];
+        self.events.push(FlowEvent {
+            id, func_id: self.func_id.clone(), func_name: self.func_name.clone(),
+            func_start: self.func_start, role: role.into(), var: None, access_path: None,
+            block: block.0, start_byte: position.start_byte, end_byte: position.start_byte,
+            start_line: position.start_line, end_line: position.start_line,
+            start_col: 0, end_col: 0, ordinal: self.ordinal,
+            call_id: None, arg_index: None, arg_name: None, text: String::new(),
+        });
+        self.ordinal += 1;
         id
     }
 
     fn finish(mut self) -> (Vec<FlowEvent>, Vec<FlowEdge>, Vec<CallRecord>) {
-        self.control_edges(); self.reaching_edges();
+        self.control_edges();
         let mut seen = HashSet::new();
         self.edges.retain(|e| seen.insert((e.from, e.to, e.kind.clone())));
+        self.reaching_edges();
         (self.events, self.edges, self.calls)
     }
 }
@@ -2270,8 +2342,17 @@ fn extract_scope(
     let func_id = format!("{}@{}", func_name, func_start);
     let mut extractor = FlowExtractor {
         source, lang, cfg, func_id, func_name, func_start, next_id,
+        statement_spans: BlockSpans::new(cfg.blocks.iter().flat_map(|block|
+            block.statements.iter().map(move |&(start, end)| (start, end, block.id.0)))
+            .enumerate().map(|(order, (start, end, block))|
+                (start, end, (end.saturating_sub(start), order), block)).collect()),
+        condition_spans: BlockSpans::new(cfg.edges.iter().enumerate().filter_map(|(order, edge)|
+            edge.condition.map(|(start, end)| (start, end, (order, 0), edge.from.0))).collect()),
+        block_spans: BlockSpans::new(cfg.blocks.iter().enumerate().map(|(order, block)|
+            (block.start_byte, block.end_byte, (block.end_byte.saturating_sub(block.start_byte), order), block.id.0)).collect()),
         ordinal: 0, events: Vec::new(), edges: Vec::new(), calls: Vec::new(),
     };
+    extractor.emit_control(cfg.entry, "function_entry");
     if let Some(function) = function { extractor.parameters(function); }
     extractor.walk(body);
     // Each return completes only after its finalizers. A nested return may be
@@ -2350,8 +2431,6 @@ pub fn build_analysis_from_tree(
             edges.push(FlowEdge { from: ret, to: call.result, kind: "call_return".into() });
         }
     }
-    let mut seen = HashSet::new();
-    edges.retain(|e| seen.insert((e.from, e.to, e.kind.clone())));
     (cfgs, FlowFacts { events, edges })
 }
 

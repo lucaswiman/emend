@@ -31,6 +31,19 @@ emend ships with first-class support for three languages:
      - Symbols, patterns, scope resolution, ``///`` doc comment handling,
        ``use`` import extraction, ``target/`` environment lookup.
 
+TypeScript Type Inference
+-------------------------
+
+Inferred types require Node.js and a project-local TypeScript compiler with the
+JavaScript Compiler API. TypeScript 5.9 is the verified version; install it with
+``npm install --save-dev typescript@5.9``. TypeScript 7 support is tracked in
+`issue #284 <https://github.com/lucaswiman/emend/issues/284>`_. This restriction
+applies to type inference; structural search and parsing use tree-sitter.
+
+``emend analyze types`` exits with an error when inference fails, including when
+the compiler cannot load or exposes an incompatible API. Successful analysis of
+a file without type bindings still produces an empty result.
+
 Architecture Overview
 ---------------------
 

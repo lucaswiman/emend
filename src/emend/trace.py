@@ -281,6 +281,8 @@ def _project_summaries(
 
     sink_rows: list[tuple[CompiledFlowRule, Any, Any]] = []
     pairs = list(contents.items())
+    from emend.checks.flow import _EventIndex
+    event_indices = {path: _EventIndex.build(rows) for path, rows in by_actual.items()}
     match_cache: dict[tuple[Any, ...], list[Any]] = {}
     for rule in rules:
         for endpoint in rule.sinks:
@@ -288,7 +290,7 @@ def _project_summaries(
                 sink_rows.extend(
                     (rule, endpoint, match)
                     for match in _resolve_endpoints(
-                        endpoint, "sink", pairs, by_actual, actual_to_stored, language,
+                        endpoint, "sink", pairs, event_indices, actual_to_stored, language,
                         match_cache,
                     )
                 )

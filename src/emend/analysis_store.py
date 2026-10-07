@@ -27,9 +27,9 @@ from emend.symbol_projection import SymbolInfo, _symbol_info_view
 from emend.sqlite_writer import SQLiteWriter
 
 
-EXTRACTION_ARTIFACT_VERSION = "21"
+EXTRACTION_ARTIFACT_VERSION = "22"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
-TYPE_RESULT_VERSION = 4  # All adapters publish UTF-8 byte columns, including TypeScript.
+TYPE_RESULT_VERSION = 5  # FileTypes now carries failure diagnostics.
 logger = logging.getLogger(__name__)
 
 def collect_symbol_info(filepath: Path, source: str) -> list[SymbolInfo]:
@@ -70,6 +70,7 @@ class AnalysisStore:
         self._artifact_connection: sqlite3.Connection | None = None
         self._reader_connections: set[sqlite3.Connection] = set()
         self._connection_lock = threading.RLock()
+        self._schema_initializers = set()
         self._symbols_lock = threading.RLock()
         self._writers: dict[bool, SQLiteWriter] = {}
         self._closing = False
@@ -104,10 +105,6 @@ class AnalysisStore:
                 symbols = None
                 try:
                     conn = self.artifact_connection()
-                    self.write(lambda db: db.execute(
-                        "CREATE TABLE IF NOT EXISTS symbol_projection "
-                        "(identity TEXT PRIMARY KEY, payload BLOB NOT NULL)"
-                    ).close(), artifacts=True)
                     from emend.language_registry import config_identity
                     config = config_identity(detect_language(f"file.{ext}") or "python")
                     identity = repr(("4", EXTRACTION_ARTIFACT_VERSION, key, config))
@@ -167,10 +164,10 @@ class AnalysisStore:
             if self._connection is None:
                 self.ensure_cache_directory()
                 self._connection = self._read_connection(self.db_path)
-            conn = self._connection
-        if schema_initializer is not None:
-            self.write(schema_initializer)
-        return conn
+            if schema_initializer is not None and schema_initializer not in self._schema_initializers:
+                self.write(schema_initializer)
+                self._schema_initializers.add(schema_initializer)
+            return self._connection
 
     @staticmethod
     def _read_connection(path):
@@ -281,6 +278,7 @@ class AnalysisStore:
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None
+                self._schema_initializers.clear()
             if self._artifact_connection is not None:
                 self._artifact_connection.close()
                 self._artifact_connection = None
@@ -516,13 +514,15 @@ class AnalysisStore:
         """Return an owner-held connection to the shared artifact database."""
         with self._connection_lock:
             if self._artifact_connection is None:
-                self._artifact_connection = self._read_connection(self.artifact_path)
                 def initialize(db):
+                    db.execute("CREATE TABLE IF NOT EXISTS symbol_projection "
+                               "(identity TEXT PRIMARY KEY, payload BLOB NOT NULL)")
                     db.execute("CREATE TABLE IF NOT EXISTS dependency_import_artifact "
                                "(identity TEXT PRIMARY KEY, payload BLOB NOT NULL)")
                     db.execute("CREATE TABLE IF NOT EXISTS source_artifact "
                                "(content_hash TEXT PRIMARY KEY, payload BLOB NOT NULL)")
                 self.write(initialize, artifacts=True)
+                self._artifact_connection = self._read_connection(self.artifact_path)
             return self._artifact_connection
 
     def _extract_revisions(

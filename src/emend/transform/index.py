@@ -71,22 +71,31 @@ def _get_cached_qnames(
         return None
 
 
+def _qn_cache_markers(conn: sqlite3.Connection, paths) -> set[tuple[str, bytes]]:
+    """Read current QN markers for resolved paths without per-file queries."""
+    paths = list(dict.fromkeys(paths))
+    cached_qn = set()
+    try:
+        # Stay below SQLite's historical variable limit. Each path's current
+        # QN marker replaces older revisions in the same transaction.
+        for offset in range(0, len(paths), 900):
+            batch = paths[offset:offset + 900]
+            rows = conn.execute(
+                "SELECT file_path, hash FROM qn_index WHERE file_path IN ("
+                + ",".join("?" for _ in batch) + ")", batch,
+            )
+            cached_qn.update(rows)
+    except sqlite3.Error:
+        logger.debug("qn_index cache pre-check query failed", exc_info=True)
+    return cached_qn
+
+
 def _check_cache_hits(
     conn: sqlite3.Connection, file_revisions: list[tuple[str, bytes]]
 ) -> set[tuple[str, bytes]]:
     """QN markers and derived rows are committed together; probe only markers."""
-    cached_qn: set[tuple[str, bytes]] = set()
-    try:
-        for file_path, content_hash in file_revisions:
-            resolved = str(Path(file_path).resolve())
-            if conn.execute(
-                "SELECT 1 FROM qn_index WHERE file_path = ? AND hash = ?",
-                (resolved, content_hash),
-            ).fetchone() is not None:
-                cached_qn.add((resolved, content_hash))
-    except sqlite3.Error:
-        logger.debug("qn_index cache pre-check query failed", exc_info=True)
-    return cached_qn
+    wanted = {(str(Path(path).resolve()), digest) for path, digest in file_revisions}
+    return _qn_cache_markers(conn, (path for path, _ in wanted)) & wanted
 
 
 def _write_index_rows(
@@ -138,7 +147,7 @@ def _write_index_rows(
             )
 
 
-def _index_batch(args: tuple[str, str, list[tuple[str, str]]]) -> tuple[int, int, int, int, int]:
+def _index_batch(args: tuple[str, str, list[tuple[str, str]]], *, schema_initialized: bool = False) -> tuple[int, int, int, int, int]:
     """Own one connection per worker batch, with one transaction per file."""
     import sqlite3
     from .cache import _initialize_cache_connection
@@ -146,7 +155,10 @@ def _index_batch(args: tuple[str, str, list[tuple[str, str]]]) -> tuple[int, int
     if not args[2]:
         return (0, 0, 0, 0, 0)
     with closing(sqlite3.connect(args[0], timeout=30)) as conn:
-        _initialize_cache_connection(conn)
+        if schema_initialized:
+            conn.execute("PRAGMA synchronous=NORMAL")
+        else:
+            _initialize_cache_connection(conn)
         return _index_batch_rows(args, conn)
 
 
@@ -177,25 +189,23 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
     scope_resolvers = {}
 
     # Compute content hashes up-front so we can bulk-check the cache.
-    file_hashes: list[tuple[bytes, str, str]] = [
-        (hashlib.md5(content.encode(), usedforsecurity=False).digest(), py_file, content)
-        for py_file, content in file_batch
+    file_hashes = [
+        (_scope_cache_hash(hashlib.md5(content.encode(), usedforsecurity=False).digest(),
+                           path, project_root), path, content)
+        for path, content in file_batch
     ]
-    cached_qn = _check_cache_hits(
-        conn, [(path, _scope_cache_hash(digest, path, project_root))
-               for digest, path, _ in file_hashes]
-    )
+    cached_qn = _check_cache_hits(conn, [(path, scope_hash)
+                                       for scope_hash, path, _ in file_hashes])
 
     skipped = 0
     processed = 0
     row_counts = [0] * 3
-    for content_hash, py_file, content in file_hashes:
+    for scope_hash, py_file, content in file_hashes:
         # The QN cache is the core index. The derived tables (symbol_index,
         # reference_index) may legitimately have zero rows for a
         # given file (e.g. a file with only assignments has no symbols) and are
         # written in lockstep with the QN cache, so we re-derive all of them
         # exactly when the QN cache entry is missing.
-        scope_hash = _scope_cache_hash(content_hash, py_file, project_root)
         if (str(Path(py_file).resolve()), scope_hash) in cached_qn:
             skipped += 1
             continue
@@ -1029,20 +1039,26 @@ def warm_caches(
     db_path = str(cache_dir / "parse.db")
     # Pre-create all tables in the main process so workers don't race on schema setup.
     import sqlite3 as _sqlite3
-    try:
-        _init_conn = _sqlite3.connect(db_path)
-        from .cache import _initialize_cache_connection
-        _initialize_cache_connection(_init_conn)
-        _init_conn.close()
-    except _sqlite3.Error:
-        logger.debug("cache schema pre-creation failed", exc_info=True)
-
+    from .cache import _initialize_cache_connection
     indexed_paths = {str(Path(path).resolve()) for path, _ in file_contents}
+    with closing(_sqlite3.connect(db_path)) as conn:
+        _initialize_cache_connection(conn)
+        cached_qn = {}
+        for path, digest in _qn_cache_markers(conn, indexed_paths):
+            cached_qn.setdefault(path, set()).add(digest)
 
     def prepare_file(revision, content):
         if revision.file_path in indexed_paths:
+            if revision.file_path in cached_qn:
+                # Configuration can change after the parent probe, even when
+                # source bytes do not. Match the worker's current scope identity.
+                scope_hash = _scope_cache_hash(hashlib.md5(
+                    content.encode(), usedforsecurity=False,
+                ).digest(), revision.file_path, project_root)
+                if scope_hash in cached_qn[revision.file_path]:
+                    return (0, 0, 1, 0, 0)
             return _index_batch((db_path, project_root,
-                                 [(revision.file_path, content)]))
+                                 [(revision.file_path, content)]), schema_initialized=True)
         return None
 
     def prepared_file(revision, result):

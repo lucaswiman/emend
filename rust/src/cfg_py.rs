@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDict, PyInt, PyList, PyString, PyTuple};
 
 use crate::cfg::{build_cfgs_for_source, build_flow_facts as extract_flow_facts, BlockId, FunctionCfg};
 
@@ -343,10 +343,12 @@ pub fn build_cfgs(source: &str, ext: Option<&str>) -> PyResult<Vec<PyCfg>> {
 pub fn build_flow_facts(py: Python<'_>, source: &str, ext: &str) -> PyResult<PyObject> {
     let facts = extract_flow_facts(source, ext);
     let root = PyDict::new(py);
+    // Extractors append events in their dense, zero-based ID order.
+    let ids: Vec<_> = facts.events.iter().map(|event| PyInt::new(py, event.id)).collect();
     let events = PyList::empty(py);
     for event in facts.events {
         let row = PyDict::new(py);
-        row.set_item("id", event.id)?;
+        row.set_item("id", &ids[event.id as usize])?;
         row.set_item("func_id", event.func_id)?;
         row.set_item("func_name", event.func_name)?;
         row.set_item("func_start", event.func_start)?;
@@ -368,11 +370,13 @@ pub fn build_flow_facts(py: Python<'_>, source: &str, ext: &str) -> PyResult<PyO
         events.append(row)?;
     }
     let edges = PyList::empty(py);
+    let mut kinds = HashMap::new();
     for edge in facts.edges {
         let row = PyDict::new(py);
-        row.set_item("from", edge.from)?;
-        row.set_item("to", edge.to)?;
-        row.set_item("kind", edge.kind)?;
+        row.set_item("from", &ids[edge.from as usize])?;
+        row.set_item("to", &ids[edge.to as usize])?;
+        let kind = kinds.entry(edge.kind).or_insert_with_key(|kind| PyString::new(py, kind));
+        row.set_item("kind", &*kind)?;
         edges.append(row)?;
     }
     root.set_item("events", events)?;

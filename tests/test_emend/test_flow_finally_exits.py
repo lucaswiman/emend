@@ -91,6 +91,19 @@ def test_eventless_finalizer_loop_extraction_terminates():
     emend_core.build_flow_facts("def f():\n    source()\n    while True:\n        try: continue\n        finally: pass\n", "py")
 
 
+@pytest.mark.parametrize("extension", ["py", "ts"])
+@pytest.mark.parametrize("count", [8, 16, 32])
+def test_optional_empty_finalizers_have_linear_control_graph(extension, count):
+    from emend import emend_core
+    source = ("def f():\n    source()\n"
+              + "    if True:\n        try: pass\n        finally: pass\n" * count
+              + "    sink()\n") if extension == "py" else (
+                  "function f() { source();"
+                  + "if (true) { try {} finally {} }" * count + "sink(); }")
+    facts = emend_core.build_flow_facts(source, extension)
+    assert len(facts["edges"]) < 10 * count
+
+
 @pytest.mark.parametrize("callee", [
     "raise ValueError()",
     "try: return source()\nfinally: raise ValueError()",

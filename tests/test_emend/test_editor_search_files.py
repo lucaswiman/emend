@@ -1,4 +1,8 @@
 import pytest
+import os
+import subprocess
+from contextlib import contextmanager
+from pathlib import Path
 from emend.editor_search import EditorSearchEngine, is_fuzzy_subsequence
 
 def test_is_fuzzy_subsequence():
@@ -48,6 +52,66 @@ def test_editor_search_files(tmp_path):
     guide.unlink()
     assert engine.search("guide.txt").items == []
     engine.close()
+
+
+def test_cold_file_scope_applies_before_candidate_limit(tmp_path):
+    for directory, count in [("outside", 250), ("inside", 1)]:
+        folder = tmp_path / directory
+        folder.mkdir()
+        for index in range(count):
+            (folder / f"match{index}.txt").write_text("")
+    engine = EditorSearchEngine(str(tmp_path))
+    try:
+        result = engine.search("match", file_scope="inside")
+        assert [item["file_path"] for item in result.items] == [str(tmp_path / "inside/match0.txt")]
+    finally:
+        engine.close()
+
+
+def test_nested_git_project_inventory_refreshes_on_index_change(tmp_path):
+    project = tmp_path / "nested"
+    project.mkdir()
+    (project / "pyproject.toml").write_text("[project]\nname = 'nested'\nversion = '0.0.0'\n")
+    path = project / "notes.txt"
+    path.write_text("notes")
+    def git(*args):
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+    git("init", "-q")
+    git("add", ".")
+    engine = EditorSearchEngine(str(project))
+    try:
+        assert engine.search("notes.txt").items
+        git("rm", "--cached", "nested/notes.txt")
+        assert path.exists()
+        assert engine.search("notes.txt").items == []
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("mutation", ["create_file", "remove_directory"])
+def test_inventory_changed_during_enumeration_refreshes_next_query(tmp_path, monkeypatch, mutation):
+    directory = tmp_path / "docs"
+    directory.mkdir()
+    path = directory / "later.txt"
+    original = os.scandir
+
+    @contextmanager
+    def changing_scan(folder):
+        with original(folder) as entries:
+            yield entries
+        if mutation == "create_file" and Path(folder) == directory and not path.exists():
+            path.write_text("new file")
+        elif mutation == "remove_directory" and Path(folder) == tmp_path and directory.exists():
+            directory.rmdir()
+
+    monkeypatch.setattr(os, "scandir", changing_scan)
+    engine = EditorSearchEngine(str(tmp_path))
+    try:
+        assert engine.search("later.txt").items == []
+        assert [item["file_path"] for item in engine.search("later.txt").items] == (
+            [str(path)] if mutation == "create_file" else [])
+    finally:
+        engine.close()
 
 
 @pytest.mark.parametrize("cache", ["missing", "empty", "partial"])
