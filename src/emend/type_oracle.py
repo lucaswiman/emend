@@ -414,6 +414,7 @@ class FileTypes:
     _by_position: dict[tuple[int, int], TypeBinding] = field(default_factory=dict, repr=False)
     # Indexed by name for symbol lookup
     _by_name: dict[str, list[TypeBinding]] = field(default_factory=dict, repr=False)
+    error: str | None = None
 
     def build_index(self) -> None:
         """Build positional and name indexes from bindings."""
@@ -1890,25 +1891,33 @@ var filePath = path.resolve(process.argv[2]);
 var projectRoot = process.argv[3] || path.dirname(filePath);
 var ts;
 try { ts = require(require.resolve("typescript", {paths:[projectRoot]})); } catch(e) {
-    process.stderr.write(String(e)); process.exit(1);
+    process.stderr.write("Cannot load the TypeScript Compiler API from " + projectRoot +
+        ". Install a supported compiler: npm install --save-dev typescript@5.9\\n" + String(e));
+    process.exit(1);
+}
+if (!ts.sys || typeof ts.createProgram !== "function") {
+    process.stderr.write("Unsupported TypeScript Compiler API (version " +
+        (ts.version || "unknown") + "). TypeScript 7 support is pending; " +
+        "use npm install --save-dev typescript@5.9 for type inference.\\n");
+    process.exit(1);
 }
 var configPath = ts.findConfigFile(projectRoot, ts.sys.fileExists, "tsconfig.json");
 var options = {target:ts.ScriptTarget.ES2020, module:ts.ModuleKind.CommonJS,
     allowJs:true, noEmit:true, strict:false, skipLibCheck:true};
 if (configPath) {
-    try {
-        var cf = ts.readConfigFile(configPath, ts.sys.readFile);
-        if (cf.config) {
-            var pc = ts.parseJsonConfigFileContent(cf.config, ts.sys, path.dirname(configPath));
-            Object.assign(options, pc.options);
-        }
-    } catch(e) {}
+    var cf = ts.readConfigFile(configPath, ts.sys.readFile);
+    if (cf.error) throw new Error(ts.flattenDiagnosticMessageText(cf.error.messageText, "\\n"));
+    var pc = ts.parseJsonConfigFileContent(cf.config, ts.sys, path.dirname(configPath));
+    if (pc.errors.length) throw new Error(pc.errors.map(function(e) {
+        return ts.flattenDiagnosticMessageText(e.messageText, "\\n");
+    }).join("\\n"));
+    Object.assign(options, pc.options);
 }
 options.noEmit = true;
 var program = ts.createProgram([filePath], options);
 var checker = program.getTypeChecker();
 var sf = program.getSourceFile(filePath);
-if (!sf) { process.stdout.write("[]"); process.exit(0); }
+if (!sf) throw new Error("TypeScript compiler could not load " + filePath);
 var bindings = [];
 var seen = {};
 function visit(node) {
@@ -1917,27 +1926,25 @@ function visit(node) {
         var k = p.line + ":" + p.character;
         if (!seen[k]) {
             seen[k] = true;
-            try {
-                var sym = checker.getSymbolAtLocation(node);
-                if (sym) {
-                    var type = checker.getTypeOfSymbolAtLocation(sym, node);
-                    var s = checker.typeToString(type, node, ts.TypeFormatFlags.NoTruncation);
-                    if (s && s !== "any" && s !== "error") {
-                        var kind = "reference";
-                        var par = node.parent;
-                        if (par && (ts.isVariableDeclaration(par) ||
-                            ts.isFunctionDeclaration(par) || ts.isClassDeclaration(par) ||
-                            ts.isMethodDeclaration(par) || ts.isParameter(par) ||
-                            ts.isPropertyDeclaration(par) || ts.isInterfaceDeclaration(par) ||
-                            ts.isTypeAliasDeclaration(par)) && par.name === node)
-                            kind = "definition";
-                        var col = Buffer.byteLength(sf.text.slice(
-                            sf.getPositionOfLineAndCharacter(p.line, 0), node.getStart(sf)), "utf8") + 1;
-                        bindings.push({name:node.text, line:p.line+1, col_start:col,
-                            col_end:col+Buffer.byteLength(node.getText(sf), "utf8"), type:s, kind:kind});
-                    }
+            var sym = checker.getSymbolAtLocation(node);
+            if (sym) {
+                var type = checker.getTypeOfSymbolAtLocation(sym, node);
+                var s = checker.typeToString(type, node, ts.TypeFormatFlags.NoTruncation);
+                if (s && s !== "any" && s !== "error") {
+                    var kind = "reference";
+                    var par = node.parent;
+                    if (par && (ts.isVariableDeclaration(par) ||
+                        ts.isFunctionDeclaration(par) || ts.isClassDeclaration(par) ||
+                        ts.isMethodDeclaration(par) || ts.isParameter(par) ||
+                        ts.isPropertyDeclaration(par) || ts.isInterfaceDeclaration(par) ||
+                        ts.isTypeAliasDeclaration(par)) && par.name === node)
+                        kind = "definition";
+                    var col = Buffer.byteLength(sf.text.slice(
+                        sf.getPositionOfLineAndCharacter(p.line, 0), node.getStart(sf)), "utf8") + 1;
+                    bindings.push({name:node.text, line:p.line+1, col_start:col,
+                        col_end:col+Buffer.byteLength(node.getText(sf), "utf8"), type:s, kind:kind});
                 }
-            } catch(e) {}
+            }
         }
     }
     ts.forEachChild(node, visit);
@@ -2007,7 +2014,7 @@ class TypeScriptAdapter(TypeOracle):
             path, ft, content_hash, self._current_file_key(path, project_root)
         )
 
-    def _run_tsc(self, path: Path, project_root: Path | None) -> FileTypes | None:
+    def _run_tsc(self, path: Path, project_root: Path | None) -> FileTypes:
         """Run the TypeScript helper script and parse its output."""
         script = self._get_script()
         cwd = str(project_root) if project_root else str(path.parent)
@@ -2018,16 +2025,15 @@ class TypeScriptAdapter(TypeOracle):
                 cmd, capture_output=True, text=True, timeout=60, cwd=cwd,
             )
             if result.returncode != 0 or not result.stdout.strip():
-                logger.debug(
-                    "TypeScript helper returned %d: %s",
-                    result.returncode, result.stderr[:500] if result.stderr else "",
+                error = result.stderr.strip() or (
+                    f"Compiler helper exited with status {result.returncode}."
+                    if result.returncode else "Compiler helper produced no output."
                 )
-                return None
+                return FileTypes(path=str(path), complete=False, error=error)
 
             bindings_data = json.loads(result.stdout)
         except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as exc:
-            logger.debug("TypeScript helper failed: %s", exc)
-            return None
+            return FileTypes(path=str(path), complete=False, error=str(exc))
 
         ft = FileTypes(path=str(path))
         for entry in bindings_data:

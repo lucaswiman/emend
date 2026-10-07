@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- The Vim/Neovim picker now shows ordinary files while indexing runs in the
+  background, then refreshes the current query automatically when ready.
+- Fixed flow analysis across exception handlers, sanitizers, and surviving
+  values, including control flow through `finally` blocks.
+- Large diff selections now use compact intervals instead of one entry per
+  changed line, reducing memory use.
+- Removed unused indexing metadata and SQLite import/DSL caches. Existing
+  cache upgrades preserve editor results and work on SQLite older than 3.35.
+  `index --status` no longer displays the obsolete import-edge count.
+- Type analysis now reports failed inference instead of returning successful
+  empty results. Missing or incompatible TypeScript compilers show an
+  actionable diagnostic; TypeScript 7 support remains pending.
+
 ## 0.5.4
 
 - Fixed virtualenv exclusion during source discovery and stopped `index` from

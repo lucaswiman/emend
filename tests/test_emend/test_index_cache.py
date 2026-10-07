@@ -311,8 +311,46 @@ def test_cache_migration_preserves_editor_rows_and_freshness(tmp_path):
         conn.execute("INSERT INTO venv_files VALUES ('other.py', 6, 7, 8, 9, 10)")
         # Reduced-schema writes must work on upgraded caches too.
         conn.execute("INSERT INTO symbol_index (file_path, name) VALUES ('b.py', 'world')")
+        assert conn.execute("SELECT rowid FROM symbol_index WHERE name='world'").fetchone() == (43,)
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert not tables & {"import_graph", "dsl_symbols", "dsl_links"}
+
+
+def test_cache_migration_copy_failure_preserves_rows_and_outer_transaction(tmp_path):
+    from emend.transform.cache import _drop_cache_columns
+
+    with sqlite3.connect(tmp_path / "parse.db") as conn:
+        conn.executescript("""
+            CREATE TABLE file_manifest (
+                worktree_id TEXT NOT NULL DEFAULT '', path TEXT NOT NULL,
+                content_hash BLOB NOT NULL, scope_hash BLOB, mtime_ns INTEGER,
+                PRIMARY KEY (worktree_id, path));
+            INSERT INTO file_manifest (rowid, path, content_hash, mtime_ns)
+                VALUES (19, 'a.py', x'12', 34);
+            CREATE TABLE index_meta (key TEXT PRIMARY KEY, value TEXT);
+        """)
+        conn.execute("INSERT INTO index_meta VALUES ('pending', 'outer transaction')")
+
+        def deny_data_insert(action, table, *args):
+            return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_INSERT and table != "sqlite_master" else sqlite3.SQLITE_OK
+
+        conn.set_authorizer(deny_data_insert)
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            _drop_cache_columns(conn, "file_manifest", {"mtime_ns"})
+        conn.set_authorizer(None)
+        assert conn.in_transaction
+        assert conn.execute("SELECT rowid, * FROM file_manifest").fetchall() == [
+            (19, "", "a.py", b"\x12", None, 34)
+        ]
+        assert conn.execute("SELECT value FROM index_meta").fetchone() == ("outer transaction",)
+
+        _drop_cache_columns(conn, "file_manifest", {"mtime_ns"})
+        conn.execute("INSERT INTO file_manifest (path, content_hash) VALUES ('b.py', x'56')")
+        assert conn.execute("SELECT rowid, worktree_id FROM file_manifest WHERE path='b.py'").fetchone() == (20, "")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO file_manifest (path, content_hash) VALUES ('a.py', x'78')")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO file_manifest (path) VALUES ('c.py')")
 
 
 class TestIndexBatchCacheHit:

@@ -29,7 +29,7 @@ from emend.sqlite_writer import SQLiteWriter
 
 EXTRACTION_ARTIFACT_VERSION = "21"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
-TYPE_RESULT_VERSION = 4  # All adapters publish UTF-8 byte columns, including TypeScript.
+TYPE_RESULT_VERSION = 5  # FileTypes now carries failure diagnostics.
 logger = logging.getLogger(__name__)
 
 def collect_symbol_info(filepath: Path, source: str) -> list[SymbolInfo]:

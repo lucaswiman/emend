@@ -745,6 +745,9 @@ def types_cmd(
             if selection is not None and not selection.matches(f):
                 continue
             ft = oracle.infer_file(f)
+            if not ft.complete:
+                detail = ft.error or "Check the compiler installation and project configuration."
+                raise ValueError(f"{resolved_engine} type inference failed for {f}: {detail}")
             for b in ft.bindings:
                 if selection is not None and not selection.matches(f, b.line):
                     continue
