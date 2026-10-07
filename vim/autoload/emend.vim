@@ -345,6 +345,27 @@ function! s:process_buf() abort
   endwhile
 endfunction
 
+function! s:poll_indexing(job, timer) abort
+  if a:job is s:job && s:ready && s:indexing
+    call emend#send('indexing_status', {}, function('s:on_indexing_status', [a:job]))
+  endif
+endfunction
+
+function! s:on_indexing_status(job, result) abort
+  if a:job isnot s:job || has_key(a:result, 'error')
+    return
+  endif
+  let s:indexing = get(a:result, 'indexing', 0)
+  if s:indexing
+    call timer_start(500, function('s:poll_indexing', [a:job]))
+  elseif get(a:result, 'indexing_error', '') !=# ''
+    call emend#ui#on_indexing_complete()
+    echohl WarningMsg
+    echom 'emend: ' . a:result.indexing_error
+    echohl None
+  endif
+endfunction
+
 function! s:handle_message(msg) abort
   " Handle server notifications (no id).
   if !has_key(a:msg, 'id') && has_key(a:msg, 'method')
@@ -365,6 +386,7 @@ function! s:handle_message(msg) abort
       endif
     elseif a:msg.method ==# 'indexing_started'
       let s:indexing = 1
+      call timer_start(500, function('s:poll_indexing', [s:job]))
     elseif a:msg.method ==# 'indexing_complete'
       let s:indexing = 0
       call emend#ui#on_indexing_complete()
@@ -437,7 +459,8 @@ function! emend#search(query, ...) abort
   if a:0 > 0
     call extend(l:params, a:1)
   endif
-  call emend#send('search', l:params, function('emend#ui#on_search_result'))
+  let l:Callback = a:0 > 1 ? a:2 : function('emend#ui#on_search_result')
+  call emend#send('search', l:params, l:Callback)
 endfunction
 
 function! emend#file_symbols(file_path, ...) abort

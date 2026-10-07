@@ -171,9 +171,8 @@ Caching and indexing
 --------------------
 
 emend maintains a cache at ``.emend/cache/parse.db`` (SQLite, WAL mode).
-The cache is content-addressed — almost every key is the MD5 of the file's
-source text — so reverting edits within a checkout naturally reuses earlier
-entries.  A ``.gitignore`` and ``.dockerignore`` are auto-generated inside
+Syntax caches reuse content-addressed results; search projections also track
+file paths and module-resolution configuration.  A ``.gitignore`` and ``.dockerignore`` are auto-generated inside
 ``.emend/cache/`` to prevent the database from being checked in.  Each git
 worktree owns its cache because the manifest, editor projections, and fact
 graph describe one mutable source snapshot.
@@ -189,7 +188,7 @@ Overview of cache tables
      - Key
      - Contents
    * - ``qn_index``
-     - content MD5 (BLOB)
+     - (absolute path, content/module-context hash)
      - Compressed-pickled ``set[str]`` of every qualified name in the file.
        Used by ``visit_project()`` to skip files that cannot reference a target
        symbol.
@@ -199,26 +198,19 @@ Overview of cache tables
        re-running pyrefly / pyright / ty on unchanged files.
    * - ``file_manifest``
      - (worktree_id, absolute path)
-     - ``(mtime_ns, size, content_hash, indexed_at)``.  Bridges path-based
-       queries to the content-hash caches and enables incremental re-indexing
-       via stat-only scans. The worktree identifier also keeps metadata valid
-       if a checkout is moved or reused.
+     - ``(content_hash, scope_hash)``. Records the source content and module
+       context used for each file's search projection, scoped to the worktree.
    * - ``symbol_index``
-     - (content_hash, file_path, name, ...)
+     - (file_path, name, ...)
      - One row per symbol definition (function, class, method).  Stores name,
        qualified name, kind, line range, depth, parent, signature, return type,
-       and decorators.  Indexed on ``name``, ``qualified_name``, ``file_path``,
+       and bases.  Indexed on ``name``, ``qualified_name``, ``file_path``,
        and ``kind`` for fast lookups.
    * - ``reference_index``
-     - (content_hash, target_qn, file_path, line, col)
+     - (target_qn, file_path, line, col)
      - One row per reference to a qualified name.  Each row records the
        reference kind (``read``, ``write``, ``import``, ``call``).  Indexed on
        ``target_qn`` for fast find-references.
-   * - ``import_graph``
-     - (content_hash, imported_module)
-     - One row per import statement, mapping the importing file to the dotted
-       module name.  Indexed on ``imported_module`` for fast "files importing X"
-       queries.
    * - ``index_meta``
      - key name (TEXT)
      - Key-value pairs: ``schema_version``, ``git_head:<worktree_id>``,
@@ -228,13 +220,7 @@ Overview of cache tables
 How caches are populated
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-There are two population paths:
-
-**Lazy (on first use).**  ``visit_project()`` populates ``qn_index`` as a
-side-effect of running the Rust ``PyScopeResolver``: after each file is
-resolved, the qualified-name set is stored in the cache.
-
-**Eager (``emend tool index``).**  ``warm_caches()`` scans the project in parallel
+``emend tool index`` calls ``warm_caches()``, which scans the project in parallel
 using a ``ThreadPoolExecutor``.  ``--jobs`` controls file-worker concurrency
 (default: CPU count), not the separate type engine's worker count.  Each
 worker derives and caches a file's search projections:
@@ -242,8 +228,7 @@ worker derives and caches a file's search projections:
 1. **QN resolution** — ``PyScopeResolver`` → compressed pickle → ``qn_index``.
 2. **Symbol collection** — ``emend_core.collect_symbols_from_str()`` →
    ``symbol_index`` rows (name, kind, line, signature, etc.).
-3. **Import extraction** — tree-sitter import bindings → ``import_graph`` rows.
-4. **Reference collection** — ``PyScopeResolver`` reference output →
+3. **Reference collection** — ``PyScopeResolver`` reference output →
    ``reference_index`` rows (target QN, line, column, ref_kind).
 
 All analysis is handled by the Rust tree-sitter backend.
@@ -259,8 +244,8 @@ After extraction supplies the import inventory, the configured type engine
 runs in a separate subprocess, overlapping the remaining fact writes and
 publication.  It stores its results in ``type_cache``.  Indexing also updates:
 
-- **File manifest** — ``stat()`` every indexed file and writes
-  ``(worktree_id, path, mtime_ns, size, content_hash, timestamp)`` to
+- **File manifest** — writes
+  ``(worktree_id, path, content_hash, scope_hash)`` to
   ``file_manifest``.  Each worktree maintains its own set of manifest rows.
 - **Git HEAD** — runs ``git rev-parse HEAD`` and stores the SHA in
   ``index_meta`` under the key ``git_head:<worktree_id>``.
@@ -274,30 +259,15 @@ not precompute duplicate analysis; duplicate detection prepares it on demand.
 How caches are invalidated
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Because caches are keyed on file content (MD5 hash), not file path, they are
-**automatically correct** — if a file's content hasn't changed, its cached data
-is still valid regardless of when it was written.  There is no explicit
-"invalidation" of stale entries; old entries simply become unreachable when no
-file on disk has that content anymore.
+``AnalysisStore`` owns source revision detection. ``_scan_manifest()`` compares
+that snapshot's content hashes and module-resolution context against
+``file_manifest``. Git HEAD changes are reported separately; an unchanged HEAD
+does not imply an unchanged working tree.
 
-For the path-indexed tables (``file_manifest``, ``symbol_index``,
-``reference_index``, ``import_graph``), a three-tier freshness check determines
-which files need re-indexing:
-
-**Tier 1 — Git HEAD (~1 ms).**  ``git rev-parse HEAD`` is compared against the
-stored ``git_head:<worktree_id>`` in ``index_meta``.  If they match, no files
-have changed since the last index in this worktree.
-
-**Tier 2 — File stat (~10–50 ms for 5 000 files).**  Each file is ``stat()``-ed
-and its ``(mtime_ns, size)`` compared against ``file_manifest``.  Files whose
-mtime and size match are unchanged — no I/O required.
-
-**Tier 3 — Content hash (only for stat-mismatched files).**  Files whose mtime
-or size differ are read and hashed.  If the hash matches the manifest (e.g.
-``git stash pop`` touched the mtime but didn't change content), the manifest's
-mtime is updated in-place.  If the hash differs, the file is re-indexed: old
-rows keyed on the previous content hash are deleted from ``symbol_index``,
-``reference_index``, and ``import_graph``, then fresh rows are inserted.
+When a file changes, its QN marker, symbol rows, and reference rows are replaced
+in one transaction, keyed by file path. A module-root configuration change also
+refreshes these projections even if source text is unchanged. Canonical imports
+and other analysis facts are maintained separately in ``facts.db``.
 
 This check is implemented in ``_scan_manifest()`` and exposed through
 ``_ensure_index_fresh()``, which commands call before querying the index.  If
@@ -308,12 +278,12 @@ How caches are cleaned
 ~~~~~~~~~~~~~~~~~~~~~~
 
 emend does **not** aggressively prune old entries.  Content-hash keyed tables
-(``qn_index``, ``type_cache``) accumulate entries across branch switches, which
+such as ``type_cache`` accumulate entries across branch switches, which
 is intentional: switching back to an earlier branch reuses those entries.
 
 Path-indexed rows are kept consistent by the re-index cycle described above:
-when a file's content changes, its old rows (keyed on the previous content
-hash) are deleted before new rows are inserted.  Deleted files are removed from
+when a file's content changes, its old rows (keyed by file path) are deleted
+before new rows are inserted.  Deleted files are removed from
 ``file_manifest`` and their derived rows are cleaned up during
 ``_ensure_index_fresh()``.
 
@@ -329,21 +299,21 @@ To reclaim disk space or force a full rebuild:
    emend tool index
 
 The ``emend tool index --status`` command reports the number of indexed files,
-symbols, import edges, and references, plus how many files are stale.
+symbols, and references, plus how many files are stale. It does not build
+analysis facts to collect these statistics.
 
 Warm-path query acceleration
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-When the index is fresh, several commands bypass full-project scans:
+Editor symbol search and reference lookup use the SQLite search projections.
+Semantic symbol, reference, and import queries use the canonical facts through
+``AnalysisStore``. The old SQLite import and DSL tables are no longer populated;
+DSL commands extract their data on demand.
 
-- ``find --complete <prefix>`` queries ``symbol_index`` with a ``LIKE``
-  prefix match — typically < 5 ms.
-- ``analyze refs`` queries ``reference_index`` by qualified name — typically < 10 ms.
-- ``_files_importing_module()`` checks ``import_graph`` before falling back to
-  the Rust ``files_importing_module`` scan.
-
-All warm paths fall back transparently to their original (cold) implementations
-when the index is unavailable or stale.
+Existing SQLite caches migrate in place. Obsolete columns and tables are dropped
+while symbol row IDs are preserved for the editor's full-text index. The shared
+symbol schema retains module names and decorators for dependency lookup; project
+search does not populate those fields.
 
 Git worktree support
 ~~~~~~~~~~~~~~~~~~~~

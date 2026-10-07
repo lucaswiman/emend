@@ -3,8 +3,7 @@
 Verifies that a second call to ``warm_caches`` on an unchanged project
 skips all files (cache hits) instead of re-parsing them.
 
-Also tests the new index tables: symbol_index, import_graph,
-reference_index, file_manifest, and the staleness detection logic.
+Also tests symbol/reference rows, file manifests, and staleness detection.
 """
 import shutil
 import sqlite3
@@ -17,6 +16,8 @@ SOURCE = "def hello():\n    return 42\n"
 
 
 def test_source_root_change_refreshes_editor_projection_without_content_edits(tmp_path, monkeypatch):
+    import pickle
+    import zlib
     from unittest.mock import Mock
     from emend import emend_core
     from emend.transform import index
@@ -32,14 +33,14 @@ def test_source_root_change_refreshes_editor_projection_without_content_edits(tm
     monkeypatch.setattr(emend_core, "collect_symbols_from_str", symbols)
     with sqlite3.connect(tmp_path / ".emend/cache/parse.db") as conn:
         def names():
-            return conn.execute("SELECT module_qn FROM symbol_index WHERE name = 'hello'").fetchall()
+            return pickle.loads(zlib.decompress(conn.execute("SELECT qnames FROM qn_index").fetchone()[0]))
 
-        assert names() == [("app.hello.hello",)]
+        assert names() == {"app.hello.hello"}
         config = tmp_path / "setup.cfg"
         for payload, expected in [("[options]\npackage_dir =\n    = app\n", "hello.hello"), ("", "app.hello.hello")]:
             config.write_text(payload)
             assert _ensure_index_fresh(str(tmp_path))
-            assert names() == [(expected,)]
+            assert names() == {expected}
             count = batches.call_count
             assert _ensure_index_fresh(str(tmp_path))
             assert batches.call_count == count
@@ -253,6 +254,67 @@ def _db_row_count(db_path: Path, table: str) -> int:
         conn.close()
 
 
+def test_cache_migration_preserves_editor_rows_and_freshness(tmp_path):
+    from emend.transform.cache import _initialize_cache_connection
+
+    with sqlite3.connect(tmp_path / "parse.db") as conn:
+        conn.executescript("""
+            CREATE TABLE symbol_index (
+                content_hash BLOB NOT NULL, file_path TEXT NOT NULL,
+                name TEXT, qualified_name TEXT, module_qn TEXT, kind TEXT,
+                line INTEGER, end_line INTEGER, depth INTEGER, parent TEXT,
+                bases TEXT, signature TEXT, returns TEXT, decorators TEXT,
+                is_entry_point INTEGER DEFAULT 0, is_exported INTEGER DEFAULT 0,
+                has_noqa INTEGER DEFAULT 0);
+            CREATE INDEX idx_sym_hash ON symbol_index(content_hash);
+            INSERT INTO symbol_index (rowid, content_hash, file_path, name)
+                VALUES (42, x'12', 'a.py', 'hello');
+            CREATE VIRTUAL TABLE symbol_fts USING fts5(name);
+            INSERT INTO symbol_fts (rowid, name) VALUES (42, 'hello');
+            CREATE TABLE reference_index (
+                content_hash BLOB NOT NULL, target_qn TEXT, file_path TEXT,
+                line INTEGER, col INTEGER, ref_kind TEXT);
+            CREATE INDEX idx_ref_hash ON reference_index(content_hash);
+            INSERT INTO reference_index VALUES (x'12', 'a.hello', 'b.py', 3, 4, 'call');
+            CREATE TABLE venv_files (
+                path TEXT PRIMARY KEY, device INTEGER, inode INTEGER,
+                size INTEGER, mtime_ns INTEGER, ctime_ns INTEGER, content_hash BLOB NOT NULL);
+            INSERT INTO venv_files VALUES ('lib.py', 1, 2, 3, 4, 5, x'78');
+            CREATE TABLE file_manifest (
+                worktree_id TEXT, path TEXT, mtime_ns INTEGER, size INTEGER,
+                content_hash BLOB, indexed_at REAL, scope_hash BLOB,
+                PRIMARY KEY (worktree_id, path));
+            INSERT INTO file_manifest VALUES ('project', 'a.py', 1, 2, x'34', 3, x'56');
+            CREATE TABLE import_graph (file_path TEXT, imported_module TEXT, content_hash BLOB, PRIMARY KEY(file_path, imported_module));
+            CREATE TABLE dsl_symbols (name TEXT, host_file TEXT, content_hash BLOB);
+            CREATE TABLE dsl_links (target_qn TEXT, content_hash BLOB);
+        """)
+        _initialize_cache_connection(conn)
+        _initialize_cache_connection(conn)
+        assert conn.execute("SELECT rowid, file_path, name FROM symbol_index").fetchall() == [
+            (42, "a.py", "hello")
+        ]
+        assert conn.execute("SELECT * FROM file_manifest").fetchall() == [
+            ("project", "a.py", b"\x34", b"\x56")
+        ]
+        assert conn.execute(
+            "SELECT s.name FROM symbol_fts f JOIN symbol_index s ON f.rowid = s.rowid "
+            "WHERE symbol_fts MATCH 'hello'"
+        ).fetchall() == [("hello",)]
+        assert conn.execute("SELECT * FROM reference_index").fetchall() == [
+            ("a.hello", "b.py", 3, 4, "call")
+        ]
+        assert conn.execute("SELECT * FROM venv_files").fetchall() == [
+            ("lib.py", 1, 2, 3, 4, 5)
+        ]
+        conn.execute("INSERT INTO reference_index VALUES ('b.world', 'a.py', 5, 6, 'read')")
+        conn.execute("INSERT INTO venv_files VALUES ('other.py', 6, 7, 8, 9, 10)")
+        # Reduced-schema writes must work on upgraded caches too.
+        conn.execute("INSERT INTO symbol_index (file_path, name) VALUES ('b.py', 'world')")
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert not tables & {"import_graph", "dsl_symbols", "dsl_links"}
+
+
 class TestIndexBatchCacheHit:
     """Unit tests for _index_batch cache-hit fast path."""
 
@@ -269,11 +331,11 @@ class TestIndexBatchCacheHit:
                 [(str(tmp_path / "a.py"), SOURCE)])
         assert _index_batch(args)[:4] == (1, 1, 0, 1)
         assert _db_row_count(db_path, "qn_index") == 1
-        assert _index_batch(args) == (0, 0, 1, 0, 0, 0, 0)
+        assert _index_batch(args) == (0, 0, 1, 0, 0)
         assert _db_row_count(db_path, "qn_index") == 1
         with sqlite3.connect(db_path) as conn:
             content_hash = hashlib.md5(SOURCE.encode(), usedforsecurity=False).digest()
-            assert conn.execute("SELECT content_hash FROM symbol_index").fetchone() == (content_hash,)
+            assert conn.execute("SELECT name FROM symbol_index").fetchall() == [("hello",)]
             assert conn.execute("SELECT hash FROM qn_index").fetchone() != (content_hash,)
 
 
@@ -692,28 +754,18 @@ class TestSymbolIndex:
         assert names == {"process_data", "process_request"}
 
 
-class TestImportGraph:
-    """Tests for the import_graph table."""
+def test_import_query_uses_canonical_facts(tmp_path):
+    from emend.transform import warm_caches, query_import_graph
 
-    def test_import_graph_populated(self, tmp_path):
-        """Indexing populates the import_graph table."""
-        from emend.transform import _index_batch
-
-        db_path = tmp_path / "parse.db"
-        source = "import os\nfrom pathlib import Path\nimport json\n"
-        batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), str(tmp_path), batch))
-
-        conn = sqlite3.connect(str(db_path))
-        rows = conn.execute(
-            "SELECT imported_module FROM import_graph"
-        ).fetchall()
-        conn.close()
-
-        modules = {r[0] for r in rows}
-        assert "os" in modules
-        assert "pathlib" in modules
-        assert "json" in modules
+    project = make_project_dir(tmp_path)
+    path = project / "imports.py"
+    path.write_text("import os\nfrom pathlib import Path\nimport os\n")
+    warm_caches(str(project), type_engine="none")
+    assert query_import_graph(str(project), "os") == [str(path)]
+    path.write_text("import json\n")
+    warm_caches(str(project), type_engine="none")
+    assert query_import_graph(str(project), "os") == []
+    assert query_import_graph(str(project), "json") == [str(path)]
 
 
 class TestReferenceIndex:
@@ -854,7 +906,7 @@ class TestScanManifest:
 class TestIndexStatus:
     """Tests for get_index_status."""
 
-    def test_status_returns_info(self, tmp_path):
+    def test_status_returns_info(self, tmp_path, monkeypatch):
         """get_index_status returns useful information after indexing."""
         from emend.transform import warm_caches, get_index_status
 
@@ -864,8 +916,14 @@ class TestIndexStatus:
 
         warm_caches(str(proj), type_engine=None)
 
+        from emend.analysis_store import AnalysisStore
+        def unexpected_analysis(*args, **kwargs):
+            raise AssertionError("status must not build facts")
+        monkeypatch.setattr(AnalysisStore, "query_facts", unexpected_analysis)
+        (proj / "a.py").write_text(SOURCE + "extra = 1\n")
         info = get_index_status(str(proj))
         assert info is not None
+        assert info["changed_files"] == 1
         assert info["file_manifest_count"] == 2
         assert info["symbol_index_count"] >= 2  # hello + Foo
         from emend.transform.cache import _SCHEMA_VERSION

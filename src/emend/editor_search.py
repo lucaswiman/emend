@@ -28,6 +28,7 @@ startup, solved by the long-running server rather than a native extension.
 from __future__ import annotations
 
 import json
+from contextlib import closing
 import hashlib
 import logging
 import os
@@ -405,6 +406,19 @@ class EditorSearchEngine:
         self._store = AnalysisStore.open(project_path)
         self.project_root = str(self._store.project_root)
         self.db_path = self._store.db_path
+        # A cold picker must not open/create the analysis cache or scan dependencies.
+        self._search_ready = False
+        if self.db_path.is_file():
+            try:
+                with closing(sqlite3.connect(
+                    self.db_path.as_uri() + "?mode=ro", uri=True, timeout=0,
+                )) as conn:
+                    self._search_ready = conn.execute(
+                        "SELECT name, qualified_name, kind, file_path, line, end_line, "
+                        "signature, returns, depth, parent FROM symbol_index LIMIT 1"
+                    ).fetchone() is not None
+            except sqlite3.Error:
+                logger.debug("Search index not ready; using files", exc_info=True)
         self._overlay_owner = object()
         self._conn: sqlite3.Connection | None = None
         self._fts_ready = False
@@ -413,6 +427,7 @@ class EditorSearchEngine:
         # Background reindex state
         self._indexing = False
         self._index_complete_pending = False
+        self._index_error = ''
         self._index_thread: threading.Thread | None = None
         self._index_lock = threading.Lock()
 
@@ -577,6 +592,7 @@ class EditorSearchEngine:
                 return False
             self._indexing = True
             self._index_complete_pending = False
+            self._index_error = ''
 
         thread = threading.Thread(
             target=self._background_reindex_worker,
@@ -593,11 +609,14 @@ class EditorSearchEngine:
         try:
             from emend.transform.index import ensure_search_index
 
-            complete = ensure_search_index(self.project_root)
+            if ensure_search_index(self.project_root):
+                self._fts_available = self._store.write(rebuild_fts) > 0
+                complete = True
         except BUG_EXCEPTIONS:
             raise
-        except Exception:
-            logger.debug("Background reindex failed", exc_info=True)
+        except Exception as exc:
+            self._index_error = str(exc)
+            logger.warning("Background reindex failed", exc_info=True)
         finally:
             with self._index_lock:
                 self._indexing = False
@@ -607,7 +626,7 @@ class EditorSearchEngine:
         """Check if a background reindex just completed.
 
         Returns True (exactly once per reindex) when the background thread
-        finished.  The caller should rebuild FTS and notify the client.
+        finished. The caller can enable indexed search and notify the client.
         """
         with self._index_lock:
             if self._index_complete_pending:
@@ -616,8 +635,8 @@ class EditorSearchEngine:
         return False
 
     def finalize_reindex(self) -> None:
-        """Rebuild FTS after a background reindex completed."""
-        self._store.write(rebuild_fts)
+        """Enable the search index prepared by the background worker."""
+        self._search_ready = True
         self._fts_ready = True
 
     # -- unified search -----------------------------------------------------
@@ -634,13 +653,15 @@ class EditorSearchEngine:
         """Auto-detect mode and dispatch."""
         t0 = time.monotonic()
 
-        if include_map:
+        if include_map and self._search_ready and query:
             kb = _get_store(self)
             resolved = kb.resolve_selector(query)
             if resolved and resolved != query:
                 query = resolved
 
-        if query.startswith("/") and query.endswith("/") and len(query) > 2:
+        if not self._search_ready or not query:
+            result = self._search_files(query, limit=limit, file_scope=file_scope)
+        elif query.startswith("/") and query.endswith("/") and len(query) > 2:
             result = self._search_grep(
                 query[1:-1], limit=limit, file_scope=file_scope
             )
@@ -883,42 +904,43 @@ class EditorSearchEngine:
             ),
         )
 
-    def _search_files(self, query: str, limit: int = 50) -> SearchResult:
+    def _search_files(self, query: str, limit: int = 50, file_scope: str | None = None) -> SearchResult:
         """Search for files matching the query."""
-        conn = self._get_conn()
         q_lower = query.lower()
 
         candidates: set[str] = set()
         candidate_cap = max(limit * 4, 200)
 
-        # Strategy 1: exact basename or substring via the index when available.
-        base_sql = "SELECT DISTINCT file_path FROM symbol_index"
-        try:
-            fts_ok = len(query) >= 3 and self._ensure_fts()
-            if fts_ok:
-                fts_q = '"' + query.replace('"', '""') + '"'
-                sql = "SELECT file_path FROM file_fts WHERE file_path MATCH ? LIMIT ?"
-                candidates.update(
-                    r[0] for r in conn.execute(sql, (fts_q, candidate_cap))
-                )
-            else:
-                sql = f"{base_sql} WHERE lower(file_path) LIKE ? LIMIT ?"
-                candidates.update(
-                    r[0]
-                    for r in conn.execute(
-                        sql, ("%" + q_lower + "%", candidate_cap)
+        if self._search_ready:
+            conn = self._get_conn()
+            # Strategy 1: exact basename or substring via the index when available.
+            base_sql = "SELECT DISTINCT file_path FROM symbol_index"
+            try:
+                fts_ok = len(query) >= 3 and self._ensure_fts()
+                if fts_ok:
+                    fts_q = '"' + query.replace('"', '""') + '"'
+                    sql = "SELECT file_path FROM file_fts WHERE file_path MATCH ? LIMIT ?"
+                    candidates.update(
+                        r[0] for r in conn.execute(sql, (fts_q, candidate_cap))
                     )
-                )
+                else:
+                    sql = f"{base_sql} WHERE lower(file_path) LIKE ? LIMIT ?"
+                    candidates.update(
+                        r[0]
+                        for r in conn.execute(
+                            sql, ("%" + q_lower + "%", candidate_cap)
+                        )
+                    )
 
-            if len(candidates) < candidate_cap:
-                for row in conn.execute(base_sql):
-                    fp = row[0]
-                    if is_fuzzy_subsequence(query, fp):
-                        candidates.add(fp)
-                        if len(candidates) >= candidate_cap:
-                            break
-        except sqlite3.Error:
-            logger.debug("indexed file search unavailable", exc_info=True)
+                if len(candidates) < candidate_cap:
+                    for row in conn.execute(base_sql):
+                        fp = row[0]
+                        if is_fuzzy_subsequence(query, fp):
+                            candidates.add(fp)
+                            if len(candidates) >= candidate_cap:
+                                break
+            except sqlite3.Error:
+                logger.debug("indexed file search unavailable", exc_info=True)
 
         # Filesystem fallback keeps file hits visible even when the index
         # is stale, missing, or does not cover non-source files.
@@ -936,6 +958,8 @@ class EditorSearchEngine:
 
         items = []
         for fp in candidates:
+            if file_scope and file_scope not in fp:
+                continue
             display_path = (
                 os.path.relpath(fp, self.project_root)
                 if os.path.isabs(fp)
@@ -1818,6 +1842,8 @@ class EditorSearchEngine:
         fresh = ensure_search_index(self.project_root)
         # Rebuild FTS after any re-indexing
         fts_count = self._store.write(rebuild_fts)
+        self._fts_available = fts_count > 0
+        self._search_ready = True
         self._fts_ready = True
 
         elapsed = round((time.monotonic() - t0) * 1000, 2)
@@ -2780,6 +2806,8 @@ def _dispatch(engine: EditorSearchEngine, method: str, params: dict) -> dict:
     elif method == "query_history":
         limit = int(params.get("limit", 50))
         return engine.query_history(limit=limit).to_dict()
+    elif method == "indexing_status":
+        return {"indexing": engine.is_indexing, "indexing_error": engine._index_error}
     elif method == "reindex_async":
         started = engine.start_background_reindex()
         return {"started": started, "indexing": engine.is_indexing}
@@ -3138,6 +3166,7 @@ def run_editor_server(project_path: str = ".") -> None:
     - ``status``         — index status
     - ``reindex``        — refresh stale files + rebuild FTS (blocking)
     - ``reindex_async``  — start background reindex (non-blocking)
+    - ``indexing_status`` — background index progress or failure
     - ``shutdown``       — clean exit
 
     Notifications (server → client)
@@ -3147,7 +3176,8 @@ def run_editor_server(project_path: str = ".") -> None:
 
     The server automatically starts a background reindex on startup so
     the first search returns results from the existing (possibly stale)
-    index while fresh data is being prepared.
+    index while fresh data is being prepared. With no usable index, searches
+    return ordinary project files until the background build completes.
     """
     engine = EditorSearchEngine(project_path)
 
@@ -3159,10 +3189,8 @@ def run_editor_server(project_path: str = ".") -> None:
 
     # Auto-start background reindex so searches return immediately
     # from the existing index while it refreshes.
-    if engine.db_path.exists():
-        started = engine.start_background_reindex()
-        if started:
-            _write_json({"jsonrpc": "2.0", "method": "indexing_started", "params": {}})
+    if engine.start_background_reindex():
+        _write_json({"jsonrpc": "2.0", "method": "indexing_started", "params": {}})
 
     try:
         for line in sys.stdin:

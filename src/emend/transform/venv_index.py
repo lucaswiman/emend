@@ -7,7 +7,6 @@ same ``symbol_index`` schema as the project cache but lives in a separate
 """
 from __future__ import annotations
 from pathlib import Path
-import hashlib
 import logging
 
 from emend.errors import BUG_EXCEPTIONS
@@ -73,8 +72,7 @@ def _ensure_venv_index(project_root: str, language: str = "python") -> Path | No
         conn.execute(
             "CREATE TABLE IF NOT EXISTS venv_files ("
             "path TEXT PRIMARY KEY, device INTEGER NOT NULL, inode INTEGER NOT NULL, "
-            "size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL, "
-            "content_hash BLOB NOT NULL)"
+            "size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL)"
         )
         conn.execute("CREATE TABLE IF NOT EXISTS venv_meta "
                      "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -138,8 +136,6 @@ def _update_venv_index(
             # Unreadable file (permissions, dangling symlink) — skip it.
             continue
 
-        content_hash = hashlib.md5(content.encode(), usedforsecurity=False).digest()
-
         try:
             symbols = _symbol_info_view(
                 store.symbols(content, fpath.suffix.lstrip(".")), str(fpath)
@@ -150,7 +146,7 @@ def _update_venv_index(
             # Unparseable library file; expected in site-packages scans.
             logger.debug("symbol collection failed for %s", fpath, exc_info=True)
             continue
-        indexed_files.append((str(fpath), *current[str(fpath)], content_hash))
+        indexed_files.append((str(fpath), *current[str(fpath)]))
 
         # Compute module_qn from path relative to site-packages
         separator = get_module_separator(language)
@@ -165,7 +161,6 @@ def _update_venv_index(
                 ret_str = f" -> {sym.returns}" if sym.returns else ""
                 sig = f"def {sym.name}({', '.join(sym.parameters)}){ret_str}"
             sym_rows.append((
-                content_hash,
                 str(fpath),
                 sym.name,
                 dotted,
@@ -178,9 +173,6 @@ def _update_venv_index(
                 sig,
                 sym.returns,
                 ",".join(sym.decorators) if sym.decorators else None,
-                0,  # is_entry_point
-                0,  # is_exported
-                0,  # has_noqa
             ))
 
     with conn:
@@ -196,17 +188,16 @@ def _update_venv_index(
         if sym_rows:
             conn.executemany(
                 "INSERT INTO symbol_index "
-                "(content_hash, file_path, name, qualified_name, module_qn, kind, "
-                "line, end_line, depth, parent, signature, returns, decorators, "
-                "is_entry_point, is_exported, has_noqa) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(file_path, name, qualified_name, module_qn, kind, "
+                "line, end_line, depth, parent, signature, returns, decorators) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 sym_rows,
             )
         if indexed_files:
             conn.executemany(
                 "INSERT OR REPLACE INTO venv_files "
-                "(path, device, inode, size, mtime_ns, ctime_ns, content_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)", indexed_files,
+                "(path, device, inode, size, mtime_ns, ctime_ns) "
+                "VALUES (?, ?, ?, ?, ?, ?)", indexed_files,
             )
         conn.executemany(
             "INSERT OR REPLACE INTO venv_meta VALUES (?, ?)",

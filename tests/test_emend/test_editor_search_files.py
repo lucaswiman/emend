@@ -48,3 +48,35 @@ def test_editor_search_files(tmp_path):
     guide.unlink()
     assert engine.search("guide.txt").items == []
     engine.close()
+
+
+@pytest.mark.parametrize("cache", ["missing", "empty", "partial"])
+def test_cold_picker_uses_files_without_analysis(tmp_path, monkeypatch, cache):
+    import sqlite3
+    from unittest.mock import Mock
+
+    (tmp_path / "main.py").write_text("def navigate_workspace():\n    pass\n")
+    (tmp_path / "notes.txt").write_text("ordinary files")
+    db_path = tmp_path / ".emend/cache/parse.db"
+    if cache != "missing":
+        db_path.parent.mkdir(parents=True)
+        with sqlite3.connect(db_path) as db:
+            if cache == "partial":
+                db.execute("CREATE TABLE symbol_index (name TEXT)")
+    engine = EditorSearchEngine(str(tmp_path))
+    try:
+        reader = Mock(side_effect=AssertionError("cold picker opened the analysis cache"))
+        lookup = Mock(side_effect=AssertionError("cold picker indexed dependencies"))
+        monkeypatch.setattr(engine, "_get_conn", reader)
+        monkeypatch.setattr("emend.transform.lookup_venv_symbol", lookup)
+        for query, expected in [("", {"main.py", "notes.txt"}), ("main", {"main.py"})]:
+            result = engine.search(query)
+            assert {item["name"] for item in result.items} == expected
+            assert all(item["kind"] == "file" for item in result.items)
+        assert engine.search("navigate_workspace").items == []
+        reader.assert_not_called()
+        lookup.assert_not_called()
+        if cache == "missing":
+            assert not db_path.exists()
+    finally:
+        engine.close()
