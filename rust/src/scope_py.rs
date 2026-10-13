@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crate::scope::{config_for_ext, LanguageConfig, ScopeResolver, StructuredImport};
 
 /// Convert a `StructuredImport` to a Python dict.
-fn structured_import_to_pydict(py: Python, si: &StructuredImport) -> PyResult<PyObject> {
+fn structured_import_to_pydict(py: Python, si: &StructuredImport) -> PyResult<Py<PyAny>> {
     let dict = pyo3::types::PyDict::new(py);
     dict.set_item("module", &si.module)?;
     dict.set_item("level", si.level)?;
@@ -278,7 +278,7 @@ impl PyScopeResolver {
     /// are **0-indexed** (matching ``scopes_in_file``).  ``names`` is a list of
     /// (name, alias) tuples where alias may be None.  ``is_plain`` is true
     /// for plain ``import X`` statements, false for ``from X import Y``.
-    fn structured_imports_in_file(&self, py: Python, path: &str) -> PyResult<Vec<PyObject>> {
+    fn structured_imports_in_file(&self, py: Python, path: &str) -> PyResult<Vec<Py<PyAny>>> {
         let path_buf = PathBuf::from(path);
         let fs = match self.inner.file_scopes.get(&path_buf) {
             Some(fs) => fs,
@@ -347,7 +347,7 @@ impl PyScopeResolver {
         py: Python,
         source: &str,
         ext: Option<&str>,
-    ) -> PyResult<Vec<PyObject>> {
+    ) -> PyResult<Vec<Py<PyAny>>> {
         let ext = ext.unwrap_or("py");
         let tree = match crate::pattern::parse_by_extension(source, ext) {
             Some(t) => t,
@@ -399,7 +399,7 @@ impl PyScopeResolver {
     }
 
     /// Returns all symbols defined in a file as a list of dicts.
-    fn get_symbols(&self, py: Python, path: &str) -> PyResult<Vec<PyObject>> {
+    fn get_symbols(&self, py: Python, path: &str) -> PyResult<Vec<Py<PyAny>>> {
         let path = std::path::PathBuf::from(path);
         let symbols = self.inner.get_symbols(&path);
         let mut result = Vec::with_capacity(symbols.len());

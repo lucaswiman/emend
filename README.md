@@ -12,18 +12,18 @@ Two complementary systems: **structured edits** use selectors like `file.py::fun
 uv tool install --python 3.14t emend
 ```
 
-Python 3.13+ ships a **free-threaded** variant (`3.13t`, `3.14t`) that removes the
+Supported **free-threaded** variants (`3.14t`, `3.15t`) remove the
 GIL. emend's Rust core (`emend_core`) is already GIL-free (built with
 `#[pymodule(gil_used = false)]`), so on free-threaded Python it can run parallel
 file scans with no lock contention — meaning `find`, `lint`, `analyze refs`, and
 `edit rename` across large codebases are significantly faster.
 
-We recommend **3.14t** for the latest free-threaded runtime. Python 3.13t remains
-supported, and both variants can run the optional MCP server:
+Both variants can run the optional MCP server. Python 3.13t is no longer
+supported; ordinary Python 3.13 remains supported.
 
 ```bash
-uv tool install --python 3.14t emend   # latest free-threaded runtime
-uv tool install --python 3.13t emend   # free-threaded 3.13
+uv tool install --python 3.14t emend
+uv tool install --python 3.15t emend
 ```
 
 ### Using uv (standard Python)
@@ -545,7 +545,7 @@ cd emend
 make venv
 
 # Or manually (requires maturin and a Rust toolchain):
-uv venv .venv --python 3.13t
+uv venv .venv --python 3.14t
 uv pip install maturin
 .venv/bin/maturin develop -E dev
 ```
@@ -561,6 +561,14 @@ make test TESTS=tests/test_emend/test_add_parameter.py
 
 # Run specific test
 make test TESTS="tests/test_emend/test_add_parameter.py::test_add_parameter_with_default"
+```
+
+Use separate environments to test other interpreters. `PYTHON_VERSION` selects
+the interpreter when creating an environment; it does not replace an existing one.
+
+```bash
+make test-ci VENV=/tmp/emend-3.15 PYTHON_VERSION=3.15
+make test-ci VENV=/tmp/emend-3.15t PYTHON_VERSION=3.15t
 ```
 
 ### Project Structure

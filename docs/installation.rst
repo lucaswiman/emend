@@ -11,19 +11,19 @@ Using uv with free-threaded Python (recommended)
 
    uv tool install --python 3.14t emend
 
-Python 3.13+ ships a **free-threaded** variant (``3.13t``, ``3.14t``) that removes
+Supported **free-threaded** variants (``3.14t``, ``3.15t``) remove
 the Global Interpreter Lock (GIL). emend's Rust core is already GIL-free, so on a
 free-threaded interpreter it can parallelize file I/O and pattern-matching with no
 lock contention — giving substantially faster results on multi-file operations like
 ``find``, ``lint``, ``analyze refs``, and ``edit rename`` across large codebases.
 
-We recommend **3.14t** for the latest free-threaded runtime. Python 3.13t remains
-supported, and both variants can run the optional MCP server:
+Both variants can run the optional MCP server. Python 3.13t is no longer
+supported; ordinary Python 3.13 remains supported.
 
 .. code-block:: bash
 
-   uv tool install --python 3.14t emend   # latest free-threaded runtime
-   uv tool install --python 3.13t emend   # free-threaded 3.13
+   uv tool install --python 3.14t emend
+   uv tool install --python 3.15t emend
 
 Using uv (standard Python)
 --------------------------
@@ -183,6 +183,6 @@ Or manually:
 
 .. code-block:: bash
 
-   uv venv .venv --python 3.13t
+   uv venv .venv --python 3.14t
    uv pip install maturin
    .venv/bin/maturin develop -E dev

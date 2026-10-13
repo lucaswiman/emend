@@ -314,7 +314,7 @@ pub struct ComprehensionGenerator {
 // ---------------------------------------------------------------------------
 
 fn deserialize_generator(obj: &Bound<'_, PyAny>) -> PyResult<ComprehensionGenerator> {
-    let d = obj.downcast::<PyDict>()?;
+    let d = obj.cast::<PyDict>()?;
     let target_obj = d.get_item("target")?.ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyValueError, _>("Generator missing 'target'")
     })?;
@@ -326,7 +326,7 @@ fn deserialize_generator(obj: &Bound<'_, PyAny>) -> PyResult<ComprehensionGenera
     let ifs_obj = d.get_item("ifs")?.ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyValueError, _>("Generator missing 'ifs'")
     })?;
-    let ifs_list = ifs_obj.downcast::<PyList>()?;
+    let ifs_list = ifs_obj.cast::<PyList>()?;
     let mut ifs = Vec::new();
     for item in ifs_list.iter() {
         ifs.push(deserialize_pattern(&item)?);
@@ -335,7 +335,7 @@ fn deserialize_generator(obj: &Bound<'_, PyAny>) -> PyResult<ComprehensionGenera
 }
 
 fn deserialize_param_pattern(obj: &Bound<'_, PyAny>) -> PyResult<ParamPattern> {
-    let item_d = obj.downcast::<PyDict>()?;
+    let item_d = obj.cast::<PyDict>()?;
     let param_type: String = item_d
         .get_item("type")?
         .ok_or_else(|| {
@@ -386,7 +386,7 @@ fn deserialize_param_pattern(obj: &Bound<'_, PyAny>) -> PyResult<ParamPattern> {
 }
 
 fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
-    let d = obj.downcast::<PyDict>()?;
+    let d = obj.cast::<PyDict>()?;
     let type_str: String = d
         .get_item("type")?
         .ok_or_else(|| {
@@ -442,10 +442,10 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let args_obj = d.get_item("args")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Call pattern missing 'args'")
             })?;
-            let args_list = args_obj.downcast::<PyList>()?;
+            let args_list = args_obj.cast::<PyList>()?;
             let mut args = Vec::new();
             for item in args_list.iter() {
-                let item_d = item.downcast::<PyDict>()?;
+                let item_d = item.cast::<PyDict>()?;
                 let arg_type: String = item_d
                     .get_item("type")?
                     .ok_or_else(|| {
@@ -521,10 +521,10 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let params_obj = d.get_item("params")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("FuncDef pattern missing 'params'")
             })?;
-            let params_list = params_obj.downcast::<PyList>()?;
+            let params_list = params_obj.cast::<PyList>()?;
             let mut params = Vec::new();
             for item in params_list.iter() {
-                let item_d = item.downcast::<PyDict>()?;
+                let item_d = item.cast::<PyDict>()?;
                 let param_type: String = item_d
                     .get_item("type")?
                     .ok_or_else(|| {
@@ -554,7 +554,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                 }
             }
             let decorators = if let Some(decs_obj) = d.get_item("decorators")? {
-                let decs_list = decs_obj.downcast::<PyList>()?;
+                let decs_list = decs_obj.cast::<PyList>()?;
                 let mut decs = Vec::new();
                 for item in decs_list.iter() {
                     decs.push(deserialize_pattern(&item)?);
@@ -586,14 +586,14 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let bases_obj = d.get_item("bases")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("ClassDef pattern missing 'bases'")
             })?;
-            let bases_list = bases_obj.downcast::<PyList>()?;
+            let bases_list = bases_obj.cast::<PyList>()?;
             let mut bases = Vec::new();
             for item in bases_list.iter() {
                 bases.push(deserialize_pattern(&item)?);
             }
 
             let decorators = if let Some(decs_obj) = d.get_item("decorators")? {
-                let decs_list = decs_obj.downcast::<PyList>()?;
+                let decs_list = decs_obj.cast::<PyList>()?;
                 let mut decs = Vec::new();
                 for item in decs_list.iter() {
                     decs.push(deserialize_pattern(&item)?);
@@ -644,7 +644,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let elems_obj = d.get_item("elements")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("List pattern missing 'elements'")
             })?;
-            let elems_list = elems_obj.downcast::<PyList>()?;
+            let elems_list = elems_obj.cast::<PyList>()?;
             let mut elems = Vec::new();
             for item in elems_list.iter() {
                 elems.push(deserialize_pattern(&item)?);
@@ -662,7 +662,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                     "Subscript pattern missing 'slices'",
                 )
             })?;
-            let slices_list = slices_obj.downcast::<PyList>()?;
+            let slices_list = slices_obj.cast::<PyList>()?;
             let mut slices = Vec::new();
             for item in slices_list.iter() {
                 slices.push(deserialize_pattern(&item)?);
@@ -677,7 +677,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let elems_obj = d.get_item("elements")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Tuple pattern missing 'elements'")
             })?;
-            let elems_list = elems_obj.downcast::<PyList>()?;
+            let elems_list = elems_obj.cast::<PyList>()?;
             let mut elems = Vec::new();
             for item in elems_list.iter() {
                 elems.push(deserialize_pattern(&item)?);
@@ -804,10 +804,10 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let ops_obj = d.get_item("ops")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Compare pattern missing 'ops'")
             })?;
-            let ops_list = ops_obj.downcast::<PyList>()?;
+            let ops_list = ops_obj.cast::<PyList>()?;
             let mut ops = Vec::new();
             for item in ops_list.iter() {
-                let item_d = item.downcast::<PyDict>()?;
+                let item_d = item.cast::<PyDict>()?;
                 let op: String = item_d.get_item("op")?.ok_or_else(|| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>("CompareOp missing 'op'")
                 })?.extract()?;
@@ -841,7 +841,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let gens_obj = d.get_item("generators")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Comprehension missing 'generators'")
             })?;
-            let gens_list = gens_obj.downcast::<PyList>()?;
+            let gens_list = gens_obj.cast::<PyList>()?;
             let mut generators = Vec::new();
             for item in gens_list.iter() {
                 generators.push(deserialize_generator(&item)?);
@@ -882,10 +882,10 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let parts_obj = d.get_item("parts")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("FString missing 'parts'")
             })?;
-            let parts_list = parts_obj.downcast::<PyList>()?;
+            let parts_list = parts_obj.cast::<PyList>()?;
             let mut parts = Vec::new();
             for item in parts_list.iter() {
-                let item_d = item.downcast::<PyDict>()?;
+                let item_d = item.cast::<PyDict>()?;
                 let part_type: String = item_d.get_item("type")?.ok_or_else(|| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>("FString part missing 'type'")
                 })?.extract()?;
@@ -920,10 +920,10 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let elements_obj = d.get_item("elements")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Dict missing 'elements'")
             })?;
-            let elements_list = elements_obj.downcast::<PyList>()?;
+            let elements_list = elements_obj.cast::<PyList>()?;
             let mut elements = Vec::new();
             for item in elements_list.iter() {
-                let item_d = item.downcast::<PyDict>()?;
+                let item_d = item.cast::<PyDict>()?;
                 let el_type: String = item_d.get_item("type")?.ok_or_else(|| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>("Dict element missing 'type'")
                 })?.extract()?;
@@ -959,7 +959,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let elements_obj = d.get_item("elements")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Set missing 'elements'")
             })?;
-            let elements_list = elements_obj.downcast::<PyList>()?;
+            let elements_list = elements_obj.cast::<PyList>()?;
             let mut elements = Vec::new();
             for item in elements_list.iter() {
                 elements.push(deserialize_pattern(&item)?);
@@ -1009,12 +1009,12 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let names_obj = d.get_item("names")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Global missing 'names'")
             })?;
-            let names_list = names_obj.downcast::<PyList>()?;
+            let names_list = names_obj.cast::<PyList>()?;
             let mut names = Vec::new();
             for item in names_list.iter() {
                 if let Ok(s) = item.extract::<String>() {
                     names.push(GlobalName::Literal(s));
-                } else if let Ok(item_d) = item.downcast::<PyDict>() {
+                } else if let Ok(item_d) = item.cast::<PyDict>() {
                     let t: String = item_d.get_item("type")?.ok_or_else(|| {
                         PyErr::new::<pyo3::exceptions::PyValueError, _>("missing type")
                     })?.extract()?;
@@ -1033,12 +1033,12 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let names_obj = d.get_item("names")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Nonlocal missing 'names'")
             })?;
-            let names_list = names_obj.downcast::<PyList>()?;
+            let names_list = names_obj.cast::<PyList>()?;
             let mut names = Vec::new();
             for item in names_list.iter() {
                 if let Ok(s) = item.extract::<String>() {
                     names.push(GlobalName::Literal(s));
-                } else if let Ok(item_d) = item.downcast::<PyDict>() {
+                } else if let Ok(item_d) = item.cast::<PyDict>() {
                     let t: String = item_d.get_item("type")?.ok_or_else(|| {
                         PyErr::new::<pyo3::exceptions::PyValueError, _>("missing type")
                     })?.extract()?;
@@ -1081,7 +1081,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let params_obj = d.get_item("params")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Lambda missing 'params'")
             })?;
-            let params_list = params_obj.downcast::<PyList>()?;
+            let params_list = params_obj.cast::<PyList>()?;
             let mut params = Vec::new();
             for item in params_list.iter() {
                 params.push(deserialize_param_pattern(&item)?);
@@ -1114,7 +1114,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                     None
                 } else if let Ok(s) = mod_obj.extract::<String>() {
                     Some(NameOrMetavar::Literal(s))
-                } else if let Ok(mod_d) = mod_obj.downcast::<PyDict>() {
+                } else if let Ok(mod_d) = mod_obj.cast::<PyDict>() {
                     let t: String = mod_d.get_item("type")?.ok_or_else(|| {
                         PyErr::new::<pyo3::exceptions::PyValueError, _>("missing type")
                     })?.extract()?;
@@ -1135,16 +1135,16 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let names_obj = d.get_item("names")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("ImportFrom missing 'names'")
             })?;
-            let names_list = names_obj.downcast::<PyList>()?;
+            let names_list = names_obj.cast::<PyList>()?;
             let mut names = Vec::new();
             for item in names_list.iter() {
-                let item_d = item.downcast::<PyDict>()?;
+                let item_d = item.cast::<PyDict>()?;
                 let name_obj = item_d.get_item("name")?.ok_or_else(|| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>("ImportAlias missing 'name'")
                 })?;
                 let name = if let Ok(s) = name_obj.extract::<String>() {
                     NameOrMetavar::Literal(s)
-                } else if let Ok(n_d) = name_obj.downcast::<PyDict>() {
+                } else if let Ok(n_d) = name_obj.cast::<PyDict>() {
                     let t: String = n_d.get_item("type")?.ok_or_else(|| {
                         PyErr::new::<pyo3::exceptions::PyValueError, _>("missing type")
                     })?.extract()?;
@@ -1164,7 +1164,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                         None
                     } else if let Ok(s) = a.extract::<String>() {
                         Some(NameOrMetavar::Literal(s))
-                    } else if let Ok(a_d) = a.downcast::<PyDict>() {
+                    } else if let Ok(a_d) = a.cast::<PyDict>() {
                         let t: String = a_d.get_item("type")?.ok_or_else(|| {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>("missing type")
                         })?.extract()?;
@@ -1191,16 +1191,16 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let names_obj = d.get_item("names")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Import missing 'names'")
             })?;
-            let names_list = names_obj.downcast::<PyList>()?;
+            let names_list = names_obj.cast::<PyList>()?;
             let mut names = Vec::new();
             for item in names_list.iter() {
-                let item_d = item.downcast::<PyDict>()?;
+                let item_d = item.cast::<PyDict>()?;
                 let name_obj = item_d.get_item("name")?.ok_or_else(|| {
                     PyErr::new::<pyo3::exceptions::PyValueError, _>("ImportAlias missing 'name'")
                 })?;
                 let name = if let Ok(s) = name_obj.extract::<String>() {
                     NameOrMetavar::Literal(s)
-                } else if let Ok(n_d) = name_obj.downcast::<PyDict>() {
+                } else if let Ok(n_d) = name_obj.cast::<PyDict>() {
                     let t: String = n_d.get_item("type")?.ok_or_else(|| {
                         PyErr::new::<pyo3::exceptions::PyValueError, _>("missing type")
                     })?.extract()?;
@@ -1220,7 +1220,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                         None
                     } else if let Ok(s) = a.extract::<String>() {
                         Some(NameOrMetavar::Literal(s))
-                    } else if let Ok(a_d) = a.downcast::<PyDict>() {
+                    } else if let Ok(a_d) = a.cast::<PyDict>() {
                         let t: String = a_d.get_item("type")?.ok_or_else(|| {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>("missing type")
                         })?.extract()?;
@@ -1307,7 +1307,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
                 .extract()?;
             let text = d.get_item("text")?.map(|v| v.extract()).transpose()?;
             let children = d.get_item("children")?.map(|items| {
-                items.downcast::<PyList>()?.iter()
+                items.cast::<PyList>()?.iter()
                     .map(|item| deserialize_pattern(&item))
                     .collect::<PyResult<Vec<_>>>()
             }).transpose()?.unwrap_or_default();
@@ -1318,7 +1318,7 @@ fn deserialize_pattern(obj: &Bound<'_, PyAny>) -> PyResult<PatternNode> {
             let kinds_obj = d.get_item("kinds")?.ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("NodeKindMatch missing 'kinds'")
             })?;
-            let kinds_list: &Bound<'_, PyList> = kinds_obj.downcast::<PyList>().map_err(|_| {
+            let kinds_list: &Bound<'_, PyList> = kinds_obj.cast::<PyList>().map_err(|_| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("NodeKindMatch 'kinds' must be a list")
             })?;
             let kinds: Vec<String> = kinds_list
@@ -3531,7 +3531,7 @@ pub fn find_pattern_in_files(
         LanguageConfig::python_default()
     };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let results: Vec<Vec<(String, usize, usize, usize, usize, String, HashMap<String, String>)>> = file_contents
             .par_iter()
             .map(|(path, source)| {
@@ -3562,14 +3562,14 @@ pub fn find_pattern_spans_in_files(
     inside_ir: Option<Bound<'_, PyAny>>,
     not_inside_ir: Option<Bound<'_, PyAny>>,
     extension: Option<&str>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let pattern = deserialize_pattern(&pattern_ir)?;
     let inside = inside_ir.as_ref().map(|ir| deserialize_pattern(ir)).transpose()?;
     let not_inside = not_inside_ir.as_ref().map(|ir| deserialize_pattern(ir)).transpose()?;
     let config = extension.and_then(|ext| {
         LanguageConfig::load_for_extension(ext, std::path::Path::new(".")).ok()
     }).unwrap_or_else(LanguageConfig::python_default);
-    let hits: Vec<PatternSpanHit> = py.allow_threads(|| {
+    let hits: Vec<PatternSpanHit> = py.detach(|| {
         file_contents.par_iter().flat_map(|(file, source)| {
             let path = std::path::PathBuf::from(file);
             let ext = extension.unwrap_or_else(|| path.extension().and_then(|e| e.to_str()).unwrap_or(""));
@@ -3638,7 +3638,7 @@ pub fn find_multi_patterns_in_files(
         LanguageConfig::python_default()
     };
 
-    py.allow_threads(|| {
+    py.detach(|| {
         let results: Vec<Vec<(usize, String, usize, usize, usize, usize, String)>> =
             file_contents
                 .par_iter()
@@ -3701,7 +3701,7 @@ pub fn compile_pattern_treesitter(
     source: &str,
     extension: &str,
     project_root: Option<&str>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let root = project_root
         .map(std::path::Path::new)
         .unwrap_or(std::path::Path::new("."));

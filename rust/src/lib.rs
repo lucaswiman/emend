@@ -22,7 +22,7 @@ mod tree_py;
 mod fact_rows;
 
 /// A match result returned to Python.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone, Debug)]
 pub struct Match {
     #[pyo3(get)]

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added Python 3.15 and free-threaded 3.15t support, including CI and release
+  wheels. Free-threaded 3.13t support was retired following the PyO3 upgrade;
+  ordinary Python 3.13 and free-threaded 3.14t remain supported.
+- Development builds now honor `PYTHON_VERSION` and accept absolute virtualenv
+  paths. `make venv` now creates the development environment as documented.
+
 ## 0.5.5
 
 - The Vim/Neovim picker now shows ordinary files while indexing runs in the

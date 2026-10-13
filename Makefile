@@ -1,4 +1,5 @@
 VENV := .venv
+PYTHON_VERSION ?= 3.14t
 PYTHON := $(VENV)/bin/python
 TESTS ?=
 
@@ -10,11 +11,11 @@ LANGUAGE_CONFIGS := $(wildcard src/emend/languages/*/config.toml)
 # Use local caches for sandboxed environments
 export CARGO_HOME := $(CURDIR)/.cargo-cache
 export UV_CACHE_DIR := $(CURDIR)/.uv-cache
-export VIRTUAL_ENV := $(CURDIR)/$(VENV)
+export VIRTUAL_ENV := $(abspath $(VENV))
 export PATH := $(VIRTUAL_ENV)/bin:$(shell echo $$PATH)
 
 $(VENV)/bin/activate:
-	uv venv $(VENV) --python 3.14t
+	uv venv $(VENV) --python $(PYTHON_VERSION)
 	uv pip install --python $(VENV) maturin
 	touch $(VENV)/bin/activate
 
@@ -23,6 +24,8 @@ $(VENV)/bin/activate:
 $(VENV)/lib/emend_core: Makefile pyproject.toml $(RUST_SOURCES) $(LANGUAGE_CONFIGS) rust/Cargo.toml | $(VENV)/bin/activate
 	$(VENV)/bin/maturin develop --release --extras dev
 	@mkdir -p $(@D) && touch $@
+
+venv: $(VENV)/lib/emend_core
 
 test: $(VENV)/bin/activate $(VENV)/lib/emend_core
 	cargo test --manifest-path rust/Cargo.toml
@@ -40,7 +43,6 @@ test-package: $(VENV)/lib/emend_core
 	$(VENV)/bin/maturin sdist --out "$$package_dir"; \
 	$(PYTHON) scripts/package_smoke.py "$$package_dir"/*.whl "$$package_dir"/*.tar.gz
 
-PYTHON_VERSION ?= 3.14t
 MCP_VENV := .venv-mcp
 
 $(MCP_VENV)/bin/activate:
@@ -49,7 +51,7 @@ $(MCP_VENV)/bin/activate:
 	@touch $@
 
 $(MCP_VENV)/lib/emend_core: Makefile pyproject.toml $(RUST_SOURCES) $(LANGUAGE_CONFIGS) rust/Cargo.toml | $(MCP_VENV)/bin/activate
-	VIRTUAL_ENV=$(CURDIR)/$(MCP_VENV) PATH=$(CURDIR)/$(MCP_VENV)/bin:$$PATH \
+	VIRTUAL_ENV=$(abspath $(MCP_VENV)) PATH=$(abspath $(MCP_VENV))/bin:$$PATH \
 		$(MCP_VENV)/bin/maturin develop --release --extras dev,mcp
 	@mkdir -p $(@D) && touch $@
 

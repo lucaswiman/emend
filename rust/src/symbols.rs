@@ -46,7 +46,7 @@ fn declaration_start(mut node: tree_sitter::Node, cfg: &crate::scope::SymbolsSec
 }
 
 /// Convert a RustSymbol tree to a Python dict (recursively).
-pub fn symbol_to_pydict(_py: Python, sym: &RustSymbol) -> PyResult<PyObject> {
+pub fn symbol_to_pydict(_py: Python, sym: &RustSymbol) -> PyResult<Py<PyAny>> {
     let d = PyDict::new(_py);
     d.set_item("name", &sym.name)?;
     d.set_item("kind", &sym.kind)?;
@@ -447,7 +447,7 @@ pub fn get_symbol_component_range(
     source: &str,
     target_path: Vec<String>,
     component: &str,
-    accessor: Option<PyObject>, // Could be int or str
+    accessor: Option<Py<PyAny>>, // Could be int or str
     ext: Option<&str>,
 ) -> PyResult<Option<(usize, usize)>> {
     let ext = ext.unwrap_or("py");
@@ -1079,7 +1079,7 @@ pub fn collect_symbols_batch(
     files: Vec<String>,
     max_depth: Option<usize>,
     selector: Option<String>,
-) -> PyResult<Vec<(String, PyObject)>> {
+) -> PyResult<Vec<(String, Py<PyAny>)>> {
     let depth = max_depth.unwrap_or(usize::MAX);
     let selector_path: Option<Vec<String>> = selector.map(|s| {
         s.split('.').map(|part| part.to_string()).collect()
@@ -1119,7 +1119,7 @@ pub fn collect_symbols_from_str(
     max_depth: Option<usize>,
     selector: Option<String>,
     ext: Option<&str>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let ext = ext.unwrap_or("py");
     let depth = max_depth.unwrap_or(usize::MAX);
     let selector_path: Option<Vec<String>> = selector.map(|s| {
