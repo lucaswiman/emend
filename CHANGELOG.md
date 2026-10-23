@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.6
+
 - Added Python 3.15 and free-threaded 3.15t support, including CI and release
   wheels. Free-threaded 3.13t support was retired following the PyO3 upgrade;
   ordinary Python 3.13 and free-threaded 3.14t remain supported.
