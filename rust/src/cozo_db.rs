@@ -17,7 +17,7 @@ pub struct PyCozoDb {
     db: DbInstance,
 }
 
-fn json_value_to_py(py: Python<'_>, val: &JsonValue) -> PyObject {
+fn json_value_to_py(py: Python<'_>, val: &JsonValue) -> Py<PyAny> {
     match val {
         JsonValue::Null => py.None(),
         JsonValue::Bool(b) => b.into_pyobject(py).unwrap().to_owned().into_any().unbind(),
@@ -32,7 +32,7 @@ fn json_value_to_py(py: Python<'_>, val: &JsonValue) -> PyObject {
         }
         JsonValue::String(s) => s.into_pyobject(py).unwrap().into_any().unbind(),
         JsonValue::Array(arr) => {
-            let items: Vec<PyObject> = arr.iter().map(|v| json_value_to_py(py, v)).collect();
+            let items: Vec<Py<PyAny>> = arr.iter().map(|v| json_value_to_py(py, v)).collect();
             PyList::new(py, &items).unwrap().into_any().unbind()
         }
         JsonValue::Object(obj) => {
@@ -82,7 +82,7 @@ fn py_to_datavalue(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<DataValue> {
     }
     if obj.is_exact_instance_of::<PyList>() {
         return Ok(DataValue::List(
-            obj.downcast::<PyList>()?.iter()
+            obj.cast::<PyList>()?.iter()
                 .map(|item| py_to_datavalue(&item)).collect::<PyResult<_>>()?,
         ));
     }
@@ -96,7 +96,7 @@ fn py_to_datavalue(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<DataValue> {
         Ok(DataValue::from(f))
     } else if let Ok(s) = obj.extract::<String>() {
         Ok(DataValue::Str(s.into()))
-    } else if let Ok(list) = obj.downcast::<PyList>() {
+    } else if let Ok(list) = obj.cast::<PyList>() {
         let items: PyResult<Vec<DataValue>> =
             list.iter().map(|item| py_to_datavalue(&item)).collect();
         Ok(DataValue::List(items?))
@@ -127,15 +127,15 @@ fn finish_transaction(transaction: &MultiTransaction, action: TransactionPayload
     outcome.map(|_| ()).map_err(|e| e.to_string())
 }
 
-fn named_rows_to_py(py: Python<'_>, result: NamedRows) -> PyResult<PyObject> {
+fn named_rows_to_py(py: Python<'_>, result: NamedRows) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     let headers: Vec<String> = result.headers.iter().map(|h| h.to_string()).collect();
     dict.set_item("headers", headers)?;
-    let rows: Vec<PyObject> = result
+    let rows: Vec<Py<PyAny>> = result
         .rows
         .iter()
         .map(|row| {
-            let py_row: Vec<PyObject> = row
+            let py_row: Vec<Py<PyAny>> = row
                 .iter()
                 .map(|value| json_value_to_py(py, &datavalue_to_json(value)))
                 .collect();
@@ -157,7 +157,7 @@ impl PyCozoDb {
     #[new]
     #[pyo3(signature = (engine="mem", path=""))]
     fn new(py: Python<'_>, engine: &str, path: &str) -> PyResult<Self> {
-        let db = py.allow_threads(|| DbInstance::new(engine, path, Default::default())).map_err(|e| {
+        let db = py.detach(|| DbInstance::new(engine, path, Default::default())).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create CozoDB: {}", e))
         })?;
         Ok(PyCozoDb { db })
@@ -173,11 +173,11 @@ impl PyCozoDb {
         query: &str,
         params: Option<&Bound<'_, PyDict>>,
         read_only: bool,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let params = py_params(params)?;
         // Detach for native work: attached threads also block stop-the-world
         // garbage collection on free-threaded Python, even without a GIL.
-        let result = py.allow_threads(|| self.db.run_script(query, params, if read_only {
+        let result = py.detach(|| self.db.run_script(query, params, if read_only {
                 ScriptMutability::Immutable
             } else {
                 ScriptMutability::Mutable
@@ -191,30 +191,30 @@ impl PyCozoDb {
     /// Run several scripts in one transaction, converting each parameter
     /// batch only when its script is ready to execute.
     fn run_transaction(&self, py: Python<'_>, operations: &Bound<'_, PyList>) -> PyResult<()> {
-        let transaction = py.allow_threads(|| self.db.multi_transaction(true));
+        let transaction = py.detach(|| self.db.multi_transaction(true));
         for operation in operations.iter() {
             let converted = (|| -> PyResult<_> {
-                let operation = operation.downcast_into::<PyTuple>()?;
+                let operation = operation.cast_into::<PyTuple>()?;
                 let query: String = operation.get_item(0)?.extract()?;
-                let params = operation.get_item(1)?.downcast_into::<PyDict>()?;
+                let params = operation.get_item(1)?.cast_into::<PyDict>()?;
                 Ok((query, py_params(Some(&params))?))
             })();
             let (query, params) = match converted {
                 Ok(converted) => converted,
                 Err(error) => {
-                    let _ = py.allow_threads(|| finish_transaction(&transaction, TransactionPayload::Abort));
+                    let _ = py.detach(|| finish_transaction(&transaction, TransactionPayload::Abort));
                     return Err(error);
                 }
             };
-            if let Err(error) = py.allow_threads(|| transaction.run_script(&query, params)) {
-                let _ = py.allow_threads(|| finish_transaction(&transaction, TransactionPayload::Abort));
+            if let Err(error) = py.detach(|| transaction.run_script(&query, params)) {
+                let _ = py.detach(|| finish_transaction(&transaction, TransactionPayload::Abort));
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "CozoDB query error: {}",
                     error
                 )));
             }
         }
-        py.allow_threads(|| finish_transaction(&transaction, TransactionPayload::Commit)).map_err(|error| {
+        py.detach(|| finish_transaction(&transaction, TransactionPayload::Commit)).map_err(|error| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "CozoDB transaction error: {}",
                 error
@@ -224,7 +224,7 @@ impl PyCozoDb {
 
     /// Save a consistent database snapshot to a new SQLite file.
     fn backup(&self, py: Python<'_>, path: &str) -> PyResult<()> {
-        py.allow_threads(|| self.db.backup_db(path)).map_err(|error| {
+        py.detach(|| self.db.backup_db(path)).map_err(|error| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("CozoDB backup error: {}", error))
         })
     }

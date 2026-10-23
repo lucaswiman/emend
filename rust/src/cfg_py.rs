@@ -65,7 +65,7 @@ impl PyCfg {
     /// - ``"statements"`` – list of ``(start_byte, end_byte)`` tuples
     /// - ``"defs"``       – list of ``(name, line, col, kind)`` tuples
     /// - ``"uses"``       – list of ``(name, line, col, kind)`` tuples
-    fn get_blocks(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn get_blocks(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let list = PyList::empty(py);
         for block in &self.inner.blocks {
             let d = PyDict::new(py);
@@ -110,7 +110,7 @@ impl PyCfg {
     /// - ``"to"``              – target block id (int)
     /// - ``"kind"``            – lowercase edge kind string
     /// - ``"condition_bytes"`` – ``(start_byte, end_byte)`` tuple or ``None``
-    fn get_edges(&self, py: Python<'_>) -> PyResult<PyObject> {
+    fn get_edges(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let list = PyList::empty(py);
         for edge in &self.inner.edges {
             let d = PyDict::new(py);
@@ -340,7 +340,7 @@ pub fn build_cfgs(source: &str, ext: Option<&str>) -> PyResult<Vec<PyCfg>> {
 /// byte offsets are exact half-open UTF-8 ranges.
 #[pyfunction]
 #[pyo3(signature = (source, ext="py"))]
-pub fn build_flow_facts(py: Python<'_>, source: &str, ext: &str) -> PyResult<PyObject> {
+pub fn build_flow_facts(py: Python<'_>, source: &str, ext: &str) -> PyResult<Py<PyAny>> {
     let facts = extract_flow_facts(source, ext);
     let root = PyDict::new(py);
     // Extractors append events in their dense, zero-based ID order.

@@ -7,22 +7,20 @@
 # Platforms built:
 #   - Linux x86_64   (manylinux2014 / glibc 2.17)
 #   - Linux aarch64  (manylinux2014 / glibc 2.17)
-#   - macOS arm64    (Apple Silicon, 3.10–3.14 + free-threaded 3.13t/3.14t)
-#   - macOS x86_64   (Intel, 3.10–3.14 + free-threaded 3.13t/3.14t)
-#   - Windows x86_64 (3.10–3.14 + free-threaded 3.13t/3.14t)
+#   - macOS arm64    (Apple Silicon, 3.10–3.15 + free-threaded 3.14t/3.15t)
+#   - macOS x86_64   (Intel, 3.10–3.15 + free-threaded 3.14t/3.15t)
+#   - Windows x86_64 (3.10–3.15 + free-threaded 3.14t/3.15t)
 #
-# Free-threaded Python (3.13t, 3.14t) wheels enable the GIL-free speedups
+# Free-threaded Python (3.14t, 3.15t) wheels enable the GIL-free speedups
 # described in the installation docs.
 #
 # NOTE: Each free-threaded interpreter must be built in its own maturin
-# invocation because each free-threaded ABI (cp313t, cp314t) produces a
+# invocation because each free-threaded ABI (cp314t, cp315t) produces a
 # distinct platform tag and maturin expects exactly one.  The matrix
 # strategy below ensures one maturin call per interpreter.
 #
 # Free-threaded interpreters are installed inside the manylinux containers at
-# /opt/python/cp<ver>-cp<ver>t/bin/python.  PyPA no longer includes the
-# experimental 3.13t build in current images, so that matrix entry pins the
-# last image which did; 3.14t uses the current image.
+# /opt/python/cp<ver>-cp<ver>t/bin/python in the current manylinux images.
 
 name: Build Wheels
 
@@ -32,9 +30,9 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ── Linux x86_64: manylinux for 3.10–3.14 ────────────────────────────────
+  # ── Linux x86_64: manylinux for 3.10–3.15 ────────────────────────────────
   linux-x86-manylinux:
-    name: Linux x86_64 (manylinux, 3.10–3.14)
+    name: Linux x86_64 (manylinux, 3.10–3.15)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -56,7 +54,7 @@ jobs:
           manylinux: auto
           args: >-
             --release --out dist
-            --interpreter python3.10 python3.11 python3.12 python3.13 python3.14
+            --interpreter python3.10 python3.11 python3.12 python3.13 python3.14 python3.15
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-x86_64-manylinux
@@ -69,12 +67,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - python-version: '3.13t'
-            interpreter: /opt/python/cp313-cp313t/bin/python
-            container: quay.io/pypa/manylinux2014_x86_64:2025.10.10-1
           - python-version: '3.14t'
             interpreter: /opt/python/cp314-cp314t/bin/python
-            container: quay.io/pypa/manylinux2014_x86_64:latest
+          - python-version: '3.15t'
+            interpreter: /opt/python/cp315-cp315t/bin/python
     steps:
       - uses: actions/checkout@v7
       - name: Set version from release tag
@@ -93,7 +89,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           manylinux: 2014
-          container: ${{ matrix.container }}
+          container: quay.io/pypa/manylinux2014_x86_64:latest
           args: >-
             --release --out dist
             --interpreter ${{ matrix.interpreter }}
@@ -102,9 +98,9 @@ jobs:
           name: wheels-linux-x86_64-freethread-${{ matrix.python-version }}
           path: dist/*.whl
 
-  # ── Linux aarch64: manylinux for 3.10–3.14 ────────────────────────────────
+  # ── Linux aarch64: manylinux for 3.10–3.15 ────────────────────────────────
   linux-aarch64-manylinux:
-    name: Linux aarch64 (manylinux, 3.10–3.14)
+    name: Linux aarch64 (manylinux, 3.10–3.15)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -130,7 +126,7 @@ jobs:
           before-script-linux: export CFLAGS_aarch64_unknown_linux_gnu="-std=gnu99"
           args: >-
             --release --out dist
-            --interpreter python3.10 python3.11 python3.12 python3.13 python3.14
+            --interpreter python3.10 python3.11 python3.12 python3.13 python3.14 python3.15
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-aarch64-manylinux
@@ -143,12 +139,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - python-version: '3.13t'
-            interpreter: /opt/python/cp313-cp313t/bin/python
-            container: quay.io/pypa/manylinux2014_aarch64:2025.10.10-1
           - python-version: '3.14t'
             interpreter: /opt/python/cp314-cp314t/bin/python
-            container: quay.io/pypa/manylinux2014_aarch64:latest
+          - python-version: '3.15t'
+            interpreter: /opt/python/cp315-cp315t/bin/python
     steps:
       - uses: actions/checkout@v7
       - name: Set version from release tag
@@ -167,7 +161,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           manylinux: 2014
-          container: ${{ matrix.container }}
+          container: quay.io/pypa/manylinux2014_aarch64:latest
           args: >-
             --release --out dist
             --interpreter ${{ matrix.interpreter }}
@@ -176,9 +170,9 @@ jobs:
           name: wheels-linux-aarch64-freethread-${{ matrix.python-version }}
           path: dist/*.whl
 
-  # ── macOS Apple Silicon (arm64): standard 3.10–3.14 ──────────────────────
+  # ── macOS Apple Silicon (arm64): standard 3.10–3.15 ──────────────────────
   macos-arm:
-    name: macOS arm64 (3.10–3.14)
+    name: macOS arm64 (3.10–3.15)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -202,12 +196,13 @@ jobs:
             3.12
             3.13
             3.14
+            3.15
       - name: Build macOS arm64 wheels
         uses: PyO3/maturin-action@v1
         with:
           args: >-
             --release --out dist
-            --interpreter python3.10 python3.11 python3.12 python3.13 python3.14
+            --interpreter python3.10 python3.11 python3.12 python3.13 python3.14 python3.15
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-arm64
@@ -219,7 +214,7 @@ jobs:
     runs-on: macos-latest
     strategy:
       matrix:
-        python-version: ['3.13t', '3.14t']
+        python-version: ['3.14t', '3.15t']
     steps:
       - uses: actions/checkout@v7
       - name: Set version from release tag
@@ -248,9 +243,9 @@ jobs:
           name: wheels-macos-arm64-freethread-${{ matrix.python-version }}
           path: dist/*.whl
 
-  # ── macOS Intel (x86_64): standard 3.10–3.14 ────────────────────────────
+  # ── macOS Intel (x86_64): standard 3.10–3.15 ────────────────────────────
   macos-intel:
-    name: macOS x86_64 (3.10–3.14)
+    name: macOS x86_64 (3.10–3.15)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
@@ -274,13 +269,14 @@ jobs:
             3.12
             3.13
             3.14
+            3.15
       - name: Build macOS x86_64 wheels
         uses: PyO3/maturin-action@v1
         with:
           target: x86_64-apple-darwin
           args: >-
             --release --out dist
-            --interpreter python3.10 python3.11 python3.12 python3.13 python3.14
+            --interpreter python3.10 python3.11 python3.12 python3.13 python3.14 python3.15
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-x86_64
@@ -292,7 +288,7 @@ jobs:
     runs-on: macos-15
     strategy:
       matrix:
-        python-version: ['3.13t', '3.14t']
+        python-version: ['3.14t', '3.15t']
     steps:
       - uses: actions/checkout@v7
       - name: Set version from release tag
@@ -322,9 +318,9 @@ jobs:
           name: wheels-macos-x86_64-freethread-${{ matrix.python-version }}
           path: dist/*.whl
 
-  # ── Windows x86_64: standard 3.10–3.14 ──────────────────────────────────
+  # ── Windows x86_64: standard 3.10–3.15 ──────────────────────────────────
   windows:
-    name: Windows x86_64 (3.10–3.14)
+    name: Windows x86_64 (3.10–3.15)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -348,12 +344,13 @@ jobs:
             3.12
             3.13
             3.14
+            3.15
       - name: Build Windows wheels
         uses: PyO3/maturin-action@v1
         with:
           args: >-
             --release --out dist
-            --interpreter python3.10 python3.11 python3.12 python3.13 python3.14
+            --interpreter python3.10 python3.11 python3.12 python3.13 python3.14 python3.15
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-x86_64
@@ -365,7 +362,7 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
-        python-version: ['3.13t', '3.14t']
+        python-version: ['3.14t', '3.15t']
     steps:
       - uses: actions/checkout@v7
       - name: Set version from release tag

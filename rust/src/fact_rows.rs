@@ -101,15 +101,15 @@ impl FactBatch {
         self.rows.get_mut(name).expect("all relations initialized")
     }
 
-    fn into_py(self, py: Python<'_>) -> PyResult<PyObject> {
+    fn into_py(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let result = PyDict::new(py);
         let rows = PyDict::new(py);
         for (name, relation) in self.rows {
             let py_rows = PyList::empty(py);
             for row in relation {
-                let values: Vec<PyObject> = row
+                let values: Vec<Py<PyAny>> = row
                     .into_iter()
-                    .map(|cell| -> PyResult<PyObject> {
+                    .map(|cell| -> PyResult<Py<PyAny>> {
                         Ok(match cell {
                             Cell::String(value) => value.into_pyobject(py)?.into_any().unbind(),
                             Cell::Int(value) => value.into_pyobject(py)?.into_any().unbind(),
@@ -778,9 +778,9 @@ pub fn extract_file_fact_rows(
     module_name: &str,
     language: &str,
     config_toml: &str,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let batch = py
-        .allow_threads(|| {
+        .detach(|| {
             extract_batch(
                 source,
                 ext,
@@ -812,7 +812,7 @@ pub fn extract_exported_names(
     language: &str,
     config_toml: &str,
 ) -> PyResult<Vec<String>> {
-    py.allow_threads(|| -> Result<Vec<String>, String> {
+    py.detach(|| -> Result<Vec<String>, String> {
         let config = load_config(ext, language, config_toml)?;
         let tree = crate::pattern::parse_for_config(source, ext, &config)?
             .ok_or_else(|| format!("failed to parse source with extension {ext:?}"))?;
