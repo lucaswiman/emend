@@ -41,7 +41,7 @@ jobs:
       - name: Install Sphinx dependencies
         # Docs are hand-authored RST; no autodoc import of emend needed,
         # so we skip the Rust/maturin build and install only the doc toolchain.
-        run: pip install sphinx furo
+        run: pip install sphinx furo sphinx-sitemap sphinxext-opengraph
 
       - name: Build documentation
         run: sphinx-build -W --keep-going -b html docs docs/_build/html

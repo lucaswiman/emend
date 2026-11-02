@@ -1,3 +1,8 @@
+:og:description: emend is a multi-language refactoring and code search CLI built on tree-sitter: structured edits via selectors, pattern-based search and replace, linting, and dead-code analysis for Python, TypeScript and Rust.
+
+.. meta::
+   :description: emend is a multi-language refactoring and code search CLI built on tree-sitter: structured edits via selectors, pattern-based search and replace, linting, and dead-code analysis for Python, TypeScript and Rust.
+
 emend documentation
 ===================
 
