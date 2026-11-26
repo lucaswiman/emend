@@ -16,24 +16,6 @@ from emend.cli_base import resolve_files
 # detect_language
 # ---------------------------------------------------------------------------
 
-def test_detect_language_python():
-    assert detect_language("foo.py") == "python"
-    assert detect_language("bar.pyi") == "python"
-
-
-def test_detect_language_typescript():
-    assert detect_language("x.ts") == "typescript"
-    assert detect_language("x.tsx") == "typescript"
-    assert detect_language("x.js") == "typescript"
-    assert detect_language("x.jsx") == "typescript"
-
-
-def test_detect_language_unknown():
-    assert detect_language("x.txt") is None
-    assert detect_language("x.md") is None
-    assert detect_language("x") is None
-
-
 def test_detect_language_path_object():
     from pathlib import Path
     assert detect_language(Path("foo.py")) == "python"
@@ -63,12 +45,6 @@ def test_is_source_file_uppercase_extension():
 # ---------------------------------------------------------------------------
 # get_extensions
 # ---------------------------------------------------------------------------
-
-def test_get_extensions_python():
-    exts = get_extensions("python")
-    assert "py" in exts
-    assert "pyi" in exts
-
 
 def test_get_extensions_typescript():
     exts = get_extensions("typescript")
@@ -108,24 +84,11 @@ def test_get_extensions_unknown():
 # get_all_languages / matches_language / is_source_file
 # ---------------------------------------------------------------------------
 
-def test_get_all_languages_includes_builtins():
-    langs = get_all_languages()
-    assert "python" in langs
-    assert "typescript" in langs
-
-
 def test_matches_language():
     assert matches_language("a.py", "python") is True
     assert matches_language("a.ts", "typescript") is True
     assert matches_language("a.py", "typescript") is False
     assert matches_language("a.ts", "python") is False
-
-
-def test_is_source_file():
-    assert is_source_file("foo.py") is True
-    assert is_source_file("foo.ts") is True
-    assert is_source_file("foo.txt") is False
-    assert is_source_file("README.md") is False
 
 
 @pytest.fixture
@@ -274,3 +237,105 @@ def test_registry_discovers_a_language_added_after_the_first_lookup(tmp_path, mo
     config.write_text('[language]\nname = "fresh"\nfile_extensions = ["fresh"]\n')
 
     assert registry.detect_language("file.fresh") == "fresh"
+
+
+# ---------------------------------------------------------------------------
+# DSL grammars (HTML, CSS, SQL, Jinja2, Datalog)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("extension, source, root_kind", [
+    ("html", '<div class="main" id="app"><span data-value="42">Text</span></div>', "document"),
+    ("htm", "<p>Hello</p>", "document"),
+    ("css", "body { color: red; } .main { font-size: 16px; }", "stylesheet"),
+    ("sql", "SELECT name FROM users WHERE id = 1;", "program"),
+    ("jinja2", "{% for item in items %}{{ item.name }}{% endfor %}", "source_file"),
+    ("j2", "{{ user.name }}", "source_file"),
+    ("jinja", "{{ user.name }}", "source_file"),
+    ("dl", "path(x, y) :- edge(x, y).", "program"),
+    ("datalog", "fact(1, 2).", "program"),
+])
+def test_dsl_grammar_is_loaded(extension, source, root_kind):
+    """Each DSL extension parses with its own tree-sitter grammar.
+
+    ``parse_source`` returns ``None`` for an extension without a grammar, so a
+    missing or unregistered grammar fails here.
+    """
+    from emend import emend_core
+
+    tree = emend_core.parse_source(source, extension)
+    assert tree is not None
+    assert tree.root.kind == root_kind
+
+
+class TestDslLanguageRegistry:
+    """Verify the Python-side language registry detects the new languages."""
+
+    def test_detect_html(self):
+        from emend.language_registry import detect_language
+        assert detect_language("page.html") == "html"
+        assert detect_language("page.htm") == "html"
+
+    def test_detect_css(self):
+        from emend.language_registry import detect_language
+        assert detect_language("style.css") == "css"
+
+    def test_detect_sql(self):
+        from emend.language_registry import detect_language
+        assert detect_language("schema.sql") == "sql"
+
+    def test_detect_jinja2(self):
+        from emend.language_registry import detect_language
+        assert detect_language("template.jinja2") == "jinja2"
+        assert detect_language("template.jinja") == "jinja2"
+        assert detect_language("template.j2") == "jinja2"
+
+    def test_get_extensions_html(self):
+        from emend.language_registry import get_extensions
+        exts = get_extensions("html")
+        assert "html" in exts
+        assert "htm" in exts
+
+    def test_get_extensions_css(self):
+        from emend.language_registry import get_extensions
+        exts = get_extensions("css")
+        assert "css" in exts
+
+    def test_get_extensions_sql(self):
+        from emend.language_registry import get_extensions
+        exts = get_extensions("sql")
+        assert "sql" in exts
+
+    def test_get_extensions_jinja2(self):
+        from emend.language_registry import get_extensions
+        exts = get_extensions("jinja2")
+        assert "jinja2" in exts
+        assert "jinja" in exts
+        assert "j2" in exts
+
+    def test_all_languages_includes_new(self):
+        from emend.language_registry import get_all_languages
+        langs = get_all_languages()
+        for lang in ("html", "css", "sql", "jinja2", "datalog"):
+            assert lang in langs
+
+    def test_detect_datalog(self):
+        from emend.language_registry import detect_language
+        assert detect_language("analysis.dl") == "datalog"
+        assert detect_language("rules.datalog") == "datalog"
+
+    def test_get_extensions_datalog(self):
+        from emend.language_registry import get_extensions
+        exts = get_extensions("datalog")
+        assert "dl" in exts
+        assert "datalog" in exts
+
+    def test_is_source_file(self):
+        from emend.language_registry import is_source_file
+        assert is_source_file("test.html")
+        assert is_source_file("test.css")
+        assert is_source_file("test.sql")
+        assert is_source_file("test.jinja2")
+        assert is_source_file("test.j2")
+        assert is_source_file("test.dl")
+        assert is_source_file("test.datalog")

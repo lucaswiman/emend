@@ -1,5 +1,10 @@
 """Tests for interprocedural taint analysis."""
 
+import json
+
+from typer.testing import CliRunner
+
+from emend.cli import app
 from emend.trace import (
     InterproceduralResult,
     TraceConfig,
@@ -8,6 +13,15 @@ from emend.trace import (
     TraceSource,
     run_interprocedural_trace,
 )
+
+from conftest import (
+    CROSS_FUNCTION_SOURCE,
+    make_sql_injection_config,
+    setup_trace_fixture,
+)
+
+
+runner = CliRunner()
 
 
 def _make_sql_config():
@@ -447,3 +461,54 @@ class TestMultiHopChainPropagation:
             ).violations)
             for depth in (1, 2)
         ] == [False, True]
+
+
+class TestInterproceduralCli:
+    """CLI ``trace --interprocedural`` reports occurrence-evaluator violations."""
+
+    def test_cli_json_reports_engine_and_schema(self, tmp_path):
+        src, cfg = setup_trace_fixture(tmp_path)
+        result = runner.invoke(
+            app,
+            ["trace", str(src), "--config", str(cfg), "--interprocedural", "--json"],
+        )
+        assert result.exit_code in (0, 1), result.output
+        data = json.loads(result.output)
+        assert len(data) > 0
+        assert all(v["engine"] == "occurrence" for v in data), (
+            f"Expected engine='occurrence' but got: {[v['engine'] for v in data]}"
+        )
+        for v in data:
+            assert "file" in v
+            assert "line" in v
+            assert "label" in v
+            assert "sink_pattern" in v
+            assert "message" in v
+            assert "engine" in v
+            assert v["engine"] == "occurrence"
+
+    def test_cli_stderr_reports_engine(self, tmp_path):
+        src, cfg = setup_trace_fixture(tmp_path)
+        result = runner.invoke(
+            app,
+            ["trace", str(src), "--config", str(cfg), "--interprocedural"],
+            catch_exceptions=False,
+        )
+        assert "Interprocedural analysis:" in result.output
+
+
+class TestInterproceduralResultShape:
+    """The interprocedural result exposes summaries and the iteration count."""
+
+    def test_result_has_summaries_and_iterations(self, tmp_path):
+        test_file = tmp_path / "app.py"
+        test_file.write_text(CROSS_FUNCTION_SOURCE)
+
+        result = run_interprocedural_trace(
+            [str(test_file)], make_sql_injection_config(),
+        )
+
+        assert isinstance(result.summaries, dict)
+        assert len(result.summaries) > 0
+        assert isinstance(result.iterations, int)
+        assert result.iterations >= 1

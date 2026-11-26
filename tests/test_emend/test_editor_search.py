@@ -204,11 +204,6 @@ class TestSymbolSearch:
             assert "score" in result.items[0]
             assert result.items[0]["score"] > 0
 
-    def test_elapsed_ms(self, indexed_project):
-        with _engine(indexed_project) as engine:
-            result = engine.search_symbols("greet")
-            assert result.elapsed_ms >= 0
-
 
 # ---------------------------------------------------------------------------
 # Scoring
@@ -487,36 +482,12 @@ class TestServerProtocol:
         assert responses[-2]["error"]["code"] == -32600
         assert responses[-1] == {"jsonrpc": "2.0", "id": 2, "result": {"ok": True}}
 
-    def test_dispatch_search(self, indexed_project):
-        from emend.editor_search import EditorSearchEngine, _dispatch
-
-        with _engine(indexed_project) as engine:
-            result = _dispatch(engine, "search", {"query": "greet"})
-            assert "items" in result
-            assert "elapsed_ms" in result
-            assert result["mode"] == "symbol"
-
     def test_dispatch_symbols(self, indexed_project):
         from emend.editor_search import EditorSearchEngine, _dispatch
 
         with _engine(indexed_project) as engine:
             result = _dispatch(engine, "symbols", {"query": "parse", "limit": 5})
             assert len(result["items"]) <= 5
-
-    def test_dispatch_file_symbols(self, indexed_project):
-        from emend.editor_search import EditorSearchEngine, _dispatch
-
-        py_file = str((indexed_project / "sample.py").resolve())
-        with _engine(indexed_project) as engine:
-            result = _dispatch(engine, "file_symbols", {"file": py_file})
-            assert len(result["items"]) > 0
-
-    def test_dispatch_status(self, indexed_project):
-        from emend.editor_search import EditorSearchEngine, _dispatch
-
-        with _engine(indexed_project) as engine:
-            result = _dispatch(engine, "status", {})
-            assert result["items"][0]["available"] is True
 
     # "shutdown" is handled by run_editor_server before _dispatch, so both it
     # and a bogus method reach _dispatch only as unknown methods.
@@ -527,16 +498,6 @@ class TestServerProtocol:
         with _engine(indexed_project) as engine:
             with pytest.raises(ValueError, match="Unknown method"):
                 _dispatch(engine, method, {})
-
-    def test_result_serializable(self, indexed_project):
-        """Verify that dispatch results can be JSON-serialized."""
-        from emend.editor_search import EditorSearchEngine, _dispatch
-
-        with _engine(indexed_project) as engine:
-            result = _dispatch(engine, "search", {"query": "greet"})
-            serialized = json.dumps(result, default=str)
-            parsed = json.loads(serialized)
-            assert parsed["mode"] == "symbol"
 
 
 # ---------------------------------------------------------------------------

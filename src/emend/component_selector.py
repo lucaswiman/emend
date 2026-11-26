@@ -9,13 +9,6 @@ from lark.exceptions import LarkError
 import importlib.resources
 
 
-PSEUDO_CLASS_TO_KIND = {
-    "KEYWORD_ONLY": "KEYWORD_ONLY",
-    "POSITIONAL_ONLY": "POSITIONAL_ONLY",
-    "POSITIONAL_OR_KEYWORD": "POSITIONAL_OR_KEYWORD",
-}
-
-
 class _PseudoClassMarker:
     """Marker to distinguish pseudo_class values from accessor values."""
     def __init__(self, value: str):

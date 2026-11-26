@@ -14,8 +14,7 @@ from emend.checks.rule_model import CompiledRuleDocument
 logger = logging.getLogger(__name__)
 
 from emend.transform import find_pattern, replace_pattern, extract_pattern_literals
-from emend.trace import _extract_identifiers
-from emend.rules_config import (
+from emend.checks.rules_config import (
     DeadCodeConfig,
     compiled_duplicate_to_config,
     deadcode_engine_kwargs,
@@ -75,10 +74,6 @@ def load_duplicate_code_config(
     except (OSError, yaml.YAMLError, ValueError):
         return None
     return compiled_duplicate_to_config(document.duplicate) if document.duplicate else None
-
-
-# Reuse shared helpers from taint module
-_extract_names_from_text = _extract_identifiers
 
 
 def _build_noqa_ranges(

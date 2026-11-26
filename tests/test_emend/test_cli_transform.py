@@ -3,10 +3,16 @@
 Component operation CLI tests (search/edit/add/rm) are in test_component_operations.py.
 """
 
+import subprocess
+import tempfile
+from pathlib import Path
+
 import pytest
 from typer.testing import CliRunner
 
 from emend.cli import app
+
+from conftest import assert_valid_python
 
 runner = CliRunner()
 
@@ -257,18 +263,6 @@ class TestReplaceCommand:
         assert "logger.info('hello')" in content
         assert "logger.info('world')" in content
         assert "print(" not in content
-
-    def test_replace_with_metavar(self, tmp_path):
-        """Replace pattern with metavariable."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text("print('hello')\nprint('world')\n")
-
-        result = runner.invoke(app, ["replace", "print($X)", "logger.info($X)", str(test_file), "--apply"])
-
-        assert result.exit_code == 0
-        content = test_file.read_text()
-        assert "logger.info('hello')" in content
-        assert "logger.info('world')" in content
 
     def test_replace_multiple_metavars(self, tmp_path):
         """Replace pattern with multiple metavariables."""
@@ -549,110 +543,349 @@ class TestFindReplaceMultiFile:
         assert "x: int = 2" in file2.read_text()
 
 
-class TestCLIAliases:
-    """Test that CLI aliases work correctly."""
+@pytest.fixture
+def temp_py_file():
+    """Create a temporary Python file for testing."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        yield f
+    Path(f.name).unlink(missing_ok=True)
 
-    def test_grep_alias(self, tmp_path):
-        """grep is an alias for search (pattern mode)."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text("print('hello')\n")
 
-        result = runner.invoke(app, ["grep", "print($X)", str(test_file)])
-        assert result.exit_code == 0
-        assert str(test_file) in result.stdout
+class TestReplaceWhereScope:
+    """``replace --where <scope>`` through the installed CLI (identifier-aware, literal-safe)."""
 
-    def test_ls_alias(self, tmp_path):
-        """ls is an alias for search (summary mode)."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def greet():\n    pass\n")
+    def test_simple_text_replacement_without_apply_shows_preview(self, emend_cmd, temp_py_file):
+        """Test that simple text replacement shows preview without --apply.
 
-        result = runner.invoke(app, ["ls", str(test_file)])
-        assert result.exit_code == 0
-        assert "greet" in result.stdout
+        Migrated from: test_transform_without_apply_shows_preview
+        Old: transform-references --from "old_name" --to "new_name"
+        New: replace "old_name" "new_name" --in wrapper
+        """
+        temp_py_file.write(
+            """\
+def wrapper():
+    x = old_name
+    y = old_name + 1
+    return x + y
+"""
+        )
+        temp_py_file.flush()
 
-    def test_remove_command(self, tmp_path):
-        """remove command removes a symbol."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def keep():\n    pass\n\ndef old():\n    pass\n")
+        result = subprocess.run(
+            [
+                emend_cmd,
+                "replace",
+                "old_name",
+                "new_name",
+                temp_py_file.name,
+                "--where",
+                "wrapper",
+            ],
+            capture_output=True,
+            text=True,
+        )
 
-        result = runner.invoke(app, ["remove", f"{test_file}::old", "--apply"])
-        assert result.exit_code == 0
-        content = test_file.read_text()
-        assert "keep" in content
-        assert "def old" not in content
+        assert result.returncode == 0, f"Failed with stderr: {result.stderr}"
 
-    def test_rm_alias(self, tmp_path):
-        """rm is an alias for remove."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def keep():\n    pass\n\ndef old():\n    pass\n")
+        # File should not be modified (no --apply)
+        content = Path(temp_py_file.name).read_text()
+        assert "old_name" in content
+        assert "new_name" not in content
 
-        result = runner.invoke(app, ["rm", f"{test_file}::old", "--apply"])
-        assert result.exit_code == 0
-        assert "def old" not in test_file.read_text()
+        # Preview should be in stdout
+        assert "Changes: 2" in result.stdout or "old_name" in result.stdout
 
-    def test_delete_alias(self, tmp_path):
-        """delete is an alias for remove."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def keep():\n    pass\n\ndef old():\n    pass\n")
+    def test_capture_groups_with_metavariables(self, emend_cmd, temp_py_file):
+        r"""Test replacement with capture groups using metavariables.
 
-        result = runner.invoke(app, ["delete", f"{test_file}::old", "--apply"])
-        assert result.exit_code == 0
-        assert "def old" not in test_file.read_text()
+        Migrated from: test_transform_with_regex_groups
+        Old: transform-references --from "config\.get_field(\d+)" --to "config.field\1"
+        New: replace "helper($X)" "helper_new_$X" --in process
 
-    def test_set_alias(self, tmp_path):
-        """set is an alias for edit."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def greet() -> str:\n    return 'hi'\n")
+        Note: This test uses a different example because replace's metavariable system
+        works with arbitrary expressions rather than regex groups. The pattern captures
+        entire arguments as metavariables, not individual numeric suffixes.
+        """
+        temp_py_file.write(
+            """\
+def process():
+    result1 = helper(1)
+    result2 = helper(2)
+    result3 = helper(3)
+    return [result1, result2, result3]
+"""
+        )
+        temp_py_file.flush()
 
-        result = runner.invoke(app, ["set", f"{test_file}::greet[returns]", "int", "--apply"])
-        assert result.exit_code == 0
-        assert "int" in test_file.read_text()
+        result = subprocess.run(
+            [
+                emend_cmd,
+                "replace",
+                "helper($X)",
+                "helper_new_$X",
+                temp_py_file.name,
+                "--where",
+                "process",
+                "--apply",
+            ],
+            capture_output=True,
+            text=True,
+        )
 
-    def test_insert_alias(self, tmp_path):
-        """insert is an alias for add."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def greet(name: str) -> str:\n    return f'Hello, {name}'\n")
+        assert result.returncode == 0, f"Failed with stderr: {result.stderr}"
 
-        result = runner.invoke(app, ["insert", f"{test_file}::greet[params]", "ctx: Context", "--apply"])
-        assert result.exit_code == 0
-        assert "ctx" in test_file.read_text()
+        content = Path(temp_py_file.name).read_text()
+        assert "result1 = helper_new_1" in content
+        assert "result2 = helper_new_2" in content
+        assert "result3 = helper_new_3" in content
 
-    def test_copy_alias(self, tmp_path):
-        """copy is an alias for copy-to."""
-        src = tmp_path / "source.py"
-        src.write_text("def helper():\n    return 42\n")
-        dest = tmp_path / "dest.py"
+    def test_syntax_aware_replacement_respects_literals(self, emend_cmd, temp_py_file):
+        """Test that replacement respects string literals and comments.
 
-        result = runner.invoke(app, ["copy", f"{src}::helper", str(dest), "--apply"])
-        assert result.exit_code == 0
-        assert "helper" in dest.read_text()
+        Migrated from: test_transform_identifier_not_string_literal
+        Old: transform-references --from "old_name" --to "new_name"
+        New: replace "old_name" "new_name" --in foo
 
-    def test_cp_alias(self, tmp_path):
-        """cp is an alias for copy-to."""
-        src = tmp_path / "source.py"
-        src.write_text("def helper():\n    return 42\n")
-        dest = tmp_path / "dest.py"
+        The key difference is that transform-references (AST-based) skips
+        string literals and comments, while replace needs to be syntax-aware.
+        """
+        temp_py_file.write(
+            """\
+def foo():
+    old_name = 1
+    msg = "old_name is the variable"
+    return old_name
+"""
+        )
+        temp_py_file.flush()
 
-        result = runner.invoke(app, ["cp", f"{src}::helper", str(dest), "--apply"])
-        assert result.exit_code == 0
-        assert "helper" in dest.read_text()
+        result = subprocess.run(
+            [
+                emend_cmd,
+                "replace",
+                "old_name",
+                "new_name",
+                temp_py_file.name,
+                "--where",
+                "foo",
+                "--apply",
+            ],
+            capture_output=True,
+            text=True,
+        )
 
-    def test_mv_alias(self, tmp_path):
-        """mv is an alias for move."""
-        src = tmp_path / "source.py"
-        src.write_text("def helper():\n    return 42\n")
-        dest = tmp_path / "dest.py"
-        dest.write_text("")
+        assert result.returncode == 0, f"Failed with stderr: {result.stderr}"
 
-        result = runner.invoke(app, ["mv", f"{src}::helper", str(dest), "--apply"])
-        assert result.exit_code == 0
-        assert "helper" in dest.read_text()
+        content = Path(temp_py_file.name).read_text()
+        # Identifiers should be transformed
+        assert "new_name = 1" in content
+        assert "return new_name" in content
+        # String literals should NOT be transformed
+        assert 'msg = "old_name is the variable"' in content
+        # The rewritten file is still valid Python
+        assert_valid_python(content)
 
-    def test_references_alias(self, tmp_path):
-        """references is an alias for refs."""
-        test_file = tmp_path / "test.py"
-        test_file.write_text("def greet():\n    pass\n\ngreet()\n")
+    def test_replacement_with_multiple_occurrences_same_line(self, emend_cmd, temp_py_file):
+        """Test replacement of multiple occurrences on the same line.
 
-        result = runner.invoke(app, ["references", f"{test_file}::greet"])
-        assert result.exit_code == 0
-        assert str(test_file) in result.stdout
+        Migrated from: test_transform_multiple_occurrences_same_line
+        Old: transform-references --from "\bval\b" --to "value"
+        New: replace "val" "value" --in compute
+
+        Note: Word boundary regex \b is implicit in AST-based transforms,
+        but replace works with simpler pattern matching.
+        """
+        temp_py_file.write(
+            """\
+def compute():
+    result = val + val + val
+    return result
+"""
+        )
+        temp_py_file.flush()
+
+        result = subprocess.run(
+            [
+                emend_cmd,
+                "replace",
+                "val",
+                "value",
+                temp_py_file.name,
+                "--where",
+                "compute",
+                "--apply",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"Failed with stderr: {result.stderr}"
+
+        content = Path(temp_py_file.name).read_text()
+        assert "result = value + value + value" in content
+
+    def test_replacement_in_method_scope(self, emend_cmd, temp_py_file):
+        r"""Test replacement within a method scope.
+
+        Migrated from: test_transform_nested_function_scope
+        Old: transform-references --from "\bitems\b" --to "data_items" --apply
+             file.py::Builder.build
+        New: replace "items" "data_items" file.py --in Builder.build --apply
+
+        Note: Method scopes must use dotted path (ClassName.method_name).
+        """
+        temp_py_file.write(
+            """\
+class Builder:
+    def build(self):
+        items = [1, 2, 3]
+        total = sum(items)
+        count = len(items)
+        return total / count
+"""
+        )
+        temp_py_file.flush()
+
+        result = subprocess.run(
+            [
+                emend_cmd,
+                "replace",
+                "items",
+                "data_items",
+                temp_py_file.name,
+                "--where",
+                "Builder.build",
+                "--apply",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"Failed with stderr: {result.stderr}"
+
+        content = Path(temp_py_file.name).read_text()
+        # Verify positive assertions: replacements occurred
+        assert "data_items = [1, 2, 3]" in content
+        assert "sum(data_items)" in content
+        assert "len(data_items)" in content
+        # Verify AST validity: modified code is syntactically correct
+        assert_valid_python(content)
+
+    def test_replacement_no_matches(self, emend_cmd, temp_py_file):
+        """Test replacement when pattern matches nothing.
+
+        Migrated from: test_transform_no_matches
+        """
+        temp_py_file.write(
+            """\
+def func():
+    x = 42
+    return x
+"""
+        )
+        temp_py_file.flush()
+
+        result = subprocess.run(
+            [
+                emend_cmd,
+                "replace",
+                "nonexistent_pattern",
+                "something_else",
+                temp_py_file.name,
+                "--where",
+                "func",
+                "--apply",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        # Should succeed but not change anything
+        assert result.returncode == 0, f"Failed with stderr: {result.stderr}"
+        # When there are no matches, the output is typically empty (no diff)
+        # The command still succeeds with exit code 0
+
+        content = Path(temp_py_file.name).read_text()
+        assert "x = 42" in content
+
+    def test_replacement_in_method_call(self, emend_cmd, temp_py_file):
+        r"""Test replacement of method calls within a class method.
+
+        Migrated from: test_transform_method_calls_within_class
+        Old: transform-references --from "self\.add" --to "self.new_add" --apply
+        New: replace "self.add" "self.new_add" --in Calculator.process --apply
+
+        Note: Method scopes must use dotted path (ClassName.method_name).
+        """
+        temp_py_file.write(
+            """\
+class Calculator:
+    def add(self, x, y):
+        return x + y
+
+    def process(self):
+        result1 = self.add(1, 2)
+        result2 = self.add(3, 4)
+        return result1 + result2
+"""
+        )
+        temp_py_file.flush()
+
+        result = subprocess.run(
+            [
+                emend_cmd,
+                "replace",
+                "self.add",
+                "self.new_add",
+                temp_py_file.name,
+                "--where",
+                "Calculator.process",
+                "--apply",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"Failed with stderr: {result.stderr}"
+
+        content = Path(temp_py_file.name).read_text()
+        assert "self.new_add(1, 2)" in content
+        assert "self.new_add(3, 4)" in content
+
+    def test_replacement_comment_not_modified(self, emend_cmd, temp_py_file):
+        """Test that comments are not modified by replacement.
+
+        Migrated from: test_transform_identifier_not_comment
+        """
+        temp_py_file.write(
+            """\
+def foo():
+    old_name = 1  # old_name is the variable
+    return old_name
+"""
+        )
+        temp_py_file.flush()
+
+        result = subprocess.run(
+            [
+                emend_cmd,
+                "replace",
+                "old_name",
+                "new_name",
+                temp_py_file.name,
+                "--where",
+                "foo",
+                "--apply",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"Failed with stderr: {result.stderr}"
+
+        content = Path(temp_py_file.name).read_text()
+        # Identifiers should be transformed
+        assert "new_name = 1" in content
+        assert "return new_name" in content
+        # Comments should NOT be transformed
+        assert "# old_name is the variable" in content

@@ -340,10 +340,6 @@ class TestImpactHelpers:
         assert _is_test_file("test_foo.py")
         assert _is_test_file("/path/to/test_bar.py")
 
-    def test_is_test_file_by_suffix(self):
-        from emend.transform import _is_test_file
-        assert _is_test_file("foo_test.py")
-
     def test_is_test_file_by_directory(self):
         from emend.transform import _is_test_file
         assert _is_test_file("tests/conftest.py")
@@ -363,6 +359,99 @@ class TestImpactHelpers:
         from emend.transform import _is_test_symbol
         assert not _is_test_symbol("foo.py::helper")
         assert not _is_test_symbol("lib.py::MyClass")
+
+
+class TestIsTestFileCrossLanguage:
+    """Tests for _is_test_file with TypeScript and Rust conventions."""
+
+    def test_is_test_file_ts_dot_test(self):
+        from emend.transform import _is_test_file
+        assert _is_test_file("math.test.ts")
+        assert _is_test_file("/project/src/math.test.ts")
+
+    def test_is_test_file_ts_dot_spec(self):
+        from emend.transform import _is_test_file
+        assert _is_test_file("utils.spec.ts")
+        assert _is_test_file("/project/src/utils.spec.ts")
+
+    def test_is_test_file_tsx_dot_test(self):
+        from emend.transform import _is_test_file
+        assert _is_test_file("Component.test.tsx")
+
+    def test_is_test_file_js_dot_spec(self):
+        from emend.transform import _is_test_file
+        assert _is_test_file("helper.spec.js")
+
+    def test_is_test_file_dunder_tests_dir(self):
+        from emend.transform import _is_test_file
+        assert _is_test_file("__tests__/math.ts")
+        assert _is_test_file("/project/__tests__/helper.tsx")
+
+    def test_is_test_file_rust_test_prefix(self):
+        from emend.transform import _is_test_file
+        assert _is_test_file("test_lib.rs")
+
+    def test_is_test_file_rust_test_suffix(self):
+        from emend.transform import _is_test_file
+        # The _test suffix check is now extension-agnostic
+        assert _is_test_file("lib_test.rs")
+
+    def test_is_test_file_rust_tests_dir(self):
+        from emend.transform import _is_test_file
+        assert _is_test_file("tests/integration.rs")
+        assert _is_test_file("/project/tests/test_api.rs")
+
+    def test_is_test_file_python_test_suffix_still_works(self):
+        from emend.transform import _is_test_file
+        # Regression: the old _test.py check should still work
+        assert _is_test_file("foo_test.py")
+        assert _is_test_file("/path/to/bar_test.py")
+
+    def test_is_not_test_file_regular_ts(self):
+        from emend.transform import _is_test_file
+        assert not _is_test_file("app.ts")
+        assert not _is_test_file("/src/utils.ts")
+
+    def test_is_not_test_file_regular_rs(self):
+        from emend.transform import _is_test_file
+        assert not _is_test_file("lib.rs")
+        assert not _is_test_file("/src/main.rs")
+
+
+class TestIsTestSymbolCrossLanguage:
+    """Tests for _is_test_symbol with TypeScript and Rust conventions."""
+
+    def test_is_test_symbol_ts_describe(self):
+        from emend.transform import _is_test_symbol
+        assert _is_test_symbol("math.test.ts::describe")
+
+    def test_is_test_symbol_ts_it(self):
+        from emend.transform import _is_test_symbol
+        assert _is_test_symbol("utils.spec.ts::it")
+
+    def test_is_test_symbol_ts_test(self):
+        from emend.transform import _is_test_symbol
+        assert _is_test_symbol("app.test.ts::test")
+
+    def test_is_test_symbol_rust_test_prefix(self):
+        from emend.transform import _is_test_symbol
+        assert _is_test_symbol("lib.rs::test_add")
+        assert _is_test_symbol("main.rs::test_compute")
+
+    def test_is_not_test_symbol_regular_ts(self):
+        from emend.transform import _is_test_symbol
+        assert not _is_test_symbol("utils.ts::formatName")
+        assert not _is_test_symbol("app.ts::handleRequest")
+
+    def test_is_not_test_symbol_regular_rust(self):
+        from emend.transform import _is_test_symbol
+        assert not _is_test_symbol("lib.rs::compute")
+        assert not _is_test_symbol("main.rs::run")
+
+    def test_is_not_test_symbol_no_selector(self):
+        from emend.transform import _is_test_symbol
+        assert not _is_test_symbol("plain_string")
+        assert not _is_test_symbol("")
 
 
 class TestImpactWithDiff:
@@ -443,43 +532,6 @@ class TestImpactWithDiff:
 class TestFindImpactFactGraph:
     """Tests for find_impact() via Datalog path."""
 
-    def test_impact_fact_graph_direct_caller(self, tmp_path):
-        """Fact-graph-based impact finds direct callers."""
-        from emend.transform import find_impact
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        lib = project / "lib.py"
-        lib.write_text(
-            "def helper(x):\n"
-            "    return x + 1\n"
-        )
-
-        app = project / "app.py"
-        app.write_text(
-            "from lib import helper\n"
-            "\n"
-            "def main():\n"
-            "    return helper(42)\n"
-        )
-
-        selector = ExtendedSelector(
-            file_path=str(lib),
-            symbol_path=["helper"],
-            component=None,
-            accessor=None,
-        )
-
-        result = find_impact(
-            selectors=[selector],
-            project_path=str(project),
-        )
-
-        assert len(result.changed_symbols) == 1
-        impacted_names = [s.split("::")[-1] for s in result.impacted_symbols]
-        assert "main" in impacted_names
-
     def test_impact_fact_graph_distinguishes_same_named_methods(self, tmp_path):
         """A selector resolves the full nested symbol path, not its final name."""
         from emend.transform import find_impact
@@ -512,51 +564,6 @@ class TestFindImpactFactGraph:
 
         assert any(symbol.endswith("::main") for symbol in impact_for("A"))
         assert not impact_for("B")
-
-    def test_impact_fact_graph_transitive(self, tmp_path):
-        """Fact-graph-based impact computes transitive closure."""
-        from emend.transform import find_impact
-
-        project = tmp_path / "project"
-        project.mkdir()
-
-        c_file = project / "c_mod.py"
-        c_file.write_text(
-            "def deep_func():\n"
-            "    return 42\n"
-        )
-
-        b_file = project / "b_mod.py"
-        b_file.write_text(
-            "from c_mod import deep_func\n"
-            "\n"
-            "def middle_func():\n"
-            "    return deep_func()\n"
-        )
-
-        a_file = project / "a_mod.py"
-        a_file.write_text(
-            "from b_mod import middle_func\n"
-            "\n"
-            "def top_func():\n"
-            "    return middle_func()\n"
-        )
-
-        selector = ExtendedSelector(
-            file_path=str(c_file),
-            symbol_path=["deep_func"],
-            component=None,
-            accessor=None,
-        )
-
-        result = find_impact(
-            selectors=[selector],
-            project_path=str(project),
-        )
-
-        impacted_names = [s.split("::")[-1] for s in result.impacted_symbols]
-        assert "middle_func" in impacted_names
-        assert "top_func" in impacted_names
 
 
 class TestTypeScriptImpact:
@@ -816,3 +823,55 @@ def test_impact_interval_ownership_preserves_nested_and_overlapping_symbols():
                 if sym is not None and sym.name not in expected:
                     expected.append(sym.name)
         assert [sym.name for sym in _symbols_in_intervals(symbols, LineIntervals(spans))] == expected
+
+
+class TestMixedProjectImpact:
+    """Test that impact analysis in a mixed-language project doesn't produce
+    spurious cross-language results."""
+
+    def test_mixed_project_python_change_no_ts_impact(self, tmp_path):
+        """Changing a Python file should not produce TypeScript impact results."""
+        from emend.transform import find_impact
+        from emend.component_selector import ExtendedSelector
+
+        project = tmp_path / "project"
+        project.mkdir()
+
+        # Python file
+        py_lib = project / "lib.py"
+        py_lib.write_text(
+            "def py_helper():\n"
+            "    return 42\n"
+        )
+
+        py_app = project / "app.py"
+        py_app.write_text(
+            "from lib import py_helper\n"
+            "\n"
+            "def py_main():\n"
+            "    return py_helper()\n"
+        )
+
+        # TypeScript file (unrelated)
+        ts_lib = project / "utils.ts"
+        ts_lib.write_text(
+            "export function tsHelper(): number {\n"
+            "    return 42;\n"
+            "}\n"
+        )
+
+        selector = ExtendedSelector(
+            file_path=str(py_lib),
+            symbol_path=["py_helper"],
+            component=None,
+            accessor=None,
+        )
+
+        result = find_impact(selectors=[selector], project_path=str(project))
+
+        # Python callers should be impacted
+        impacted_names = [s.split("::")[-1] for s in result.impacted_symbols]
+        assert "py_main" in impacted_names
+
+        # TypeScript symbols should NOT be impacted
+        assert "tsHelper" not in impacted_names

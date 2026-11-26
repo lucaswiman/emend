@@ -26,27 +26,6 @@ class DuplicateCodeConfig:
     message: str = "Duplicate code detected"
 
 
-def parse_duplicate_code_config(raw: object, *, rule_name: str = "duplicate-code") -> DuplicateCodeConfig | None:
-    """Parse the ``duplicate`` section from a YAML rules document."""
-    if raw is None:
-        return None
-    if isinstance(raw, bool):
-        return DuplicateCodeConfig(enabled=raw, rule_name=rule_name)
-    if not isinstance(raw, dict):
-        return None
-    return DuplicateCodeConfig(
-        enabled=raw.get("enabled", True),
-        rule_name=rule_name,
-        mode=raw.get("mode", "all"),
-        min_lines=int(raw.get("min-lines", raw.get("min_lines", 5))),
-        min_score=float(raw.get("min-score", raw.get("min_score", 50.0))),
-        cross_file_only=raw.get("cross-file-only", raw.get("cross_file_only", True)),
-        exclude_tests=raw.get("exclude-tests", raw.get("exclude_tests", True)),
-        exclude_generated=raw.get("exclude-generated", raw.get("exclude_generated", True)),
-        message=raw.get("message", "Duplicate code detected"),
-    )
-
-
 def run_duplicate_code_check(
     file_paths: list[str],
     config: DuplicateCodeConfig,

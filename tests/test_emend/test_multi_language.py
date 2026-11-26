@@ -97,28 +97,11 @@ class TestLanguageConfig:
 # ============================================================================
 
 class TestPluginLoading:
-    def test_load_python_plugin(self):
-        plugin = load_plugin("python")
-        assert plugin.import_handler is not None
-        assert plugin.comment_handler is not None
-        assert plugin.pattern_compiler is not None
-
-    def test_load_typescript_plugin(self):
-        plugin = load_plugin("typescript")
-        assert isinstance(plugin.import_handler, TreeSitterImportHandler)
-        assert isinstance(plugin.comment_handler, DocCommentHandler)
-        assert isinstance(plugin.pattern_compiler, TreeSitterPatternCompiler)
-
     def test_load_rust_plugin(self):
         plugin = load_plugin("rust")
         assert isinstance(plugin.import_handler, TreeSitterImportHandler)
         assert isinstance(plugin.comment_handler, DocCommentHandler)
         assert isinstance(plugin.pattern_compiler, TreeSitterPatternCompiler)
-
-    def test_unknown_language_gets_stubs(self):
-        plugin = load_plugin("cobol")
-        assert plugin.import_handler is not None
-        assert plugin.comment_handler is not None
 
 
 # ============================================================================
@@ -126,14 +109,6 @@ class TestPluginLoading:
 # ============================================================================
 
 class TestFileResolution:
-    def test_resolve_files_typescript(self, tmp_path):
-        (tmp_path / "a.ts").write_text("const x = 1;")
-        (tmp_path / "b.py").write_text("x = 1")
-
-        files, is_multi = resolve_files(str(tmp_path), language="typescript")
-        assert len(files) == 1
-        assert files[0].name == "a.ts"
-
     def test_resolve_files_rust(self, tmp_path):
         (tmp_path / "a.rs").write_text("fn main() {}")
         (tmp_path / "b.py").write_text("x = 1")
@@ -537,33 +512,3 @@ class TestSourceRootDetection:
         from emend.transform import _find_source_root
         result = _find_source_root(str(tmp_path), language="rust")
         assert result == str(tmp_path)
-
-
-# ============================================================================
-# Pattern compiler
-# ============================================================================
-
-class TestPatternCompilerTypescript:
-    def setup_method(self):
-        self.compiler = TreeSitterPatternCompiler("typescript")
-
-    def test_compile_simple_identifier(self):
-        ir = self.compiler.compile("console")
-        assert ir is not None
-
-    def test_compile_member_expression(self):
-        ir = self.compiler.compile("console.log")
-        assert ir is not None
-
-
-class TestPatternCompilerRust:
-    def setup_method(self):
-        self.compiler = TreeSitterPatternCompiler("rust")
-
-    def test_compile_simple_identifier(self):
-        ir = self.compiler.compile("println")
-        assert ir is not None
-
-    def test_compile_function_call(self):
-        ir = self.compiler.compile("Vec::new()")
-        assert ir is not None

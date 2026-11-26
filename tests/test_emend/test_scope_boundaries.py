@@ -39,6 +39,11 @@ def test_scope_sanitizer_dataclass_and_config():
         ("session.commit()\n    use(x)", ("lbl",), False),
         ("if flag:\n        session.commit()\n    use(x)", ("lbl",), True),
         ("use(x)\n    session.commit()", ("lbl",), True),
+        # Attribute-path taint is killed by the scope boundary too.
+        (
+            "session.user = tainted()\n    session.commit()\n    use(session.user)",
+            ("lbl",), False,
+        ),
     ],
 )
 def test_scope_sanitizer_path_coverage(tmp_path, body, labels, expected):

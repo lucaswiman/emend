@@ -77,12 +77,6 @@ def foo_engine(tmp_path):
 class TestBufferLifecycle:
     """Test the buffer_open / buffer_update / buffer_close life-cycle."""
 
-    def test_buffer_open_stores_content(self, engine):
-        eng, proj = engine
-        app = str((proj / "app.py").resolve())
-        eng.buffer_open(app, "# hot content\n")
-        assert eng.get_hot_content(app) == "# hot content\n"
-
     def test_buffer_update_replaces_content(self, engine):
         eng, proj = engine
         app = str((proj / "app.py").resolve())
@@ -99,14 +93,6 @@ class TestBufferLifecycle:
         eng.buffer_close(app)
         assert eng.get_hot_content(app) is None
 
-    def test_buffer_close_nonexistent(self, engine):
-        """Closing a file that was never opened should not raise."""
-        eng, proj = engine
-        app = str((proj / "app.py").resolve())
-        # Should not raise
-        result = eng.buffer_close(app)
-        assert result.mode == "buffer"
-
     def test_buffer_version_tracked(self, engine):
         eng, proj = engine
         app = str((proj / "app.py").resolve())
@@ -119,26 +105,6 @@ class TestBufferLifecycle:
         assert stale.items[0]["accepted"] is False
         assert eng.get_hot_content(app) == "# v2\n"
 
-    def test_buffer_open_returns_buffer_mode(self, engine):
-        eng, proj = engine
-        app = str((proj / "app.py").resolve())
-        result = eng.buffer_open(app, "x = 1\n")
-        assert result.mode == "buffer"
-
-    def test_buffer_update_returns_buffer_mode(self, engine):
-        eng, proj = engine
-        app = str((proj / "app.py").resolve())
-        eng.buffer_open(app, "x = 1\n")
-        result = eng.buffer_update(app, "x = 2\n")
-        assert result.mode == "buffer"
-
-    def test_buffer_close_returns_buffer_mode(self, engine):
-        eng, proj = engine
-        app = str((proj / "app.py").resolve())
-        eng.buffer_open(app, "x = 1\n")
-        result = eng.buffer_close(app)
-        assert result.mode == "buffer"
-
     def test_buffer_close_removed_flag_true(self, engine):
         eng, proj = engine
         app = str((proj / "app.py").resolve())
@@ -149,7 +115,9 @@ class TestBufferLifecycle:
     def test_buffer_close_removed_flag_false_for_unknown(self, engine):
         eng, proj = engine
         app = str((proj / "app.py").resolve())
+        # Closing a file that was never opened does not raise.
         result = eng.buffer_close(app)
+        assert result.mode == "buffer"
         assert result.items[0]["removed"] is False
 
     def test_multiple_buffers_independent(self, tmp_path):

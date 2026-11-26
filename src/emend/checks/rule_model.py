@@ -236,9 +236,5 @@ class CompiledRuleDocument:
                      if isinstance(check.payload, CompiledFlowRule))
 
     @property
-    def trace_flow_rules(self) -> tuple[CompiledFlowRule, ...]:
-        return self.trace.flow_rules + self.flow_rules
-
-    @property
     def all_flow_rules(self) -> tuple[CompiledFlowRule, ...]:
         return self.flow_rules + self.policy_flow_rules + self.trace.flow_rules

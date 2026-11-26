@@ -15,7 +15,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from emend.errors import BUG_EXCEPTIONS
-from emend.rules_config import (
+from emend.checks.rules_config import (
     DeadCodeConfig,
     compiled_deadcode_to_config,
     compile_rules_document,
