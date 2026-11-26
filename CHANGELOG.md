@@ -13,6 +13,17 @@
   value per file instead of a row each, database keys are stored once instead
   of twice, facts are written with a bulk import, and the redundant per-file
   fact cache is gone. The fact database is rebuilt once after upgrading.
+- The fact database stores each file path and qualified name once and refers to
+  it by an integer id (new `intern` and `interned` relations). For Django,
+  `facts.db` shrinks from 755 MB to 407 MB; a cold index, dead-code analysis
+  and the update after an edit are faster. Commands, the Python API and query
+  results still take and return text. **Custom CozoScript** (policy `datalog`
+  checks) now sees ids in the path and qualified-name columns, so a string
+  literal there no longer matches: look the id up first, as in
+  `*intern["pkg.mod.func", id], *call[id, callee, _, _, _, _, _]`, and bind
+  `*interned[id, text]` before a string function or `:order`. See "Interned
+  paths and qualified names" in the technical details. The fact database is
+  rebuilt once after upgrading.
 - Whole-project `analyze trace` and flow rules now finish on large projects:
   call and container linking no longer rescan every occurrence per call site.
 - Faster pattern linting and warm queries: language lookup no longer rescans

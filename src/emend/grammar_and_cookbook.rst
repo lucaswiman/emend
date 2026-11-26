@@ -425,6 +425,13 @@ The ``facts_query`` tool provides structured access to the project fact graph.
 Use the ``fact_type`` parameter to query: ``symbols``, ``calls``, ``references``,
 ``trace_flows``, ``types``, or ``imports``.
 
+Paths and qualified names are passed and returned as text. In the fact database
+itself they are integer ids of the ``intern[text, id]`` / ``interned[id, text]``
+dictionary, which matters only to custom CozoScript (policy ``datalog`` checks):
+there a string literal does not match such a column, so look the id up first,
+``*intern["pkg.mod.func", id], *call[id, callee, _, _, _, _, _]``. Results are
+decoded back to text.
+
 
 Cookbook recipes
 ----------------

@@ -523,6 +523,52 @@ flows_to_sink, sink_label``. Public metadata constructors accept a trailing
 ``file_path``; omitting it requires an unambiguous definition owner. Existing
 persistent fact caches rebuild automatically after the schema change.
 
+Interned paths and qualified names
+----------------------------------
+
+A file path or a qualified name is repeated in nearly every fact row, so the
+fact database stores each such text once and refers to it by an integer id.
+Two relations hold the dictionary, in the same database as the facts:
+``intern[text, id]`` and ``interned[id, text]``. Ids are at least 2\ :sup:`40`
+(the empty string is exactly 2\ :sup:`40`), which no line, column or block
+number reaches.
+
+The id columns are every ``file_path`` and ``importing_file``, and the
+qualified-name columns ``qualified_name`` (of ``symbol`` and
+``exported_symbol``), ``module_qualified_name``, ``symbol_qn``, ``caller_qn``,
+``callee_qn``, ``func_qn`` and ``parent``. Everything else is text as before,
+including ``name``, ``kind``, ``decorator``, ``var_name``,
+``import.imported_module``, ``source_loc.loc_id``, the in-file
+``search_symbol.qualified_name`` (``Class.method``) and the absolute
+``file_revision.file_path``.
+
+Results are decoded: rows returned by ``emend analyze facts``, the MCP tools,
+policy ``datalog`` checks and ``FactGraph.run_query`` carry the text, in the
+order of that text. The Python API takes and returns text throughout. Rule
+bodies that join these columns with each other need no change, because ids are
+equal exactly when the texts are.
+
+Custom CozoScript does see the ids *inside* a script:
+
+- A string literal compared with an id column matches nothing. Look the id up
+  first::
+
+      ?[callee, line] := *intern["pkg.mod.func", caller],
+                         *call[caller, callee, _, line, _, _, _]
+
+- String functions and regular expressions need the text. Bind it from the
+  id::
+
+      ?[name] := *symbol[qn, _, _, _, _, _, _], *interned[qn, name],
+                 starts_with(name, "pkg.mod.")
+
+- ``:order`` on an id column sorts by id. Bind the text as above and order by
+  it instead. Without ``:order``, rows come back in text order.
+- An integer in a result that happens to be a stored id is returned as that
+  id's text.
+
+Existing fact databases are rebuilt once after this storage change.
+
 Build system
 ------------
 
