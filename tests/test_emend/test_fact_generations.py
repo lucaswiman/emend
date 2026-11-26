@@ -8,9 +8,11 @@ other processes can see must never be written in place.
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -443,3 +445,54 @@ def test_an_edit_keeps_the_rest_of_the_generation(tmp_path):
     # Texts the generation already held keep their ids.
     assert before.items() <= after.items()
     assert "app.added" in after
+
+
+# ---------------------------------------------------------------------------
+# Copying a generation
+# ---------------------------------------------------------------------------
+
+
+def _database(path, rows, *, journal_mode="delete"):
+    conn = sqlite3.connect(path)
+    conn.execute(f"PRAGMA journal_mode={journal_mode}")
+    conn.execute("CREATE TABLE t (v)")
+    conn.executemany("INSERT INTO t VALUES (?)", [(row,) for row in rows])
+    conn.commit()
+    return conn
+
+
+def _values(path):
+    with closing(sqlite3.connect(path)) as conn:
+        return [row[0] for row in conn.execute("SELECT v FROM t ORDER BY v")]
+
+
+def test_generation_with_no_log_is_copied_as_a_file(tmp_path, monkeypatch):
+    """A finished generation is one file; SQLite's page-by-page backup of it
+    is several times slower than copying the file."""
+    source, copy = tmp_path / "source.db", tmp_path / "copy.db"
+    _database(source, range(500)).close()
+
+    def backup(*args, **kwargs):
+        raise AssertionError("a quiescent database was copied through SQLite")
+
+    monkeypatch.setattr(AnalysisStore, "_backup_sqlite", staticmethod(backup))
+    AnalysisStore._copy_sqlite(source, copy)
+
+    assert copy.read_bytes() == source.read_bytes()
+    assert _values(copy) == list(range(500))
+
+
+def test_generation_with_a_write_ahead_log_is_copied_through_sqlite(tmp_path):
+    """Rows still in the log are part of the database."""
+    source, copy = tmp_path / "source.db", tmp_path / "copy.db"
+    writer = _database(source, range(10), journal_mode="wal")
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.executemany("INSERT INTO t VALUES (?)", [(row,) for row in range(10, 20)])
+        writer.commit()
+        assert (tmp_path / "source.db-wal").stat().st_size > 0
+        AnalysisStore._copy_sqlite(source, copy)
+    finally:
+        writer.close()
+
+    assert _values(copy) == list(range(20))

@@ -2548,10 +2548,39 @@ class FactGraph:
         if not stored:
             return
 
+        # A relation whose key starts with the file is looked up by file.
+        # ``file_path in $fps`` is a filter: it reads every row of the
+        # relation, which for one changed file is nearly all of the work.
+        keyed_by_file = {
+            "file_namespace", "search_symbol", "call_by_file", "cfg_edge", "flow_blob",
+            "def_use", "method_call", "cfg_block", "source_loc", "ref_by_block",
+            "noncall_private_member_ref", "reachable_block", "exported_symbol", "import",
+        }
+        # The three call relations hold the same rows under three keys, so the
+        # one keyed by file names the rows to remove from the other two.
+        call_keys = (
+            "files[file_path] <- $files\n"
+            "?[{keys}] := files[file_path], "
+            "*call_by_file[file_path, caller_qn, callee_qn, line, col, _, _] "
+            ":rm {relation} {{{keys} => }}"
+        )
+
+        def lookup(query: str) -> str:
+            head, body = query.split(" := ", 1)
+            relation = body[1:body.index("[")]
+            if relation in ("call", "call_by_callee"):
+                return call_keys.format(relation=relation, keys=head[2:-1])
+            if relation not in keyed_by_file:
+                return query
+            column = "importing_file" if relation == "import" else "file_path"
+            atom, rest = body.split(f", {column} in $fps", 1)
+            return f"files[{column}] <- $files\n{head} := files[{column}], {atom}{rest}"
+
+        params = {"fps": stored, "files": [[ident] for ident in stored]}
         # CozoDB `:rm` requires that the query variable names in `?[...]`
         # and `:rm relation { }` match the actual column names in the
         # stored relation schema.
-        for query in (
+        for query in map(lookup, (
             # All definition metadata has explicit file ownership.
             "?[symbol_qn, decorator, file_path] := *decorator_on[symbol_qn, decorator, file_path], "
             "file_path in $fps :rm decorator_on {symbol_qn, decorator, file_path}",
@@ -2643,12 +2672,12 @@ class FactGraph:
             "*import[importing_file, imported_module, imported_name, line, _], "
             "importing_file in $fps  :rm import "
             "{importing_file, imported_module, imported_name, line => }",
-        ):
+        )):
             if operations is not None:
-                operations.append((query, {"fps": stored}))
+                operations.append((query, params))
                 continue
             try:
-                self._client.run(query, {"fps": stored})
+                self._client.run(query, params)
             except Exception:
                 logger.debug("Fact removal query failed", exc_info=True)
 

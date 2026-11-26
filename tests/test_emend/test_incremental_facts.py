@@ -396,7 +396,9 @@ def test_replace_extracted_coalesces_relation_mutations(monkeypatch):
     inserts = [operation for operation in captured if ":put symbol" in operation[0]]
     assert len(removals) == 1
     # Stored paths are named by id; rows stay text until the client stores them.
-    assert removals[0][1:] == ({"fps": graph._ids(["a.py", "b.py"])},)
+    ids = graph._ids(["a.py", "b.py"])
+    # ``fps`` filters a relation keyed by name; ``files`` looks one up by file.
+    assert removals[0][1:] == ({"fps": ids, "files": [[ident] for ident in ids]},)
     assert all(ident >= fact_graph_module.ID_BASE for ident in removals[0][1]["fps"])
     assert len(inserts) == 1
     assert inserts[0][1:] == (
@@ -531,3 +533,40 @@ class TestDerivedQueriesAfterUpdate:
             f"foo->bar should be removed, got: {call_pairs_after}"
         assert any("foo" in c[0] and "baz" in c[1] for c in call_pairs_after), \
             f"foo->baz should be present, got: {call_pairs_after}"
+
+
+def test_remove_files_takes_every_relations_rows_and_no_other_files(tmp_path):
+    """Removal looks rows up by file where it can.  Whatever the route, a
+    removed file leaves no row behind and its neighbour keeps every one."""
+    import json
+
+    from emend.analysis_store import AnalysisStore
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'removal'\n")
+    (tmp_path / "lib.py").write_text(
+        "import os\n\n\nclass Base:\n    def run(self, value):\n"
+        "        if value:\n            return os.getcwd()\n        return None\n"
+    )
+    (tmp_path / "app.py").write_text(
+        "from lib import Base\n\n\ndef main(flag):\n    worker = Base()\n"
+        "    return worker.run(flag)\n\n\nRESULT = main(True)\n"
+    )
+    store = AnalysisStore.open(tmp_path)
+    try:
+        graph = store.detached_facts()
+        before = json.loads(graph.to_json())
+        graph.remove_files(["app.py"])
+        after = json.loads(graph.to_json())
+    finally:
+        store.close()
+
+    def facts_naming(facts, path):
+        return sorted(
+            (fact for fact in facts if path in map(str, fact.values())),
+            key=lambda fact: json.dumps(fact, sort_keys=True),
+        )
+
+    assert len(facts_naming(before, "app.py")) > 20
+    assert len({fact["_type"] for fact in facts_naming(before, "app.py")}) >= 8
+    assert facts_naming(after, "app.py") == []
+    assert facts_naming(after, "lib.py") == facts_naming(before, "lib.py")

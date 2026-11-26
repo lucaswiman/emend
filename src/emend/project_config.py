@@ -12,8 +12,10 @@ Currently supports:
 from __future__ import annotations
 
 import logging
+import os
 import stat as stat_module
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -443,6 +445,42 @@ def module_name_under_root(
         else [*directories, stem]
     )
     return separator.join(module_parts) if module_parts else stem
+
+
+def module_names_under_root(
+    root: Path, source_root: Path, language: str, separator: str,
+) -> Callable[[str], str]:
+    """Return ``module_name_under_root`` for one language, over path text.
+
+    A project scan names every file on every query.  Building a path object
+    per file and asking it for its parts costs more than everything else the
+    scan does, so the usual shape of name is taken apart as text.
+    """
+    prefixes = [str(source_root) + os.sep, str(root) + os.sep]
+    package_stems = ("__init__", "mod") if language == "rust" else ("__init__",)
+
+    def name_of(file_path: str) -> str:
+        for prefix in prefixes:
+            if file_path.startswith(prefix):
+                relative = file_path[len(prefix):]
+                break
+        else:
+            relative = ""
+        *directories, name = relative.split(os.sep)
+        dot = name.rfind(".")
+        # Only the plain case, ``stem.suffix``; anything else has rules of
+        # its own for what the stem is and is left to the path object.
+        if (not relative or dot <= 0 or dot == len(name) - 1 or name[0] == "."
+                or "" in directories or ".." in directories or "." in directories):
+            return module_name_under_root(
+                Path(file_path), root, source_root, language, separator,
+            )
+        stem = name[:dot]
+        if not (directories and stem in package_stems):
+            directories.append(stem)
+        return separator.join(directories)
+
+    return name_of
 
 
 def module_resolution_context(

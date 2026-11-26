@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import secrets
 import socket
+import shutil
 import sqlite3
 import threading
 import time
@@ -578,7 +579,7 @@ class AnalysisStore:
             language: get_module_separator(language, configs.get(language))
             for language in registry[1]
         }
-        from emend.project_config import module_name_under_root, module_resolution_context
+        from emend.project_config import module_names_under_root, module_resolution_context
 
         files = sorted(_canonical_paths(collect_all_source_files(
             str(self.project_root), languages=list(registry[1]), registry=registry
@@ -587,7 +588,7 @@ class AnalysisStore:
         # them again per file costs a system call per directory level.
         root = self.project_root.resolve()
         root_text = str(root)
-        module_roots: dict[str, Path] = {}
+        module_namers: dict[str, Callable[[str], str]] = {}
         contents: dict[str, str] = {}
         revisions: list[FileRevision] = []
         observed: dict[str, tuple[int, int, int, int, int, str, str, str]] = {}
@@ -599,15 +600,13 @@ class AnalysisStore:
                 continue
             old = previous.get(file_path)
             language = detect_language(file_path, registry=registry) or "python"
-            module_root = module_roots.get(language)
-            if module_root is None:
-                module_root = module_roots[language] = module_resolution_context(
-                    root, language,
-                )[0]
-            module_name = module_name_under_root(
-                Path(file_path), root, module_root, language,
-                module_separators.get(language) or get_module_separator(language),
-            )
+            module_name_of = module_namers.get(language)
+            if module_name_of is None:
+                module_name_of = module_namers[language] = module_names_under_root(
+                    root, module_resolution_context(root, language)[0], language,
+                    module_separators.get(language) or get_module_separator(language),
+                )
+            module_name = module_name_of(file_path)
             identity = self._stat_identity(stat)
             if old is not None and old[:5] == identity:
                 content_hash = old[5]
@@ -978,13 +977,27 @@ class AnalysisStore:
             lock.close()
 
     @staticmethod
-    def _copy_sqlite(source_path: Path, destination_path: Path) -> None:
-        """Copy a coherent SQLite generation, including uncheckpointed WAL."""
+    def _backup_sqlite(source_path: Path, destination_path: Path) -> None:
         with (
             closing(sqlite3.connect(source_path)) as source,
             closing(sqlite3.connect(destination_path)) as destination,
         ):
             source.backup(destination)
+
+    @classmethod
+    def _copy_sqlite(cls, source_path: Path, destination_path: Path) -> None:
+        """Copy a coherent SQLite generation, including uncheckpointed WAL.
+
+        A generation is never written in place once it can be seen, so with
+        no log beside it the file is the whole database.  Copying the file is
+        several times faster than SQLite's page-by-page backup, and a file
+        system that can share blocks copies nothing at all.
+        """
+        logs = (Path(f"{source_path}{suffix}") for suffix in ("-wal", "-journal"))
+        if any(log.exists() and log.stat().st_size for log in logs):
+            cls._backup_sqlite(source_path, destination_path)
+        else:
+            shutil.copyfile(source_path, destination_path)
 
     def _snapshot_copy(self, source_path: Path, prefix: str) -> Path:
         """Create a stable private copy of one SQLite generation."""
