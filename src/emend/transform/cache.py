@@ -25,6 +25,33 @@ def _initialize_cache_connection(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def compact_cache_database(db_path: str | Path) -> None:
+    """Give back the disk space a cache database no longer needs.
+
+    SQLite keeps the write-ahead log at its largest size while any connection
+    is open, and an index build writes tens of megabytes through it.  Pages
+    freed by dropping a table stay inside the database file.  This empties
+    the log, and rewrites the file when most of it is free pages.
+
+    Both need every other connection to be between transactions.  When one
+    is not, nothing waits: a later build reclaims the space.
+    """
+    import sqlite3
+    from contextlib import closing
+
+    if not Path(db_path).is_file():
+        return
+    try:
+        with closing(sqlite3.connect(str(db_path), timeout=0)) as conn:
+            free = conn.execute("PRAGMA freelist_count").fetchone()[0]
+            pages = conn.execute("PRAGMA page_count").fetchone()[0]
+            if free > 256 and free * 2 > pages:
+                conn.execute("VACUUM")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+    except sqlite3.Error:
+        logger.debug("Could not compact %s", db_path, exc_info=True)
+
+
 def _resolve_shared_data_root(project_root: str) -> Path:
     """Return the main checkout root for user-managed shared data.
 

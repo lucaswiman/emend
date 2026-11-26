@@ -603,6 +603,16 @@ class EditorSearchEngine:
         self._fts_ready = True
         return True
 
+    def _rebuild_fts(self) -> int:
+        """Rebuild the full-text tables after a reindex; return their row count."""
+        from emend.transform.cache import compact_cache_database
+
+        count = self._store.write(rebuild_fts)
+        # The rebuild goes through the write-ahead log, and this process keeps
+        # its connections open, so nothing else would ever empty it.
+        compact_cache_database(self.db_path)
+        return count
+
     # -- background reindex -------------------------------------------------
 
     @property
@@ -649,7 +659,7 @@ class EditorSearchEngine:
             from emend.transform.index import ensure_search_index
 
             if ensure_search_index(self.project_root):
-                self._fts_available = self._store.write(rebuild_fts) > 0
+                self._fts_available = self._rebuild_fts() > 0
                 complete = True
         except BUG_EXCEPTIONS:
             raise
@@ -1877,7 +1887,7 @@ class EditorSearchEngine:
 
         fresh = ensure_search_index(self.project_root)
         # Rebuild FTS after any re-indexing
-        fts_count = self._store.write(rebuild_fts)
+        fts_count = self._rebuild_fts()
         self._fts_available = fts_count > 0
         self._search_ready = True
         self._fts_ready = True

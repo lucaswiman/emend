@@ -502,6 +502,14 @@ class TestReferenceSearch:
             ("lib.py", 1, 4, "definition"),
         ]
 
+    def test_reindex_leaves_an_empty_write_ahead_log(self, referenced_project):
+        """The server keeps its connections open, so nothing else empties the log."""
+        log = referenced_project / ".emend" / "cache" / "parse.db-wal"
+        with _engine(referenced_project) as engine:
+            engine.reindex()
+            assert engine.search("greet").items
+            assert not log.exists() or log.stat().st_size == 0
+
     def test_status_counts_references(self, referenced_project):
         with _engine(referenced_project) as engine:
             status = engine.status().items[0]

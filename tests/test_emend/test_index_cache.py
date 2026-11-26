@@ -1032,3 +1032,75 @@ def test_cache_initializer_drops_qualified_name_rows_in_the_old_row_format(tmp_p
         columns = [row[1] for row in conn.execute("PRAGMA table_info(qn_index)")]
         assert columns == ["file_path", "hash", "names"]
         assert conn.execute("SELECT count(*) FROM qn_index").fetchone() == (0,)
+
+
+class TestCacheFootprintAfterIndexing:
+    """An index build gives back the disk space it no longer needs."""
+
+    def test_index_leaves_an_empty_write_ahead_log(self, tmp_path):
+        """SQLite keeps the log at its largest size while any connection is
+        open, so a build empties it instead of leaving megabytes behind."""
+        from emend.transform import warm_caches
+
+        proj = make_project_dir(tmp_path)
+        (proj / "a.py").write_text(SOURCE)
+        warm_caches(str(proj), type_engine=None)
+
+        cache = proj / ".emend" / "cache"
+        assert (cache / "parse.db").stat().st_size > 0
+        for name in ("parse.db-wal", "analysis-artifacts.db-wal"):
+            log = cache / name
+            assert not log.exists() or log.stat().st_size == 0, name
+
+    def test_index_reclaims_the_space_of_a_dropped_table(self, tmp_path):
+        """Dropping the old reference table frees its pages inside the file;
+        the build that follows an upgrade returns them to the file system."""
+        from emend.transform import warm_caches
+
+        proj = make_project_dir(tmp_path)
+        (proj / "a.py").write_text(SOURCE)
+        cache = proj / ".emend" / "cache"
+        cache.mkdir()
+        db_path = cache / "parse.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "CREATE TABLE reference_index (target_qn TEXT NOT NULL, "
+                "file_path TEXT NOT NULL, line INTEGER NOT NULL, "
+                "col INTEGER NOT NULL, ref_kind TEXT NOT NULL)"
+            )
+            conn.executemany(
+                "INSERT INTO reference_index VALUES (?, ?, ?, 0, 'read')",
+                ((f"pkg.module.name_{n}", "/a/long/path/to/some/file.py", n)
+                 for n in range(100_000)),
+            )
+        assert db_path.stat().st_size > 4_000_000
+
+        warm_caches(str(proj), type_engine=None)
+
+        assert db_path.stat().st_size < 500_000
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute("SELECT name FROM symbol_index").fetchall() == [("hello",)]
+
+    def test_compaction_leaves_a_busy_database_alone(self, tmp_path):
+        """Another connection in the middle of a read keeps its snapshot."""
+        from emend.transform.cache import compact_cache_database
+
+        db_path = tmp_path / "parse.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE t (v)")
+            conn.executemany("INSERT INTO t VALUES (?)", ((n,) for n in range(1000)))
+        reader = sqlite3.connect(db_path)
+        try:
+            cursor = reader.execute("SELECT v FROM t")
+            assert cursor.fetchone() == (0,)
+            compact_cache_database(db_path)
+            assert len(cursor.fetchall()) == 999
+        finally:
+            reader.close()
+
+    def test_compaction_ignores_a_missing_database(self, tmp_path):
+        from emend.transform.cache import compact_cache_database
+
+        compact_cache_database(tmp_path / "absent.db")
+        assert not (tmp_path / "absent.db").exists()

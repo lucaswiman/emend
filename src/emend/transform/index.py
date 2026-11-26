@@ -1207,6 +1207,9 @@ def warm_caches(
             logger.debug("warm_caches: duplicate analysis failed", exc_info=True)
             stats["dup_cached"] = 0
 
+    from .cache import compact_cache_database
+    for database in (db_path, store.artifact_path):
+        compact_cache_database(database)
     return stats
 
 
