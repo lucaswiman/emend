@@ -550,6 +550,21 @@ class FactGraph:
                 pass
         return str(resolved)
 
+    def stored_paths_containing(self, fragment: str) -> list[str]:
+        """Stored paths of the files whose absolute path contains *fragment*, ignoring case."""
+        if self._snapshot is None:
+            return []
+        root = Path(self._snapshot.project_root)
+        fragment = fragment.lower()
+        paths = []
+        for revision in self._snapshot.files:
+            if fragment in revision.file_path.lower():
+                try:
+                    paths.append(str(Path(revision.file_path).relative_to(root)))
+                except ValueError:
+                    paths.append(revision.file_path)
+        return paths
+
     def published_snapshot_id(self) -> str | None:
         """Return the generation marker stored alongside the fact relations."""
         try:
@@ -2077,6 +2092,97 @@ class FactGraph:
             )
             for r in result["rows"]
         ]
+
+    # -- Reference lookups for interactive search --------------------------
+    #
+    # These read the stored relation as it is, in every language at once.  A
+    # limited answer does not depend on the order ids were handed out, so it is
+    # the same after a rebuild.
+
+    def reference_locations(
+        self, symbol_qn: str, *, ref_kind: str | None = None, limit: int | None = None,
+    ) -> list[tuple[str, int, int, str]]:
+        """Where *symbol_qn* is named: ``(file_path, line, col, ref_kind)`` rows.
+
+        Rows are in path order, then position, and stop at *limit*.
+        """
+        params: dict[str, Any] = {"qn": self._id(symbol_qn)}
+        kind = ""
+        if ref_kind is not None:
+            kind = ", kind == $kind"
+            params["kind"] = ref_kind
+        rows = self._client.run(
+            "?[path, line, col, kind] := "
+            "*reference{symbol_qn: $qn, file_path: fid, line, col, ref_kind: kind}, "
+            f"*interned[fid, path]{kind} :order path, line, col"
+            + (f" :limit {int(limit)}" if limit is not None else ""),
+            params,
+        )["rows"]
+        return [tuple(row) for row in rows]
+
+    def references_to_names_containing(
+        self, fragment: str, *, limit: int, file_paths: Iterable[str] | None = None,
+    ) -> list[tuple[str, str, int, int, str]]:
+        """References to names that contain *fragment*, ignoring case.
+
+        Rows are ``(symbol_qn, file_path, line, col, ref_kind)`` in path order,
+        then position.  At most *limit* are returned: those of the first
+        matching names in name order, each name's in path order.  *file_paths*
+        keeps only references in those stored paths.
+
+        The name dictionary is read in name order until enough names match,
+        so a fragment that matches nothing reads all of it.
+        """
+        limit = int(limit)
+        params: dict[str, Any] = {"fragment": fragment.lower()}
+        scope = files = ""
+        if file_paths is not None:
+            params["files"] = [[ident] for ident in self._known_ids(file_paths)]
+            if not params["files"]:
+                return []
+            files = "scope[fid] <- $files\n"
+            scope = "scope[fid], "
+        # Every name returned has a reference, so *limit* names are enough.
+        names = self._client.run(
+            f"{files}?[name, nid] := *intern[name, nid], "
+            "str_includes(lowercase(name), $fragment), "
+            f"*reference{{symbol_qn: nid, file_path: fid}}{', scope[fid]' if scope else ''} "
+            f":limit {limit}",
+            params, decode=False,
+        )["rows"]
+        if not names:
+            return []
+        params["names"] = [[nid, name] for name, nid in names]
+        rows = self._client.run(
+            f"{files}names[nid, name] <- $names\n"
+            "?[name, path, line, col, kind] := names[nid, name], "
+            "*reference{symbol_qn: nid, file_path: fid, line, col, ref_kind: kind}, "
+            f"{scope}*interned[fid, path] "
+            f":order name, path, line, col :limit {limit}",
+            params,
+        )["rows"]
+        return sorted(
+            (tuple(row) for row in rows),
+            key=lambda row: (row[1], row[2], row[3], row[0]),
+        )
+
+    def referenced_names_containing(self, fragment: str, *, limit: int) -> list[str]:
+        """The first referenced names, in name order, that contain *fragment*.
+
+        The match is exact about case.  The name dictionary is read in name
+        order until *limit* names match.
+        """
+        rows = self._client.run(
+            "?[name] := *intern[name, nid], str_includes(name, $fragment), "
+            f"*reference{{symbol_qn: nid}} :limit {int(limit)}",
+            {"fragment": fragment},
+        )["rows"]
+        return [row[0] for row in rows]
+
+    def reference_count(self) -> int:
+        """How many references the graph holds."""
+        rows = self._client.run("?[count(line)] := *reference{line}")["rows"]
+        return int(rows[0][0]) if rows else 0
 
     def callers_datalog(self, symbol_qn: str, *, namespace: str | None = None) -> list[CallFact]:
         """Find all callers of *symbol_qn* via Datalog query.

@@ -321,19 +321,16 @@ def test_cache_migration_preserves_editor_rows_and_freshness(tmp_path):
             "SELECT s.name FROM symbol_fts f JOIN symbol_index s ON f.rowid = s.rowid "
             "WHERE symbol_fts MATCH 'hello'"
         ).fetchall() == [("hello",)]
-        assert conn.execute("SELECT * FROM reference_index").fetchall() == [
-            ("a.hello", "b.py", 3, 4, "call")
-        ]
         assert conn.execute("SELECT * FROM venv_files").fetchall() == [
             ("lib.py", 1, 2, 3, 4, 5)
         ]
-        conn.execute("INSERT INTO reference_index VALUES ('b.world', 'a.py', 5, 6, 'read')")
         conn.execute("INSERT INTO venv_files VALUES ('other.py', 6, 7, 8, 9, 10)")
         # Reduced-schema writes must work on upgraded caches too.
         conn.execute("INSERT INTO symbol_index (file_path, name) VALUES ('b.py', 'world')")
         assert conn.execute("SELECT rowid FROM symbol_index WHERE name='world'").fetchone() == (43,)
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert not tables & {"import_graph", "dsl_symbols", "dsl_links"}
+        # References are read from the fact graph: the old table is dropped.
+        assert not tables & {"import_graph", "dsl_symbols", "dsl_links", "reference_index"}
 
 
 def test_cache_migration_copy_failure_preserves_rows_and_outer_transaction(tmp_path):
@@ -389,7 +386,7 @@ class TestIndexBatchCacheHit:
                 [(str(tmp_path / "a.py"), SOURCE)])
         assert _index_batch(args)[:4] == (1, 1, 0, 1)
         assert _db_row_count(db_path, "qn_index") == 1
-        assert _index_batch(args) == (0, 0, 1, 0, 0)
+        assert _index_batch(args) == (0, 0, 1, 0)
         assert _db_row_count(db_path, "qn_index") == 1
         with sqlite3.connect(db_path) as conn:
             content_hash = hashlib.md5(SOURCE.encode(), usedforsecurity=False).digest()
@@ -693,7 +690,7 @@ class TestErrorFileCaching:
 
 
 # ---------------------------------------------------------------------------
-# New index tables: symbol_index, import_graph, reference_index
+# Index tables: symbol_index and the import query
 # ---------------------------------------------------------------------------
 
 
@@ -832,52 +829,6 @@ def test_import_query_uses_canonical_facts(tmp_path):
     warm_caches(str(project), type_engine="none")
     assert query_import_graph(str(project), "os") == []
     assert query_import_graph(str(project), "json") == [str(path)]
-
-
-class TestReferenceIndex:
-    """Tests for the reference_index table."""
-
-    def test_reference_index_populated(self, tmp_path):
-        """Indexing populates the reference_index with QN references."""
-        from emend.transform import _index_batch
-
-        db_path = tmp_path / "parse.db"
-        source = (
-            "def helper(): return 1\n"
-            "\n"
-            "def main():\n"
-            "    x = helper()\n"
-            "    return x\n"
-        )
-        batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), str(tmp_path), batch))
-
-        count = _db_row_count(db_path, "reference_index")
-        # Should have references for helper, main, x, etc.
-        assert count > 0
-
-    def test_reference_index_has_call_kind(self, tmp_path):
-        """Reference index records call sites with ref_kind='call'."""
-        from emend.transform import _index_batch
-
-        db_path = tmp_path / "parse.db"
-        source = (
-            "def process(): return 1\n"
-            "\n"
-            "result = process()\n"
-        )
-        batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), str(tmp_path), batch))
-
-        conn = sqlite3.connect(str(db_path))
-        calls = conn.execute(
-            "SELECT target_qn, line, ref_kind FROM reference_index "
-            "WHERE ref_kind = 'call'"
-        ).fetchall()
-        conn.close()
-
-        # The call to process() should be recorded
-        assert len(calls) >= 1
 
 
 class TestFileManifest:

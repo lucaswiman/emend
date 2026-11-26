@@ -1317,3 +1317,114 @@ class TestBuildFromFiles:
         file_paths = {s.file_path for s in symbols}
         # Should contain the resolved absolute path
         assert str(src.resolve()) in file_paths
+
+
+# ---------------------------------------------------------------------------
+# Reference lookups for interactive search (the editor has no table of its own)
+# ---------------------------------------------------------------------------
+
+
+def _reference_graph() -> FactGraph:
+    graph = FactGraph()
+    graph.add_references_batch([
+        ReferenceFact("pkg.mod.run", "src/b.py", 3, 4, "call"),
+        ReferenceFact("pkg.mod.run", "src/a.py", 9, 0, "read"),
+        ReferenceFact("pkg.mod.run", "src/a.py", 2, 8, "call"),
+        ReferenceFact("pkg.mod.Run_All", "src/a.py", 5, 0, "read"),
+        ReferenceFact("pkg.mod.RunXAll", "src/a.py", 6, 0, "read"),
+        ReferenceFact("pkg.other.walk", "tests/c.py", 1, 0, "call"),
+    ])
+    return graph
+
+
+class TestReferenceLookupForSearch:
+    def test_locations_come_in_path_then_position_order(self):
+        assert _reference_graph().reference_locations("pkg.mod.run") == [
+            ("src/a.py", 2, 8, "call"),
+            ("src/a.py", 9, 0, "read"),
+            ("src/b.py", 3, 4, "call"),
+        ]
+
+    def test_locations_filter_by_kind_before_the_limit(self):
+        graph = _reference_graph()
+        assert graph.reference_locations("pkg.mod.run", ref_kind="read") == [
+            ("src/a.py", 9, 0, "read"),
+        ]
+        assert graph.reference_locations("pkg.mod.run", ref_kind="call", limit=1) == [
+            ("src/a.py", 2, 8, "call"),
+        ]
+
+    def test_locations_of_an_unknown_name_are_empty(self):
+        assert _reference_graph().reference_locations("pkg.mod.absent") == []
+
+    def test_fragment_search_ignores_case_and_orders_by_path(self):
+        assert _reference_graph().references_to_names_containing("RUN", limit=10) == [
+            ("pkg.mod.run", "src/a.py", 2, 8, "call"),
+            ("pkg.mod.Run_All", "src/a.py", 5, 0, "read"),
+            ("pkg.mod.RunXAll", "src/a.py", 6, 0, "read"),
+            ("pkg.mod.run", "src/a.py", 9, 0, "read"),
+            ("pkg.mod.run", "src/b.py", 3, 4, "call"),
+        ]
+
+    def test_fragment_search_treats_underscore_and_percent_literally(self):
+        graph = _reference_graph()
+        assert [row[0] for row in graph.references_to_names_containing("n_a", limit=10)] == [
+            "pkg.mod.Run_All",
+        ]
+        assert graph.references_to_names_containing("%", limit=10) == []
+
+    def test_fragment_search_keeps_the_first_names_in_name_order(self):
+        graph = _reference_graph()
+        # ``RunXAll`` and ``Run_All`` sort before ``run``: they take the limit.
+        assert graph.references_to_names_containing("pkg", limit=2) == [
+            ("pkg.mod.Run_All", "src/a.py", 5, 0, "read"),
+            ("pkg.mod.RunXAll", "src/a.py", 6, 0, "read"),
+        ]
+        # One name with more references than the limit keeps its first paths.
+        assert graph.references_to_names_containing("mod.run", limit=3) == [
+            ("pkg.mod.run", "src/a.py", 2, 8, "call"),
+            ("pkg.mod.Run_All", "src/a.py", 5, 0, "read"),
+            ("pkg.mod.RunXAll", "src/a.py", 6, 0, "read"),
+        ]
+
+    def test_fragment_search_limit_is_stable_however_ids_were_assigned(self):
+        """The same facts written in another order give the same limited answer."""
+        facts = [
+            ReferenceFact("pkg.b", "z.py", 1, 0, "read"),
+            ReferenceFact("pkg.a", "y.py", 1, 0, "read"),
+            ReferenceFact("pkg.a", "x.py", 1, 0, "read"),
+            ReferenceFact("pkg.c", "w.py", 1, 0, "read"),
+        ]
+        answers = []
+        for ordering in (facts, facts[::-1]):
+            graph = FactGraph()
+            for fact in ordering:
+                graph.add_reference(fact)
+            answers.append(graph.references_to_names_containing("pkg", limit=2))
+        assert answers[0] == answers[1] == [
+            ("pkg.a", "x.py", 1, 0, "read"),
+            ("pkg.a", "y.py", 1, 0, "read"),
+        ]
+
+    def test_fragment_search_can_be_limited_to_files(self):
+        graph = _reference_graph()
+        assert graph.references_to_names_containing(
+            "pkg", limit=10, file_paths=["src/b.py", "tests/c.py", "never/indexed.py"],
+        ) == [
+            ("pkg.mod.run", "src/b.py", 3, 4, "call"),
+            ("pkg.other.walk", "tests/c.py", 1, 0, "call"),
+        ]
+        assert graph.references_to_names_containing("pkg", limit=10, file_paths=[]) == []
+
+    def test_referenced_names_match_a_fragment_with_its_case(self):
+        graph = _reference_graph()
+        assert graph.referenced_names_containing("mod.Run", limit=10) == [
+            "pkg.mod.RunXAll", "pkg.mod.Run_All",
+        ]
+        assert graph.referenced_names_containing("mod.Run", limit=1) == ["pkg.mod.RunXAll"]
+        # A file path is in the same dictionary as the names, but is not one.
+        assert graph.referenced_names_containing("src/", limit=10) == []
+
+    def test_reference_count(self):
+        assert _reference_graph().reference_count() == 6
+        assert FactGraph().reference_count() == 0

@@ -133,18 +133,17 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
     (FTS5 trigram), freshness metadata (file_manifest, index_meta), the QN
     pre-filter cache. Structured analysis facts
     (symbols, references, imports, CFG, def-use, calls) are owned by CozoDB
-    facts.db. ``symbol_index`` and ``reference_index`` remain for editor
-    search.
+    facts.db. ``symbol_index`` remains for editor search; references are
+    read from the fact graph.
     """
     # Preserve symbol rowids: FTS rows refer to them. These fields and tables
     # were populated by old indexers but no longer have consumers.
-    for table in ("import_graph", "dsl_symbols", "dsl_links"):
+    for table in ("import_graph", "dsl_symbols", "dsl_links", "reference_index"):
         conn.execute(f"DROP TABLE IF EXISTS {table}")
     for index in ("idx_sym_hash", "idx_ref_hash", "idx_manifest_hash"):
         conn.execute(f"DROP INDEX IF EXISTS {index}")
     for table, obsolete in (
         ("symbol_index", {"content_hash", "is_entry_point", "is_exported", "has_noqa"}),
-        ("reference_index", {"content_hash"}),
         ("file_manifest", {"mtime_ns", "size", "indexed_at"}),
         ("venv_files", {"content_hash"}),
     ):
@@ -202,23 +201,6 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_sym_kind ON symbol_index(kind)"
-    )
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS reference_index ("
-        "  target_qn TEXT NOT NULL,"
-        "  file_path TEXT NOT NULL,"
-        "  line INTEGER NOT NULL,"
-        "  col INTEGER NOT NULL,"
-        "  ref_kind TEXT NOT NULL"
-        ")"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_ref_qn "
-        "ON reference_index(target_qn)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_ref_file "
-        "ON reference_index(file_path)"
     )
     # Duplicate analysis payload cache: one row per unique file
     # content (keyed by MD5 hash). ``data`` is the compressed JSON of the

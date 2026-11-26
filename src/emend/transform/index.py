@@ -106,7 +106,6 @@ def _write_index_rows(
     conn: sqlite3.Connection,
     qn_rows: list[tuple[str, bytes, bytes]],
     sym_rows: list[tuple],
-    ref_rows: list[tuple],
 ) -> None:
     """Bulk-write collected index rows to the SQLite cache.
 
@@ -114,19 +113,14 @@ def _write_index_rows(
     a second indexing pass replaces stale rows. Failed writes roll back and
     propagate so callers cannot publish a successful freshness marker.
     """
-    has_data = qn_rows or sym_rows or ref_rows
-    if not has_data:
+    if not qn_rows and not sym_rows:
         return
     with conn:
         if qn_rows:
             revised_paths = list({row[0] for row in qn_rows})
-            for table, column in (
-                ("qn_index", "file_path"),
-                ("symbol_index", "file_path"),
-                ("reference_index", "file_path"),
-            ):
+            for table in ("qn_index", "symbol_index"):
                 conn.executemany(
-                    f"DELETE FROM {table} WHERE {column} = ?",
+                    f"DELETE FROM {table} WHERE file_path = ?",
                     ((path,) for path in revised_paths),
                 )
             conn.executemany(
@@ -142,22 +136,15 @@ def _write_index_rows(
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 sym_rows,
             )
-        if ref_rows:
-            conn.executemany(
-                "INSERT INTO reference_index "
-                "(target_qn, file_path, line, col, ref_kind) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ref_rows,
-            )
 
 
-def _index_batch(args: tuple[str, str, list[tuple[str, str]]], *, schema_initialized: bool = False) -> tuple[int, int, int, int, int]:
+def _index_batch(args: tuple[str, str, list[tuple[str, str]]], *, schema_initialized: bool = False) -> tuple[int, int, int, int]:
     """Own one connection per worker batch, with one transaction per file."""
     import sqlite3
     from .cache import _initialize_cache_connection
 
     if not args[2]:
-        return (0, 0, 0, 0, 0)
+        return (0, 0, 0, 0)
     with closing(sqlite3.connect(args[0], timeout=30)) as conn:
         if schema_initialized:
             conn.execute("PRAGMA synchronous=NORMAL")
@@ -167,11 +154,12 @@ def _index_batch(args: tuple[str, str, list[tuple[str, str]]], *, schema_initial
 
 
 @module_context_snapshot()
-def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, int, int]:
+def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, int]:
     """Worker function for per-file indexing.
 
-    Parses a batch of files, resolves qualified names,
-    collects symbol definitions and reference entries. Each completed file is
+    Parses a batch of files, resolves qualified names and collects symbol
+    definitions.  References are not indexed here: the fact graph is their
+    only store.  Each completed file is
     written atomically to SQLite before deriving the next, overlapping writes
     with other workers' analysis.
 
@@ -181,7 +169,7 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
         args: (db_path, project_root, [(file_path, content), ...])
 
     Returns:
-        (parse_count, qn_count, skipped_count, sym_count, ref_count).
+        (parse_count, qn_count, skipped_count, sym_count).
     """
     from emend import cache_codec
     from emend.analysis_store import collect_symbol_info as _collect_symbols_ts
@@ -202,13 +190,12 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
 
     skipped = 0
     processed = 0
-    row_counts = [0] * 3
+    row_counts = [0] * 2
     for scope_hash, py_file, content in file_hashes:
-        # The QN cache is the core index. The derived tables (symbol_index,
-        # reference_index) may legitimately have zero rows for a
-        # given file (e.g. a file with only assignments has no symbols) and are
-        # written in lockstep with the QN cache, so we re-derive all of them
-        # exactly when the QN cache entry is missing.
+        # The QN cache is the core index. A file may legitimately have no
+        # symbol_index rows (e.g. an empty module), and they are written in
+        # lockstep with the QN cache, so both are re-derived exactly when the
+        # QN cache entry is missing.
         if (str(Path(py_file).resolve()), scope_hash) in cached_qn:
             skipped += 1
             continue
@@ -216,7 +203,6 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
         processed += 1
         qn_rows: list[tuple[str, bytes, bytes]] = []
         sym_rows: list[tuple] = []
-        ref_rows: list[tuple] = []
 
         # Use Rust scope resolver for QN and reference collection
         # (replaces expensive MetadataWrapper + _QNCollector + _RefIndexCollector).
@@ -279,18 +265,9 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
                 sym.returns,
             ))
 
-        if scope_indexed:
-            try:
-                file_refs = scope_resolver.references_in_file(py_file)
-            except Exception:
-                logger.debug("reference collection failed for %s", py_file, exc_info=True)
-                file_refs = []
-            for qn_str, line, col, offset, end_offset, kind, _ann in file_refs:
-                ref_rows.append((qn_str, py_file, line, col, kind))
-
         # Keep a file's freshness marker and derived rows in one transaction.
         # Do not retain a worker's entire batch before starting disk writes.
-        rows = (qn_rows, sym_rows, ref_rows)
+        rows = (qn_rows, sym_rows)
         _write_index_rows(conn, *rows)
         row_counts = [count + len(batch) for count, batch in zip(row_counts, rows)]
 
@@ -509,13 +486,9 @@ def _ensure_index_fresh_impl(
         # Clean up deleted files
         for deleted_path in scan.deleted:
             try:
-                for table, column in (
-                    ("qn_index", "file_path"),
-                    ("symbol_index", "file_path"),
-                    ("reference_index", "file_path"),
-                ):
+                for table in ("qn_index", "symbol_index"):
                     conn.execute(
-                        f"DELETE FROM {table} WHERE {column} = ?",
+                        f"DELETE FROM {table} WHERE file_path = ?",
                         (str(Path(deleted_path).resolve()),),
                     )
                 conn.execute(
@@ -558,9 +531,18 @@ def _ensure_index_fresh(
 
 
 def ensure_search_index(project_path: str) -> bool:
-    """Finish a requested index refresh, including cold and large updates."""
+    """Finish a requested index refresh, including cold and large updates.
+
+    Editor reference lookups read the fact graph as last published, so a
+    refresh brings the facts up to date as well as the search tables.
+    """
     if not _ensure_index_fresh(project_path):
         warm_caches(project_path, type_engine=None, build_fts=False, language=None)
+    else:
+        from .project_iter import _find_project_root
+        from emend.analysis_store import AnalysisStore
+
+        AnalysisStore.open(_find_project_root(project_path)).query_facts()
     return True
 
 
@@ -926,7 +908,11 @@ def get_index_status(project_path: str) -> dict | None:
                 info[scoped] = info[scoped_key]
 
         # Counts
-        for table in ("file_manifest", "symbol_index", "reference_index"):
+        from emend.analysis_store import AnalysisStore
+
+        graph = AnalysisStore.open(project_root).published_facts()
+        info["reference_count"] = graph.reference_count() if graph is not None else 0
+        for table in ("file_manifest", "symbol_index"):
             try:
                 info[f"{table}_count"] = conn.execute(
                     f"SELECT COUNT(*) FROM {table}"
@@ -1029,7 +1015,7 @@ def warm_caches(
 
     stats: dict[str, int | str] = {
         "files": len(file_contents), "indexed": 0, "qn_cached": 0,
-        "skipped": 0, "sym_cached": 0, "ref_cached": 0,
+        "skipped": 0, "sym_cached": 0,
         "type_cached": 0, "type_engine": "",
         "fts_indexed": 0, "dup_cached": 0,
     }
@@ -1062,7 +1048,7 @@ def warm_caches(
                     content.encode(), usedforsecurity=False,
                 ).digest(), revision.file_path, project_root)
                 if scope_hash in cached_qn[revision.file_path]:
-                    return (0, 0, 1, 0, 0)
+                    return (0, 0, 1, 0)
             return _index_batch((db_path, project_root,
                                  [(revision.file_path, content)]), schema_initialized=True)
         return None
@@ -1070,8 +1056,7 @@ def warm_caches(
     def prepared_file(revision, result):
         if result is not None:
             for key, count in zip(
-                ("indexed", "qn_cached", "skipped", "sym_cached",
-                 "ref_cached"), result,
+                ("indexed", "qn_cached", "skipped", "sym_cached"), result,
             ):
                 stats[key] += count
         if callback:

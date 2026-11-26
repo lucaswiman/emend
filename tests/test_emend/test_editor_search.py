@@ -379,49 +379,134 @@ class TestUnifiedSearch:
 # ---------------------------------------------------------------------------
 
 
+REFERENCE_SOURCES = {
+    "lib.py": "def greet(name):\n    return name\n",
+    "app.py": (
+        "from lib import greet\n"
+        "\n"
+        "\n"
+        "def main():\n"
+        "    greet('a')\n"
+        "    return greet\n"
+    ),
+}
+
+
+def _write_project(tmp_path, files):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    for name, content in files.items():
+        (proj / name).write_text(content)
+    return proj
+
+
+def _tool_index(project):
+    """Index a project the way ``emend tool index`` does: search index and facts."""
+    from emend.transform import warm_caches
+
+    warm_caches(str(project), type_engine=None)
+
+
+@pytest.fixture
+def referenced_project(tmp_path):
+    proj = _write_project(tmp_path, REFERENCE_SOURCES)
+    _tool_index(proj)
+    return proj
+
+
+def _locations(result):
+    return [
+        (Path(item["file_path"]).name, item["line"], item["col"], item["ref_kind"])
+        for item in result.items
+    ]
+
+
 class TestReferenceSearch:
-    def test_find_references(self, indexed_project):
+    """References come from the project's fact graph, as last indexed."""
+
+    def test_find_references(self, referenced_project):
+        with _engine(referenced_project) as engine:
+            result = engine.search_references("lib.greet")
+        assert result.mode == "reference"
+        assert result.query == "lib.greet"
+        assert _locations(result) == [
+            ("app.py", 1, 16, "import"),
+            ("app.py", 5, 4, "call"),
+            ("app.py", 6, 11, "read"),
+            ("lib.py", 1, 4, "definition"),
+        ]
+        assert {item["target_qn"] for item in result.items} == {"lib.greet"}
+        # An editor opens these paths: they are absolute.
+        assert result.items[0]["file_path"] == str(referenced_project / "app.py")
+
+    def test_ref_kind_filter(self, referenced_project):
+        with _engine(referenced_project) as engine:
+            result = engine.search_references("lib.greet", ref_kind="call")
+        assert _locations(result) == [("app.py", 5, 4, "call")]
+
+    def test_limit_keeps_the_first_paths(self, referenced_project):
+        with _engine(referenced_project) as engine:
+            result = engine.search_references("lib.greet", limit=2)
+        assert _locations(result) == [
+            ("app.py", 1, 16, "import"),
+            ("app.py", 5, 4, "call"),
+        ]
+        assert result.truncated
+
+    def test_unknown_name_has_no_references(self, referenced_project):
+        with _engine(referenced_project) as engine:
+            assert engine.search_references("lib.absent").items == []
+
+    def test_search_index_holds_no_reference_table(self, referenced_project):
+        """References are stored once, in the fact graph."""
+        db = referenced_project / ".emend" / "cache" / "parse.db"
+        with sqlite3.connect(db) as conn:
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')"
+            )}
+        assert not {name for name in tables if "ref" in name.lower()}
+
+    def test_without_facts_there_are_no_references_and_none_are_built(self, indexed_project):
+        """A lookup never starts a fact build: that is the indexer's job."""
+        facts = indexed_project / ".emend" / "cache" / "facts.db"
+        assert not facts.exists()
         with _engine(indexed_project) as engine:
-            engine._store.write(lambda conn: conn.execute(
-                "INSERT INTO reference_index "
-                "(target_qn, file_path, line, col, ref_kind) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ("sample.greet", "sample.py", 6, 15, "call"),
-            ).close())
+            assert engine.search_references("sample.parse_pattern").items == []
+            assert engine._search_literals(["parse"]).items == []
+            assert engine.status().items[0]["reference_count"] == 0
+        assert not facts.exists()
 
-            result = engine.search_references("sample.greet")
-            assert result.mode == "reference"
-            assert result.items == [{
-                "target_qn": "sample.greet",
-                "file_path": "sample.py",
-                "line": 6,
-                "col": 15,
-                "ref_kind": "call",
-            }]
+    def test_lookup_answers_from_the_last_index_without_scanning(
+        self, referenced_project, monkeypatch,
+    ):
+        """An edit is not seen until the next reindex, and no lookup scans for it."""
+        from emend.analysis_store import AnalysisStore
 
-    def test_ref_kind_filter(self, indexed_project):
-        with _engine(indexed_project) as engine:
-            # Seed known references so the filter has something to act on:
-            # two "call" refs and one "read" ref for the same target.
-            def seed(conn):
-                conn.executemany(
-                    "INSERT INTO reference_index "
-                    "(target_qn, file_path, line, col, ref_kind) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    [
-                        ("sample.greet", "f.py", line, 0, ref_kind)
-                        for ref_kind, line in [("call", 10), ("read", 11), ("call", 12)]
-                    ],
-                )
-            engine._store.write(seed)
+        (referenced_project / "app.py").write_text("from lib import greet\n")
 
-            result = engine.search_references(
-                "sample.greet", ref_kind="call"
-            )
-            # The read ref is filtered out; only the two call refs remain.
-            assert len(result.items) == 2
-            for item in result.items:
-                assert item["ref_kind"] == "call"
+        def scan(self):
+            raise AssertionError("a reference lookup scanned the project")
+
+        monkeypatch.setattr(AnalysisStore, "_scan_disk", scan)
+        with _engine(referenced_project) as engine:
+            result = engine.search_references("lib.greet")
+        assert len(result.items) == 4
+
+    def test_reindex_brings_references_up_to_date(self, referenced_project):
+        (referenced_project / "app.py").write_text("from lib import greet\n")
+        with _engine(referenced_project) as engine:
+            engine.reindex()
+            result = engine.search_references("lib.greet")
+        assert _locations(result) == [
+            ("app.py", 1, 16, "import"),
+            ("lib.py", 1, 4, "definition"),
+        ]
+
+    def test_status_counts_references(self, referenced_project):
+        with _engine(referenced_project) as engine:
+            status = engine.status().items[0]
+        assert status["available"]
+        assert status["reference_count"] >= 4
 
 
 # ---------------------------------------------------------------------------
@@ -948,27 +1033,55 @@ class TestExtractImportNames:
 
 
 # ---------------------------------------------------------------------------
-# Bug: _search_literals leaks SQL LIKE wildcards for identifiers with '_'
+# Literal fallback for incomplete patterns
 # ---------------------------------------------------------------------------
 
 
-class TestSearchLiteralsWildcards:
-    """The literal is interpolated into a ``LIKE`` pattern; ``_`` must be
-    treated as a literal underscore, not a single-character wildcard."""
+class TestSearchLiterals:
+    """An incomplete pattern falls back to names that contain its literals."""
 
-    def test_underscore_not_treated_as_wildcard(self, tmp_path):
-        proj = build_indexed_project(tmp_path, {"sample.py": SAMPLE_SOURCE})
-        with _engine(proj) as engine:
-            engine._store.write(lambda conn: conn.executemany(
-                "INSERT INTO reference_index "
-                "(target_qn, file_path, line, col, ref_kind) "
-                "VALUES (?, ?, ?, ?, ?)",
-                [
-                    ("abc", "f.py", 1, 0, "read"),
-                    ("a_c", "f.py", 2, 0, "read"),
-                ],
-            ).close())
+    SOURCES = {
+        "sample.py": "abc = 1\na_c = 2\nprint(abc, a_c)\n",
+        "other.py": "from sample import a_c\nvalue = a_c\n",
+    }
+
+    @pytest.fixture
+    def literal_project(self, tmp_path):
+        proj = _write_project(tmp_path, self.SOURCES)
+        _tool_index(proj)
+        return proj
+
+    def test_underscore_not_treated_as_wildcard(self, literal_project):
+        with _engine(literal_project) as engine:
             result = engine._search_literals(["a_c"])
-        qns = {item["target_qn"] for item in result.items}
-        assert "a_c" in qns
-        assert "abc" not in qns
+        assert result.mode == "pattern"
+        assert {item["target_qn"] for item in result.items} == {"sample.a_c"}
+
+    def test_match_ignores_case(self, literal_project):
+        with _engine(literal_project) as engine:
+            result = engine._search_literals(["A_C"])
+        assert {item["target_qn"] for item in result.items} == {"sample.a_c"}
+
+    def test_items_are_ordered_by_path_then_line(self, literal_project):
+        with _engine(literal_project) as engine:
+            result = engine._search_literals(["a_c"])
+        assert _locations(result) == sorted(_locations(result))
+        assert {name for name, *_ in _locations(result)} == {"other.py", "sample.py"}
+        assert all(Path(item["file_path"]).is_absolute() for item in result.items)
+
+    def test_file_scope_is_a_fragment_of_the_absolute_path(self, literal_project):
+        with _engine(literal_project) as engine:
+            by_name = engine._search_literals(["a_c"], file_scope="other.py")
+            by_path = engine._search_literals(
+                ["a_c"], file_scope=str(literal_project / "sample.py"),
+            )
+            nowhere = engine._search_literals(["a_c"], file_scope="absent.py")
+        assert {name for name, *_ in _locations(by_name)} == {"other.py"}
+        assert {name for name, *_ in _locations(by_path)} == {"sample.py"}
+        assert nowhere.items == []
+
+    def test_limit_truncates(self, literal_project):
+        with _engine(literal_project) as engine:
+            result = engine._search_literals(["a_c"], limit=1)
+        assert len(result.items) == 1
+        assert result.truncated

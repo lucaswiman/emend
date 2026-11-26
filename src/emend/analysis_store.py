@@ -1609,6 +1609,24 @@ class AnalysisStore:
                 return graph
             return self._typed_facts(graph, type_engine)
 
+    def published_facts(self):
+        """Return the facts this store last saw published, without checking them.
+
+        Interactive lookups use this: it never scans the project, builds
+        facts, or waits for a build.  The answer is as old as the last index.
+        ``None`` means that nothing is published, or that a build holds the
+        store before this process has opened a generation.
+        """
+        graph = self._disk_graph
+        if graph is not None and self._generation_exists(graph):
+            return graph
+        if not self._graph_lock.acquire(blocking=False):
+            return None
+        try:
+            return self._adopt_published_facts()
+        finally:
+            self._graph_lock.release()
+
     def source_snapshot(self) -> AnalysisSnapshot:
         """Return current disk/overlay identity without constructing a graph."""
         with self._source_lock:
