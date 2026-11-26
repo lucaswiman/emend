@@ -876,11 +876,18 @@ def _add_cross_file_calls(
     """
     by_function: dict[tuple[str, str], list[tuple[tuple[str, int], FlowEventFact]]] = defaultdict(list)
     by_call: dict[tuple[str, int], list[tuple[tuple[str, int], FlowEventFact]]] = defaultdict(list)
+    # Every lookup below is keyed.  A whole-project event table holds millions
+    # of occurrences, so scanning it once per resolved call never finishes.
+    functions_by_name: dict[tuple[str, str], dict[tuple[str, str], None]] = defaultdict(dict)
+    calls_by_line: dict[tuple[str, int], list[tuple[tuple[str, int], FlowEventFact]]] = defaultdict(list)
     for node, event in events.items():
         function = (event.file_path, event.func_id)
         by_function[function].append((node, event))
+        functions_by_name[(event.file_path, event.func_name)][function] = None
         if event.call_id is not None:
             by_call[(event.file_path, event.call_id)].append((node, event))
+        if event.role == "call":
+            calls_by_line[(event.file_path, event.start_line)].append((node, event))
 
     # These are already-resolved calls from the same FactGraph snapshot.  Do
     # not infer a new call target from occurrence text: that would reintroduce
@@ -911,32 +918,22 @@ def _add_cross_file_calls(
         if len(targets) != 1:
             continue
         target = targets[0]
-        callee_funcs = [function for function in by_function
-                        if function[0] == target.file_path
-                        and any(event.func_name == target.name
-                                for _node, event in by_function[function])]
+        callee_funcs = list(functions_by_name.get((target.file_path, target.name), ()))
         if len(callee_funcs) != 1:
             continue
         callee_events = by_function[callee_funcs[0]]
 
+        same_line = calls_by_line.get((call.file_path, call.line - 1), ())
         candidates = [
-            (node, event) for node, event in events.items()
-            if event.file_path == call.file_path
-            and event.role == "call"
-            and event.start_line == call.line - 1
-            and event.start_col <= call.col < event.end_col
+            (node, event) for node, event in same_line
+            if event.start_col <= call.col < event.end_col
         ]
         if len(candidates) != 1:
             # Some language resolvers report the call token's start while a
             # grammar's call node starts one token earlier.  A unique line is
             # still safe; multiple same-line calls remain intentionally
             # unresolved.
-            candidates = [
-                (node, event) for node, event in events.items()
-                if event.file_path == call.file_path
-                and event.role == "call"
-                and event.start_line == call.line - 1
-            ]
+            candidates = list(same_line)
         if len(candidates) != 1:
             continue
         _call_node, call_event = candidates[0]
@@ -998,6 +995,16 @@ def _add_container_mutations(
     for node, event in events.items():
         if event.call_id is not None:
             calls[(event.file_path, event.call_id)].append((node, event))
+    # Only occurrences with a reaching definition can name a container
+    # generation.  Key them by function and receiver root once instead of
+    # rescanning the whole event table for each mutating call.
+    reached_uses: dict[tuple[str, str, str], list[tuple[int, Any]]] = defaultdict(list)
+    for node in incoming_reaching:
+        event = events.get(node)
+        if event is None:
+            continue
+        root = (event.access_path or event.var or "").split(".", 1)[0].split("[", 1)[0]
+        reached_uses[(event.file_path, event.func_id, root)].append((event.ordinal, node))
     for call_rows in calls.values():
         call = next((row for row in call_rows if row[1].role == "call"), None)
         if call is None or not call[1].access_path:
@@ -1007,12 +1014,9 @@ def _add_container_mutations(
             continue
         receiver_root = receiver.split(".", 1)[0].split("[", 1)[0]
         receiver_uses = [
-            node for node, event in events.items()
-            if event.file_path == call[1].file_path and event.func_id == call[1].func_id
-            and event.ordinal <= call[1].ordinal
-            and (event.access_path or event.var or "").split(".", 1)[0]
-                .split("[", 1)[0] == receiver_root
-            and incoming_reaching.get(node)
+            node for ordinal, node in reached_uses.get(
+                (call[1].file_path, call[1].func_id, receiver_root), ())
+            if ordinal <= call[1].ordinal
         ]
         defining = set().union(*(incoming_reaching[node] for node in receiver_uses)) \
             if receiver_uses else set()
@@ -1198,6 +1202,8 @@ def evaluate_compiled_flow(
 
     event_indices = {path: _EventIndex.build(rows) for path, rows in events_by_actual.items()}
     match_cache: dict[tuple[Any, ...], list[_PatternSpan]] = {}
+    # The value graph is complete here; captured sources share one reversal.
+    reverse_adjacency: dict[Any, list[tuple[Any, str]]] | None = None
 
     results: list[EvaluatedFlow] = []
     seen: set[tuple[Any, ...]] = set()
@@ -1238,10 +1244,12 @@ def evaluate_compiled_flow(
                     (actual_to_stored.get(actual, capture_event.file_path), capture_event.event_id)
                     if capture_event is not None else source.node
                 )
-                reverse: dict[Any, list[tuple[Any, str]]] = defaultdict(list)
-                for origin, outgoing in value_adjacency.items():
-                    for target, kind in outgoing:
-                        reverse[target].append((origin, kind))
+                if reverse_adjacency is None:
+                    reverse_adjacency = defaultdict(list)
+                    for origin, outgoing in value_adjacency.items():
+                        for target, kind in outgoing:
+                            reverse_adjacency[target].append((origin, kind))
+                reverse = reverse_adjacency
                 pending = [capture_node]
                 visited = {capture_node}
                 origins: list[Any] = []
