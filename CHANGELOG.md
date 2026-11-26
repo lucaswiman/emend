@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Cache rows are no longer unpickled. `.emend/cache` lives inside the analysed
+  checkout, so a repository could ship a cache that ran code when read; every
+  serialized row is now compressed JSON (via the new `msgspec` dependency).
+- Commands that read facts no longer copy `facts.db` or leave a private copy
+  behind. The published database is opened through a hard link (copied on
+  Windows), private generations are removed at exit, and copies abandoned by
+  earlier versions or killed processes are swept automatically.
+- Much smaller and faster indexes. Flow occurrences are stored as one compact
+  value per file instead of a row each, database keys are stored once instead
+  of twice, facts are written with a bulk import, and the redundant per-file
+  fact cache is gone. The fact database is rebuilt once after upgrading.
+- Whole-project `analyze trace` and flow rules now finish on large projects:
+  call and container linking no longer rescan every occurrence per call site.
+- Faster pattern linting and warm queries: language lookup no longer rescans
+  installed plugins per file, and reading up-to-date facts scans the project
+  once without waiting on the publication lock.
+- Adding or removing a module, and reverting a file's content, now re-parse the
+  affected files instead of loading cached per-file facts.
+
 ## 0.5.6
 
 - Added Python 3.15 and free-threaded 3.15t support, including CI and release
