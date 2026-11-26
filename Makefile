@@ -63,7 +63,7 @@ deadcode: $(VENV)/bin/activate $(VENV)/lib/emend_core
 
 docs: docs-html
 
-docs/_static/mcp_schema.json: src/emend/mcp_server.py | $(MCP_VENV)/lib/emend_core
+docs/_static/mcp_schema.json: $(wildcard src/emend/mcp/*.py) | $(MCP_VENV)/lib/emend_core
 	@mkdir -p docs/_static
 	$(MCP_VENV)/bin/emend mcp --schema > $@
 

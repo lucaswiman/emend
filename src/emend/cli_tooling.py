@@ -318,10 +318,10 @@ def mcp_cmd(
     tools_list = [t.strip() for t in tools.split(",")] if tools else None
     try:
         if schema:
-            from emend.mcp_server import dump_schema
+            from emend.mcp import dump_schema
             print(dump_schema(profile=profile, tools=tools_list))
             return
-        from emend.mcp_server import run_server
+        from emend.mcp import run_server
     except ImportError:
         print(
             "Error: MCP dependencies not installed. "

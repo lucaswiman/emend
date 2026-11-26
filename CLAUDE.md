@@ -22,7 +22,7 @@
 
 | File | Purpose |
 |------|---------|
-| `transform/` | Core engine package (was `transform.py`). Re-exports the full public surface from 12 submodules so existing `from emend.transform import X` imports continue to work. Submodules: `__init__.py` (re-export facade), `cache.py` (SQLite parse.db and CozoDB facts.db management), `components.py` (component access, modification, and diff generation), `deadcode.py` (dead code detection: symbols, blocks, modules, safe deletion), `dispatch.py` (unified command dispatch: lookup, edit, add), `impact.py` (impact analysis: reverse-caller BFS closure, diff-to-selector mapping), `index.py` (symbol index, QN cache, and venv index management), `patterns.py` (pattern matching, find, replace, copy, and symbol source utilities), `project_iter.py` (project file iteration, pattern search, and module utilities), `refs.py` (reference finding, callers, callees, and call graph generation), `rename_move.py` (symbol and module rename/move operations), `venv_index.py` (separate venv symbol cache backed by `parse_venv.db`). |
+| `transform/` | Core engine package (was `transform.py`). Re-exports, from its 11 submodules, the names callers import as `from emend.transform import X`; everything else is imported from the defining submodule. Submodules: `__init__.py` (re-export facade), `cache.py` (SQLite parse.db and CozoDB facts.db management), `components.py` (component access, modification, and diff generation), `deadcode.py` (dead code detection: symbols, blocks, modules, safe deletion), `dispatch.py` (unified command dispatch: lookup, edit, add), `impact.py` (impact analysis: reverse-caller BFS closure, diff-to-selector mapping), `index.py` (symbol index, QN cache, and venv index management), `patterns.py` (pattern matching, find, replace, copy, and symbol source utilities), `project_iter.py` (project file iteration, pattern search, and module utilities), `refs.py` (reference finding, callers, callees, and call graph generation), `rename_move.py` (symbol and module rename/move operations), `venv_index.py` (separate venv symbol cache backed by `parse_venv.db`). |
 | `pattern.py` | Pattern parsing and Rust IR compilation with `$METAVAR` support. |
 | `component_selector.py` | Extended selector parser (`file.py::Sym[component][accessor]`). |
 | `ast_commands.py` | List-symbols and copy-to commands (uses Rust `emend_core` for symbol collection). |
@@ -35,19 +35,17 @@
 
 | File | Purpose |
 |------|---------|
-| `fact_graph.py` | Relational fact model and Datalog query layer. Fact dataclasses (`SymbolFact`, `CallFact`, `ReferenceFact`, `DefUseFact`, `CfgBlockFact`, …); `FactGraph` class with `update_files()`/`remove_files()`/`build_from_project()`; Datalog query methods (`refs_datalog`, `callers_datalog`, `callees_datalog`, `graph_datalog`, `dead_code_unified`, `unreachable_blocks_datalog`, `trace_propagation_datalog`, `interprocedural_trace_datalog`, `flow_rule_check_datalog`); JSON serialisation. |
-| `trace.py` | Trace/taint analysis. `TraceConfig`, `TraceSource`, `TraceSink` (optional `effect: writes($X)/reads($X)`), `TraceSanitizer` (`quantifier: all_paths/some_path`), `TraceScopeSanitizer` (scope-bounded kills), `TraceViolation`. Datalog-backed intra- and interprocedural analysis with fixed-point iteration. YAML `presets:` key for auto-loading framework rules. |
+| `fact_graph.py` | Relational fact model and Datalog query layer. Fact dataclasses (`SymbolFact`, `CallFact`, `ReferenceFact`, `DefUseFact`, `CfgBlockFact`, …); `FactGraph` class: `replace_extracted()`/`remove_files()` write extracted facts (`update_files()`, `build_from_files()`, `build_from_project()` and `from_json()` are legacy entry points with no production caller); Datalog query methods (`refs_datalog`, `callers_datalog`, `callees_datalog`, `graph_datalog`, `dead_code_unified`, `unreachable_blocks_datalog`); flow occurrences are stored per file in the `flow_blob` relation and read with `flow_events()`/`flow_edges()`; JSON serialisation. |
+| `trace.py` | Trace/taint analysis. `TraceConfig`, `TraceSource`, `TraceSink` (optional `effect: writes($X)/reads($X)`), `TraceSanitizer` (`quantifier: all_paths/some_path`), `TraceScopeSanitizer` (scope-bounded kills), `TraceViolation` (aliases of the `checks/flow.py` types). Thin adapter: `run_trace_analysis()` and `run_interprocedural_trace()` both call `checks.flow.evaluate_compiled_flow()`. YAML `presets:` key for auto-loading framework rules. |
 | `trace_presets.py` | Framework preset loader: `get_preset()` reads `src/emend/presets/*.yaml` (Flask, Django, SQLAlchemy, FastAPI, Express, Axum, Diesel, Next.js, React, …); `merge_configs()` composes multiple configs. |
-| `lint.py` | Lint public API layer (~800 lines). Pattern-based rules, flow rules (`flows-from`/`flows-to`/`not-through`), `deadcode` rule, `duplicate-code` rule. Loads from `.emend/rules.yaml`. Bulk of the implementation now lives in `checks/` submodules; full reduction to a thin shim is deferred post-release. |
-| `policy.py` | Policy public API layer (~680 lines). `Policy`, `FlowCheck`, `StructuralCheck`, `TypeCheck`, `DeadCodeCheck`, `DatalogCheck`, `CustomCheck`, `SequenceCheck`. Loads from `.emend/rules.yaml`. Bulk of the implementation now lives in `checks/` submodules; full reduction to a thin shim is deferred post-release. |
-| `checks/` | Unified rule engine package (was `checks.py`). Public surface: `CheckViolation`, `run_checks` re-exported from `checks/__init__.py`. Submodules: `engine.py` (unified runner — dispatches to lint + policy, normalises results; CLI `check` and MCP `check` tool entry point), `flow.py` (shared flow IR: `FlowSpec`, `FlowViolation`, `WitnessStep`; `execute_flow_spec()` Datalog-first / Python-fallback bridge), `pattern_rules.py` (pattern-based lint rule matching), `rules_config.py` (YAML config loader: `DeadCodeConfig`, `load_rules_document()`), `structural.py` (structural pattern checks), `types.py` (oracle-driven type constraint checks), `custom.py` (custom expert query checks), `datalog.py` (CozoScript Datalog query checks), `deadcode.py` (dead code detection as a policy check wrapper), `duplicates.py` (duplicate code detection), `sequence.py` (temporal sequence / CFG-reachability checks). |
-| `flow_ir.py` | Backward-compat re-export shim (~15 lines). Forwards all public names (`FlowSpec`, `FlowViolation`, `WitnessStep`, `execute_flow_spec`, etc.) from `emend.checks.flow`. Import from `emend.checks.flow` directly in new code. |
-| `rules_config.py` | Backward-compat re-export shim (~15 lines). Forwards all public names (`DeadCodeConfig`, `load_rules_document()`, etc.) from `emend.checks.rules_config`. Import from `emend.checks.rules_config` directly in new code. |
+| `lint.py` | Lint public API layer (~560 lines). Pattern-based rules, flow rules (`flows-from`/`flows-to`/`not-through`), `deadcode` rule, `duplicate-code` rule. Loads from `.emend/rules.yaml`. Bulk of the implementation now lives in `checks/` submodules; full reduction to a thin shim is deferred post-release. |
+| `policy.py` | Policy public API layer (~440 lines). `Policy`, `FlowCheck`, `StructuralCheck`, `TypeCheck`, `DeadCodeCheck`, `DatalogCheck`, `CustomCheck`, `SequenceCheck`. Loads from `.emend/rules.yaml`. Bulk of the implementation now lives in `checks/` submodules; full reduction to a thin shim is deferred post-release. |
+| `checks/` | Unified rule engine package (was `checks.py`). Public surface: `CheckViolation`, `run_checks` re-exported from `checks/__init__.py`. Submodules: `engine.py` (unified runner — dispatches to lint + policy, normalises results; CLI `check` and MCP `check` tool entry point), `flow.py` (the single flow evaluator, a Python walker over flow occurrence facts: `evaluate_compiled_flow()`, `CompiledFlowConfig`, `EvaluatedFlow`, `WitnessStep`; `FlowSpec`/`FlowViolation`/`execute_flow_spec()` have no production caller), `rule_model.py` (immutable compiled rules document), `violations.py` (`PolicyViolation`), `pattern_rules.py` (pattern-based lint rule matching), `rules_config.py` (YAML config loader: `DeadCodeConfig`, `load_rules_document()`), `structural.py` (structural pattern checks), `types.py` (oracle-driven type constraint checks), `custom.py` (custom expert query checks), `datalog.py` (CozoScript Datalog query checks), `deadcode.py` (dead code detection as a policy check wrapper), `duplicates.py` (duplicate code detection), `sequence.py` (temporal sequence / CFG-reachability checks). |
 | `dsl.py` | Embedded-DSL support: `DslRegion`, `DslSymbol`, `DslLink`, `RegexNamedGroup`. Detects SQL regions (heuristics + magic comments), extracts symbols, resolves ORM links (SQLAlchemy/Django) and regex named-group references, computes DSL impact. |
 | `duplicate.py` | Duplicate-code detection: AST canonicalisation, Merkle hashing, sibling-sequence winnowing. Backs `analyze dupes`, lint, and MCP. |
 | `duplicate_heuristics.py` | Boilerplate-suppression heuristics for `duplicate.py` (abstract stubs, trivial validators, `__init__` self-assignments, dunder boilerplate, …). |
 | `rewrite_engine.py` | **Experimental** equality-saturation rewrites: `EGraph`, `ENode`, `RewriteRule`, `run_saturation()`. Loads `.emend/rewrites.yaml`. CLI: `saturate` (hidden). |
-| `union_find.py` | `UnionFind` disjoint-set; used by `rewrite_engine.py` and `duplicate.py`. |
+| `union_find.py` | `UnionFind` disjoint-set; used by `rewrite_engine.py` (`EGraph`). |
 | `cache_codec.py` | Serialization for cache rows: compressed JSON via `msgspec`. Cache databases live in the analysed checkout and are untrusted input, so **never use `pickle`** for anything stored under `.emend/cache`. |
 | `analysis_store.py` | `AnalysisStore`: the project-scoped owner of source snapshots, the published `facts.db` generation, private generations (owner-tagged, linked rather than copied, swept when abandoned), and the shared artifact database (source text, import lists, symbol projections, type results). |
 | `type_oracle.py` | Type-inference adapter. `TypeOracle` ABC + `PyreflyAdapter`/`PyrightAdapter`/`TyAdapter` (Python LSPs), `TypeScriptAdapter` (Node Compiler API), `RustAnalyzerAdapter` (LSP). `parse_type_string` parses Python/TS/Rust type syntaxes. `create_type_oracle("auto")` autodetects. Two-tier cache (LRU + SQLite `type_cache` in `parse.db`). |
@@ -68,8 +66,7 @@
 | File | Purpose |
 |------|---------|
 | `editor_search.py` | Editor integration: `EditorSearchEngine`, FTS5 trigram index, JSON-RPC server (`run_editor_server`), scoring, partial-pattern normalisation. **3.2k lines.** |
-| `mcp/` | MCP (Model Context Protocol) server package. Exposes emend's commands as MCP tools over stdio or SSE; uses `FastMCP`. Optional `mcp` extra. Submodules: `dispatch.py` (`FastMCP` app, profile/schema/run infrastructure), `find.py` (`search` tool), `edit.py` (`transform` tool), `analyze.py` (`references` + `analyze` tools), `checks.py` (`check` tool), `tooling.py` (`facts_query` + `mappings` + `grammar_and_cookbook` tools). |
-| `mcp_server.py` | Backward-compat shim (~50 lines) re-exporting from the `mcp/` package. Import from `emend.mcp` directly in new code. |
+| `mcp/` | MCP (Model Context Protocol) server package. Exposes emend's commands as MCP tools over stdio or SSE; uses `MCPServer` from the `mcp` package. Optional `mcp` extra. Submodules: `dispatch.py` (`MCPServer` app, profile/schema/run infrastructure), `find.py` (`search` tool), `edit.py` (`transform` tool), `analyze.py` (`references` + `analyze` tools), `checks.py` (`check` tool), `tooling.py` (`facts_query` + `mappings` + `grammar_and_cookbook` tools). |
 | `knowledge.py` | Identifier and module mapping store: `MappingStore` (YAML-backed at `.emend/mappings.yaml`), repo checkout helpers, MCP/RPC integration. |
 
 #### Grammars
@@ -93,17 +90,15 @@
 
 ### Tests (`tests/test_emend/`)
 
-There are ~120 test files. Most map 1:1 to a command (`test_<command>.py`)
+There are ~115 test files. Most map 1:1 to a command (`test_<command>.py`)
 or a module (`test_<module>.py`). Use `ls tests/test_emend/` for the full
 list. Conventions:
 
 - `test_<command>.py` — the public CLI behaviour for that command. Start here when changing a command.
 - `test_<module>.py` — direct unit tests for `src/emend/<module>.py`.
 - `test_<command|module>_<lang>.py` (e.g. `test_lint_typescript.py`, `test_cfg_rust.py`) — language-specific variants. Add one of these when extending a feature beyond Python.
-- `test_phaseN*.py` — historical regression suites pinning behaviour from the completed trace/Datalog/CFG roadmaps (the roadmap docs themselves were deleted; see git history). Don't add new tests here; pick a topical name.
 - `test_regressions.py`, `test_bug_report_regressions.py` — catch-all bug-report regressions.
 - `test_cli_surface_consolidation.py` — pins the visible CLI surface (commands, hidden aliases, help text). Touched when CLI structure changes.
-- `test_phase17_remove_legacy_intra.py`, `test_phase12_cutover.py`, … — verify legacy code paths stay deleted; keep them red if a removal regresses.
 
 Notable suites worth knowing:
 
@@ -112,9 +107,12 @@ Notable suites worth knowing:
 | `test_fact_graph.py` | `FactGraph` Datalog query layer end-to-end (refs / callers / callees / graph / dead code / unreachable blocks / trace propagation / interprocedural trace / flow rule checks). |
 | `test_incremental_facts.py` | `FactGraph.update_files()` / `remove_files()` incremental updates and parity with full rebuild. |
 | `test_effect_predicates.py`, `test_path_sensitive_sanitization.py`, `test_scope_boundaries.py` | Trace-CFG effects, path sensitivity, and scope-bounded sanitisers. |
-| `test_datalog_trace.py`, `test_interprocedural_trace.py` | Datalog trace and interprocedural fixed-point. |
+| `test_trace.py`, `test_interprocedural_trace.py` | Intra- and interprocedural trace, including the `trace` CLI routes. |
 | `test_location_resolver.py` | Pattern match → CFG location resolution. |
-| `test_dsl.py`, `test_dsl_treesitter.py` | DSL detection, ORM link resolution, regex named groups, tree-sitter grammar integration. |
+| `test_dsl.py` | DSL detection, ORM link resolution, regex named groups. |
+| `test_language_registry.py` | Language/extension registry and DSL grammar loading. |
+| `test_refs.py`, `test_graph.py` | `refs` filters, callers, callees, and the Python call graph. |
+| `test_fact_generations.py`, `test_cache_untrusted_rows.py` | Lifetime of `facts.db` generations; cache rows are never unpickled. |
 | `test_type_oracle.py`, `test_typeoracle_integration.py` | Type oracle adapters and `:type[X]` / `:returns[X]` pattern constraints. |
 | `test_vim_rpc.py` | Vim plugin JSON-RPC protocol. |
 | `test_mcp_server.py` | MCP server tool wrappers. |
@@ -130,8 +128,9 @@ top-level aliases for muscle memory. The canonical invocation is
 ### `emend find` (and aliases `grep`, `search`, `show`, `get`, `lookup`, `ls`)
 
 Unified search. Auto-detects pattern mode (if `$` in query), symbol-lookup
-mode, or summary mode (bare file/dir). Flags: `--output={code|location|selector|summary|metadata}`,
-`--flat`, `--tree-depth`, `--imported-from`, `--scope-local`, `--matching`,
+mode, or summary mode (bare file/dir). Flags: `--output={code|location|selector|summary|metadata|json|count}`
+(modifiers `summary::flat`, `code::dedent`), `--depth`, `--within`,
+`--not-within`, `--where`, `--imported-from`, `--scope-local`, `--matching`,
 `--type-engine`, `--include-map`.
 
 ### `emend edit <command>`
@@ -145,7 +144,7 @@ Hidden top-level aliases exist for most of these.
 | `rm` (alias `remove`, `delete`) | Remove a symbol or component. |
 | `delete` | Safe delete with optional `--cascade` for transitive dead-code removal. Without `--cascade`, equivalent to `rm`. |
 | `add` (alias `insert`) | Insert into list components (parameters, decorators, bases, body). |
-| `replace` | Pattern-based replacement; `--in` accepts selectors. |
+| `replace` | Pattern-based replacement; `--within` / `--not-within` / `--where` restrict where it applies. |
 | `cp` (alias `copy`, `copy-to`) | Copy a symbol to another file. |
 | `rename` | Rename symbol or module (auto-detects by `::` in selector). Flags: `--docs`, `--no-hierarchy`, `--unsure`. |
 | `mv` (alias `move`) | Move a symbol or module, rewriting imports. |
@@ -163,7 +162,7 @@ Read-only analysis.
 | `deadcode` (alias `dead-code`) | Find unreferenced code. Flags: `--kind`, `--include-private`, `--exclude-references-from`, `--no-strings`, `--no-last-reference`, `--all-files`, `--entry-point-decorator`, `--entry-point-name`, `--exclude-path`. |
 | `impact` | Reverse-caller closure for a diff or symbol set. Flags: `--diff`, `--output={symbols|tests|graph}`, `--max-depth`. |
 | `types` | Inferred types per symbol. Flags: `--name`, `--kind`, `--definitions-only`, `--engine={pyrefly|pyright|ty|typescript|rust-analyzer|auto}`. |
-| `trace` | Source-to-sink flow analysis. Flags: `--config`, `--label`, `--trace`, `--interprocedural`, `--max-iterations`, `--preset`. |
+| `trace` | Source-to-sink flow analysis. Flags: `--config`, `--label`, `--trace`, `--interprocedural`, `--max-chain-depth`, `--preset`, `--exclude-path`. |
 | `facts` | Query the FactGraph. Flags: `--type={symbols|calls|references|trace_flows|types|imports}`, `--name`, `--kind`, `--file`, `--symbol`, `--label`, `--transitive`. |
 | `cfg` | Per-function CFG. Flags: `--function`, `--format={text|json|dot}`, `--unreachable`. |
 | `dsl-debug` | Inspect detected DSL regions, symbols, links, impact. Flags: `--type sql`, `--orm={sqlalchemy|django}`, `--resolve`. |
@@ -231,14 +230,14 @@ All source analysis uses the Rust `emend_core` extension (PyO3/maturin) built on
 
 ### Cross-Project Operations
 
-Cross-project functions use `visit_project_ts()` in `transform/project_iter.py`, which iterates project files with parallel read + pre-filtering via the Rust extension:
+Renames and moves use `visit_project_ts()` in `transform/project_iter.py`, which iterates project files with parallel read + pre-filtering via the Rust extension. Reference and call queries read the project `FactGraph` (`AnalysisStore.open(root).query_facts()`):
 
-- `find_references()` — uses `PyScopeResolver.references_in_file()` for scope-aware reference finding
+- `find_references()` — `FactGraph.refs_datalog()`
 - `rename_symbol()` — uses scope resolver + byte-range edits via `PyFileTransform`
 - `move_module()` / `rename_module()` — import rewriting + filesystem operations
-- `find_callers()` — uses `references_in_file()` filtered to `kind == "call"`
-- `find_callees()` — uses `references_in_file()` + `find_nested_definitions()`
-- `generate_graph()` — builds call graph from callers/callees analysis
+- `find_callers()` — `FactGraph.callers_datalog()`
+- `find_callees()` — `FactGraph.callees_datalog()`
+- `generate_graph()` — `FactGraph.graph_datalog()`
 
 ### Rules and policies
 
@@ -251,7 +250,7 @@ A rules document mixes the following top-level keys:
 
 - `macros` — named reusable pattern fragments.
 - `rules` — pattern lint rules: `find` + optional `not-inside` / `message` / `replace`. `--fix` applies `replace`.
-- Flow rules: `flows-from` + `flows-to` + optional `not-through`, executed via `flow_ir.execute_flow_spec` (Datalog-first, falls back to the Python tracker).
+- Flow rules: `flows-from` + `flows-to` + optional `not-through`, executed by `checks.flow.evaluate_compiled_flow` (a Python walker over flow occurrence facts).
 - `deadcode` — `DeadCodeConfig`: `entry-point-decorators`, `entry-point-names`, `exclude-paths` (globs).
 - `duplicate-code` — `DuplicateCodeConfig` for duplicate detection thresholds (`duplicate` accepted as a legacy alias).
 - `policies` — declarative policy checks (flow / structural / type / datalog / custom / sequence / deadcode), each runnable independently.
@@ -264,27 +263,27 @@ policy` filter to subsets of the kinds.
 
 ### Trace analysis
 
-`trace.py` is Datalog-backed (the Python intraprocedural engine was
-removed in the trace roadmap). The
-public surface:
+`trace.py` is a thin adapter over the single flow evaluator in
+`checks/flow.py` (`evaluate_compiled_flow`, a Python walker over flow
+occurrence facts). The public surface:
 
-- `run_trace_analysis(files, config)` — intraprocedural; iterates files, collects function defs, analyses each plus module-level code via `_run_trace_datalog()`.
-- `run_interprocedural_trace_analysis(files, config, max_iterations=…)` — cross-function with fixed-point iteration over `FunctionSummary` records.
-- `format_violations(violations, *, format="text"|"json", traces=False)` — output formatting with optional propagation witnesses.
+- `run_trace_analysis(paths, config, label_filter=None, language="python", project_path=None)` — evaluates without interprocedural call edges.
+- `run_interprocedural_trace(paths, config, …, max_chain_depth=None)` — the same evaluator with call edges admitted; returns an `InterproceduralResult` whose `FunctionSummary` records are a compatibility report shape, not an evaluator.
+- `format_violations(violations, show_trace=False, json_output=False)` — output formatting with optional propagation witnesses.
 
 Path-sensitivity, per-variable sanitisation, scope-bounded sanitisers
 (e.g. `session.commit()` killing taint within a request scope), and
-`writes($X)` / `reads($X)` effect predicates are all expressed as
-relations on the `FactGraph` and resolved via Datalog. Adding a new
-trace feature usually means: add a fact kind in `fact_graph.py`, a
-populator, and a Datalog rule — no Python control-flow code.
+`writes($X)` / `reads($X)` effect predicates are evaluated in Python by
+`checks/flow.py` over the flow events and edges that Rust
+`build_flow_facts` (`rust/src/cfg.rs`) emits; the `FactGraph` stores them
+per file in the `flow_blob` relation. They are not Datalog rules.
 
 ### Impact analysis
 
 `find_impact()` in `transform/impact.py`:
 
-- BFS transitive reverse-caller closure via `find_callers()` over the FactGraph.
-- `_parse_diff_to_selectors()` maps git diff hunks to symbol selectors using line ranges from `SourceLocFact`.
+- Depth-bounded transitive reverse-caller closure, expressed as a Datalog query over the FactGraph's `call` facts (`_find_impact_via_fact_graph()`).
+- `_parse_diff_to_selectors()` maps git diff hunks (`git_diff.read_diff` / `LineIntervals`) to symbol selectors using symbol line ranges from `find_nested_definitions()`.
 - Test-file / test-symbol heuristics surface affected tests separately.
 - Witness edges record why each symbol is impacted (which caller pulled it in).
 
@@ -300,7 +299,7 @@ populator, and a Datalog rule — no Python control-flow code.
 
 Pattern constraints `:type[X]` and `:returns[X]` are parsed by the
 `ORACLE_TYPE_CONSTRAINT` grammar terminal and post-filtered by
-`_filter_matches_by_type_oracle()` in `transform.py`. Lookup falls back
+`_filter_matches_by_type_oracle()` in `transform/patterns.py`. Lookup falls back
 to `_filter_by_returns_with_oracle()` in `query.py` when no annotation
 is present.
 
@@ -311,7 +310,7 @@ Two-tier cache: in-memory LRU + SQLite `type_cache` table in
 
 `find_dead_code()` in `transform/deadcode.py`:
 
-- Single-pass O(files) analysis via `PyScopeResolver`.
+- Datalog query `FactGraph.dead_code_unified()` over the project fact graph; string-literal filtering is a Python post-filter.
 - `_find_source_root()` detects `src/` layout via `pyproject.toml`.
 - Entry-point heuristics skip decorated symbols, dunders, tests, and `__all__` members.
 - Configurable `entry-point-decorators`, `entry-point-names`, `exclude-paths` (globs) via `.emend/rules.yaml` or CLI flags.
@@ -328,9 +327,10 @@ Two-tier cache: in-memory LRU + SQLite `type_cache` table in
 - **Rust** — `target/`.
 
 Enabled via `[environment_lookup]` in `.emend/config.toml`,
-`pyproject.toml [tool.emend]`, or per-language defaults. Cached per
-language in `parse.db` (`environment_cache` table), keyed by
-environment mtime. Used as a fallback in `query_symbol_index()` and
+`pyproject.toml [tool.emend]`, or per-language defaults. Indexed lazily
+into a separate database per language (`parse_venv.db` for Python,
+`parse_environment_<lang>.db` otherwise) and refreshed from a file-metadata
+inventory (`transform/venv_index.py`). Used as a fallback in `query_symbol_index()` and
 `EditorSearchEngine` when a symbol is not found in the project index.
 
 ## Configuration
@@ -358,14 +358,14 @@ paths = ["target"]         # For Rust
 Tests run in a virtual environment managed by the Makefile.
 
 ```bash
-# Run all tests (8 parallel workers)
+# Run all tests
 make test
 
 # Run specific test file
-make test TESTS=tests/test_emend/test_add_parameter.py
+make test TESTS=tests/test_emend/test_refs.py
 
 # Run specific test by name
-make test TESTS="tests/test_emend/test_primitives_copy_imports.py::test_copy_imports_prepend"
+make test TESTS="tests/test_emend/test_refs.py::TestFindCallees::test_callees_basic"
 
 # Run tests matching a pattern
 make test TESTS="-k default"
@@ -382,7 +382,7 @@ make test TESTS="-k default"
    - Search/lookup → `cli_find.py`.
    - Map operations → `cli_map.py`.
 3. Wire it into `cli.py` under the right subapp (`edit_app`, `analyze_app`, `tool_app`, `map_app`) and add any hidden top-level aliases there.
-4. If the command should be exposed to LLM clients, add an MCP tool wrapper in the matching `mcp/` submodule (`mcp/dispatch.py` holds the `FastMCP` app and registration).
+4. If the command should be exposed to LLM clients, add an MCP tool wrapper in the matching `mcp/` submodule (`mcp/dispatch.py` holds the `MCPServer` app and registration).
 5. Add tests in `tests/test_emend/test_<command>.py`. For language-specific behaviour, add a `test_<command>_<lang>.py` companion.
 
 > Note: `cli.py` is the canonical (single-source) registration site. Steps 2 and 3 above are kept for clarity but both point to the same place.
