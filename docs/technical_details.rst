@@ -177,6 +177,14 @@ file paths and module-resolution configuration.  A ``.gitignore`` and ``.dockeri
 worktree owns its cache because the manifest, editor projections, and fact
 graph describe one mutable source snapshot.
 
+Cache rows are untrusted input
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``.emend/cache`` lives inside the analysed checkout, so a repository can ship
+prepared cache databases.  Every serialized row is therefore compressed JSON
+(``emend.cache_codec``, backed by ``msgspec``), which can only produce plain
+data.  Nothing in a cache is ever unpickled.
+
 Overview of cache tables
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -189,12 +197,12 @@ Overview of cache tables
      - Contents
    * - ``qn_index``
      - (absolute path, content/module-context hash)
-     - Compressed-pickled ``set[str]`` of every qualified name in the file.
+     - Compressed JSON list of every qualified name in the file.
        Used by ``visit_project()`` to skip files that cannot reference a target
        symbol.
    * - ``type_cache``
      - content MD5 (TEXT)
-     - Compressed-pickled ``FileTypes`` from the type oracle.  Avoids
+     - Compressed JSON form of ``FileTypes`` from the type oracle.  Avoids
        re-running pyrefly / pyright / ty on unchanged files.
    * - ``file_manifest``
      - (worktree_id, absolute path)
@@ -225,7 +233,7 @@ using a ``ThreadPoolExecutor``.  ``--jobs`` controls file-worker concurrency
 (default: CPU count), not the separate type engine's worker count.  Each
 worker derives and caches a file's search projections:
 
-1. **QN resolution** — ``PyScopeResolver`` → compressed pickle → ``qn_index``.
+1. **QN resolution** — ``PyScopeResolver`` → compressed JSON → ``qn_index``.
 2. **Symbol collection** — ``emend_core.collect_symbols_from_str()`` →
    ``symbol_index`` rows (name, kind, line, signature, etc.).
 3. **Reference collection** — ``PyScopeResolver`` reference output →

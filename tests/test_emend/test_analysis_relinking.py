@@ -1,4 +1,4 @@
-"""Incremental project linking reuses local analysis across inventory edits."""
+"""Project linking follows module inventory edits."""
 from collections import Counter
 from pathlib import Path
 
@@ -6,7 +6,7 @@ from emend import analysis_extraction, analysis_linking
 from emend.analysis_store import AnalysisStore
 
 
-def test_module_inventory_relinks_callers_without_reextracting_them(tmp_path, monkeypatch):
+def test_module_inventory_change_relinks_callers(tmp_path, monkeypatch):
     caller = tmp_path / "main.ts"
     caller.write_text('import {run} from "./dep"; export function entry() { return run(); }')
     target = tmp_path / "dep" / "index.ts"
@@ -40,7 +40,10 @@ def test_module_inventory_relinks_callers_without_reextracting_them(tmp_path, mo
         target.unlink()
         removed = store.query_facts()
         assert [call.callee_qn for call in removed.calls_from("main.entry")] == ["dep.run"]
-        assert extracted == {"main.ts": 1, "index.ts": 2}
+        # An ordinary edit parses only the edited file.  Adding or removing
+        # a module relinks every file from its local facts, which means
+        # parsing it: those facts live only in the fact database.
+        assert extracted == {"main.ts": 3, "index.ts": 2}
         assert [call.callee_qn for call in initial.calls_from("main.entry")] == ["dep.run"]
     finally:
         store.close()

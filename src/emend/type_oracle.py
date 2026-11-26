@@ -1078,6 +1078,66 @@ class _FileTypeCache:
             self._db = None
 
 
+def _descriptor_to_row(descriptor: TypeDescriptor) -> list:
+    return [
+        descriptor.kind, descriptor.name,
+        [_descriptor_to_row(param) for param in descriptor.params],
+        None if descriptor.return_type is None
+        else _descriptor_to_row(descriptor.return_type),
+    ]
+
+
+def _descriptor_from_row(row) -> TypeDescriptor:
+    kind, name, params, return_type = row
+    return TypeDescriptor(
+        kind, name, tuple(_descriptor_from_row(param) for param in params),
+        None if return_type is None else _descriptor_from_row(return_type),
+    )
+
+
+def _encode_file_types(file_types: FileTypes) -> bytes:
+    """Serialize one file's type results as a JSON cache payload."""
+    from emend import cache_codec
+
+    return cache_codec.encode({
+        "path": file_types.path,
+        "complete": file_types.complete,
+        "error": file_types.error,
+        "bindings": [
+            [binding.name, binding.line, binding.col_start, binding.col_end,
+             _descriptor_to_row(binding.type_descriptor), binding.raw_type,
+             binding.binding_kind]
+            for binding in file_types.bindings
+        ],
+    })
+
+
+def _decode_file_types(payload: bytes) -> FileTypes | None:
+    """Rebuild cached type results; unreadable or foreign rows are a miss."""
+    from emend import cache_codec
+
+    try:
+        value = cache_codec.decode(payload)
+        file_types = FileTypes(
+            path=str(value["path"]),
+            bindings=[
+                TypeBinding(
+                    name, line, col_start, col_end,
+                    _descriptor_from_row(descriptor), raw_type, binding_kind,
+                )
+                for name, line, col_start, col_end, descriptor, raw_type, binding_kind
+                in value["bindings"]
+            ],
+            complete=bool(value["complete"]),
+            error=value["error"],
+        )
+    except (ValueError, TypeError, KeyError):
+        logger.debug("unreadable type cache payload", exc_info=True)
+        return None
+    file_types.build_index()
+    return file_types
+
+
 class _TypeOracleDiskCache:
     """SQLite-backed persistent cache for TypeOracle results."""
 
@@ -1140,17 +1200,13 @@ class _TypeOracleDiskCache:
         if self._conn is None:
             return None
         try:
-            import pickle
-            import zlib
             with self._lock:
                 row = self._conn.execute(
                     "SELECT data FROM type_cache WHERE hash = ?",
                     (content_hash,),
                 ).fetchone()
             if row is not None:
-                ft = pickle.loads(zlib.decompress(row[0]))
-                ft.build_index()
-                return ft
+                return _decode_file_types(row[0])
         except BUG_EXCEPTIONS:
             raise
         except Exception:
@@ -1161,16 +1217,12 @@ class _TypeOracleDiskCache:
         if self._conn is None:
             return
         try:
-            import pickle
-            import zlib
             if "|" not in content_hash and self._project_root is not None:
                 content_hash = (
                     f"{_type_shared_context(self._project_root)}|manual|"
                     f"{content_hash}"
                 )
-            data = zlib.compress(
-                pickle.dumps(ft, protocol=pickle.HIGHEST_PROTOCOL), level=1
-            )
+            data = _encode_file_types(ft)
             self._write("INSERT OR REPLACE INTO type_cache VALUES (?, ?)", (content_hash, data))
         except sqlite3.Error:
             logger.debug("type cache write failed for %s", content_hash, exc_info=True)
@@ -1303,9 +1355,7 @@ def load_cached_file_types(
     latency-sensitive analyses.  A cache miss returns ``None``; it never
     invokes pyrefly, pyright, ty, or another external checker.
     """
-    import pickle
     import sqlite3
-    import zlib
 
     db_path = _type_cache_db_path(project_root, create=False)
     if db_path is None or not Path(db_path).exists() or not path.exists():
@@ -1338,8 +1388,8 @@ def load_cached_file_types(
             conn.close()
         if row is None:
             return None
-        file_types = pickle.loads(zlib.decompress(row[0]))
-        if not isinstance(file_types, FileTypes):
+        file_types = _decode_file_types(row[0])
+        if file_types is None:
             return None
         file_types.path = str(path.resolve())
         file_types.build_index()

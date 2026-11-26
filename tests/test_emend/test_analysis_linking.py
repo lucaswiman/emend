@@ -113,7 +113,9 @@ def test_package_imports_do_not_reference_same_named_local_module(tmp_path, spec
     relinked = store.query_facts()
     assert relinked.snapshot.snapshot_id != graph.snapshot.snapshot_id
     assert relinked.callers_datalog("react.greet") == callers
-    extract.assert_not_called()
+    # Relinking starts from each file's local facts, which are not kept
+    # outside the fact database, so both files are parsed again.
+    assert extract.call_count == 2
 
 
 def test_exact_import_binding_prevents_file_global_alias_guess(tmp_path):

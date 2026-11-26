@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Parse/index cache version remains shared with ``index.py``.  FactGraph has
 # its own marker because its Cozo relation shape can change independently.
-_SCHEMA_VERSION = "14"
+_SCHEMA_VERSION = "15"
 
 
 def _initialize_cache_connection(conn: sqlite3.Connection) -> None:
@@ -153,12 +153,13 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
     qn_columns = {
         row[1] for row in conn.execute("PRAGMA table_info(qn_index)").fetchall()
     }
-    if qn_columns and "file_path" not in qn_columns:
-        # Disposable cache migration from the old content-only identity.
+    if qn_columns and not {"file_path", "names"} <= qn_columns:
+        # Disposable cache migration: the old content-only identity, and the
+        # ``qnames`` column whose rows predate the JSON row format.
         conn.execute("DROP TABLE qn_index")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS qn_index ("
-        "file_path TEXT NOT NULL, hash BLOB NOT NULL, qnames BLOB, "
+        "file_path TEXT NOT NULL, hash BLOB NOT NULL, names BLOB, "
         "PRIMARY KEY (file_path, hash))"
     )
     conn.execute(
@@ -220,7 +221,7 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
         "ON reference_index(file_path)"
     )
     # Duplicate analysis payload cache: one row per unique file
-    # content (keyed by MD5 hash). ``data`` is zlib-compressed pickle of the
+    # content (keyed by MD5 hash). ``data`` is the compressed JSON of the
     # per-file subtree/sequence payload. ``version`` allows cache invalidation
     # when the payload schema changes.
     conn.execute(

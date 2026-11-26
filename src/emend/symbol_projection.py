@@ -67,10 +67,46 @@ class SymbolProjection:
 
 
 _FIELDS = frozenset(field.name for field in fields(SymbolProjection))
+_FIELD_ORDER = tuple(field.name for field in fields(SymbolProjection))
+_TUPLE_FIELDS = frozenset({"path", "decorators", "param_names", "parameters", "bases"})
 
 
 def project_symbols(records) -> tuple[SymbolProjection, ...]:
     return tuple(SymbolProjection.from_dict(record) for record in records)
+
+
+def symbols_to_rows(symbols: tuple[SymbolProjection, ...]) -> list[list]:
+    """Flatten projections to JSON-compatible rows, one value per field."""
+    return [
+        [
+            symbols_to_rows(symbol.children) if name == "children"
+            else list(getattr(symbol, name)) if name in _TUPLE_FIELDS
+            else getattr(symbol, name)
+            for name in _FIELD_ORDER
+        ]
+        for symbol in symbols
+    ]
+
+
+def symbols_from_rows(rows) -> tuple[SymbolProjection, ...]:
+    """Rebuild projections written by :func:`symbols_to_rows`.
+
+    Raises ``ValueError`` when *rows* does not have that exact shape.
+    """
+    if not isinstance(rows, list):
+        raise ValueError("symbol rows must be a list")
+    symbols = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) != len(_FIELD_ORDER):
+            raise ValueError("symbol row has the wrong shape")
+        values = dict(zip(_FIELD_ORDER, row))
+        for name in _TUPLE_FIELDS:
+            if not isinstance(values[name], list):
+                raise ValueError(f"symbol field {name} must be a list")
+            values[name] = tuple(values[name])
+        values["children"] = symbols_from_rows(values["children"])
+        symbols.append(SymbolProjection(**values))
+    return tuple(symbols)
 
 
 def symbol_hierarchy(records, module_path: str, separator: str = "."):

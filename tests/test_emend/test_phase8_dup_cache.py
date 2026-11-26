@@ -11,14 +11,13 @@ Tests that verify:
 
 from __future__ import annotations
 
-import pickle
 import sqlite3
-import zlib
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
 
+from emend import cache_codec
 from emend.duplicate import DUP_CACHE_VERSION, _duplicate_cache_key
 from emend.transform import warm_caches, _cache_db_dir, _compute_duplicate_payloads
 
@@ -98,7 +97,7 @@ def test_warm_caches_populates_valid_duplicate_payloads(tmp_path):
 
     for content_hash, version, data in rows:
         assert version == DUP_CACHE_VERSION
-        payload = pickle.loads(zlib.decompress(data))
+        payload = cache_codec.decode(data)
         assert isinstance(payload, dict), "Payload should be a dict"
         assert "subtrees" in payload, "Payload should have 'subtrees' key"
         assert "sequences" in payload, "Payload should have 'sequences' key"
@@ -233,7 +232,7 @@ def test_compute_duplicate_payloads_directly(tmp_path):
 
     assert content_hash == expected_hash
 
-    payload = pickle.loads(zlib.decompress(data))
+    payload = cache_codec.decode(data)
     assert "subtrees" in payload
     assert "sequences" in payload
     assert all("symbol" in item for item in payload["subtrees"])

@@ -228,3 +228,25 @@ def test_fact_storage_keeps_one_copy_of_each_key(tmp_path):
     assert _names(graph) == ["direct"]
     graph.close()
     assert _storage_objects(direct) == ["cozo"]
+
+
+def test_published_facts_in_the_doubled_key_layout_are_rebuilt(tmp_path):
+    """Cloning an old database forward would keep its second copy of every key."""
+    import sqlite3
+
+    from emend.emend_core import PyCozoDb
+
+    _project(tmp_path)
+    store = AnalysisStore(tmp_path)
+    store.ensure_cache_directory()
+    with sqlite3.connect(store.facts_path) as db:
+        db.execute("CREATE TABLE cozo (k BLOB PRIMARY KEY, v BLOB)")
+    PyCozoDb("sqlite", str(store.facts_path)).run(":create facts_meta {key: String => value: String}")
+    assert _storage_objects(store.facts_path) == ["cozo", "sqlite_autoindex_cozo_1"]
+
+    try:
+        assert _names(store.query_facts()) == ["original"]
+        assert _storage_objects(store.facts_path) == ["cozo"]
+    finally:
+        store.close()
+    assert _generations(tmp_path) == []

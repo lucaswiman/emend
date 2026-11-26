@@ -48,6 +48,8 @@
 | `duplicate_heuristics.py` | Boilerplate-suppression heuristics for `duplicate.py` (abstract stubs, trivial validators, `__init__` self-assignments, dunder boilerplate, …). |
 | `rewrite_engine.py` | **Experimental** equality-saturation rewrites: `EGraph`, `ENode`, `RewriteRule`, `run_saturation()`. Loads `.emend/rewrites.yaml`. CLI: `saturate` (hidden). |
 | `union_find.py` | `UnionFind` disjoint-set; used by `rewrite_engine.py` and `duplicate.py`. |
+| `cache_codec.py` | Serialization for cache rows: compressed JSON via `msgspec`. Cache databases live in the analysed checkout and are untrusted input, so **never use `pickle`** for anything stored under `.emend/cache`. |
+| `analysis_store.py` | `AnalysisStore`: the project-scoped owner of source snapshots, the published `facts.db` generation, private generations (owner-tagged, linked rather than copied, swept when abandoned), and the shared artifact database (source text, import lists, symbol projections, type results). |
 | `type_oracle.py` | Type-inference adapter. `TypeOracle` ABC + `PyreflyAdapter`/`PyrightAdapter`/`TyAdapter` (Python LSPs), `TypeScriptAdapter` (Node Compiler API), `RustAnalyzerAdapter` (LSP). `parse_type_string` parses Python/TS/Rust type syntaxes. `create_type_oracle("auto")` autodetects. Two-tier cache (LRU + SQLite `type_cache` in `parse.db`). |
 
 #### Language plugins

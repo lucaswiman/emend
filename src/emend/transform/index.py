@@ -50,12 +50,12 @@ def _get_cached_qnames(
     conn = _get_disk_cache(project_root)
     if conn is None:
         return None
-    import pickle
     import sqlite3
-    import zlib
+
+    from emend import cache_codec
     try:
         row = conn.execute(
-            "SELECT qnames FROM qn_index WHERE file_path = ? AND hash = ?",
+            "SELECT names FROM qn_index WHERE file_path = ? AND hash = ?",
             (str(Path(file_path).resolve()),
              _scope_cache_hash(content_hash, file_path, str(project_root))),
         ).fetchone()
@@ -65,10 +65,14 @@ def _get_cached_qnames(
     if row is None:
         return None
     try:
-        return pickle.loads(zlib.decompress(row[0]))
-    except Exception:
+        names = cache_codec.decode(row[0])
+    except ValueError:
         logger.debug("corrupt qn_index cache row; ignoring", exc_info=True)
         return None
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        logger.debug("malformed qn_index cache row; ignoring")
+        return None
+    return set(names)
 
 
 def _qn_cache_markers(conn: sqlite3.Connection, paths) -> set[tuple[str, bytes]]:
@@ -126,7 +130,7 @@ def _write_index_rows(
                     ((path,) for path in revised_paths),
                 )
             conn.executemany(
-                "INSERT OR REPLACE INTO qn_index(file_path, hash, qnames) "
+                "INSERT OR REPLACE INTO qn_index(file_path, hash, names) "
                 "VALUES (?, ?, ?)",
                 qn_rows,
             )
@@ -179,8 +183,7 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
     Returns:
         (parse_count, qn_count, skipped_count, sym_count, ref_count).
     """
-    import pickle
-    import zlib
+    from emend import cache_codec
     from emend.analysis_store import collect_symbol_info as _collect_symbols_ts
     from emend import emend_core as _rust
     db_path, project_root, file_batch = args
@@ -244,10 +247,7 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
             except Exception:
                 logger.debug("qname collection failed for %s", py_file, exc_info=True)
             else:
-                qn_blob = zlib.compress(
-                    pickle.dumps(all_qnames, protocol=pickle.HIGHEST_PROTOCOL),
-                    level=1,
-                )
+                qn_blob = cache_codec.encode(sorted(all_qnames))
                 qn_rows.append((str(Path(py_file).resolve()), scope_hash, qn_blob))
 
         try:
@@ -1254,10 +1254,9 @@ def _compute_duplicate_payloads(
     (``dup_cache`` table).
 
     """
-    import pickle
     import sqlite3 as _sqlite3
-    import zlib
 
+    from emend import cache_codec
     from emend.duplicate import DUP_CACHE_VERSION as DUP_VERSION, _duplicate_cache_key
     from emend.language_registry import detect_language
 
@@ -1301,6 +1300,8 @@ def _compute_duplicate_payloads(
 
     from emend.duplicate import _build_duplicate_payload_for_cache
 
+    # Rows written under another payload format can never be read again.
+    conn.execute("DELETE FROM dup_cache WHERE version != ?", (DUP_VERSION,))
     for file_path, content, content_hash in source_files:
         if content_hash in cached_hashes:
             continue
@@ -1308,7 +1309,7 @@ def _compute_duplicate_payloads(
             payload = _build_duplicate_payload_for_cache(
                 file_path, content, resolvers[Path(file_path).suffix.lstrip(".")]
             )
-            data = zlib.compress(pickle.dumps(payload))
+            data = cache_codec.encode(payload)
             conn.execute(
                 "INSERT OR REPLACE INTO dup_cache (hash, version, data) VALUES (?, ?, ?)",
                 (content_hash, DUP_VERSION, data),
