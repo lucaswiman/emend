@@ -999,6 +999,22 @@ class AnalysisStore:
         else:
             shutil.copyfile(source_path, destination_path)
 
+    def _compact_generation(self, path: Path) -> None:
+        """Rewrite a bulk-saved generation with full pages.
+
+        The save leaves about a tenth of every page empty.  Rewriting costs
+        a second on a 400 MB database, once per full build; every later copy
+        and read of the generation is that much smaller.
+        """
+        compact = self._temporary_db_path("facts-next-")
+        try:
+            with closing(sqlite3.connect(path)) as conn:
+                conn.execute("VACUUM INTO ?", (str(compact),))
+            os.replace(compact, path)
+        except BaseException:
+            self._unlink(compact)
+            raise
+
     def _snapshot_copy(self, source_path: Path, prefix: str) -> Path:
         """Create a stable private copy of one SQLite generation."""
         path = self._temporary_db_path(prefix)
@@ -1136,6 +1152,7 @@ class AnalysisStore:
                 prepare_cozo_storage(path)
                 graph._client.backup(str(path))
                 graph.close()
+                self._compact_generation(path)
                 graph = FactGraph(db_path=str(path))
             graph.bind_snapshot(
                 snapshot,

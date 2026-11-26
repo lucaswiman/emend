@@ -496,3 +496,29 @@ def test_generation_with_a_write_ahead_log_is_copied_through_sqlite(tmp_path):
         writer.close()
 
     assert _values(copy) == list(range(20))
+
+
+def test_fresh_generation_is_published_compact(tmp_path):
+    """A bulk save leaves a tenth of every page empty.  The published file is
+    rewritten once, so rewriting it again finds nothing to give back."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'compact'\n")
+    for module in range(30):
+        (tmp_path / f"mod_{module:02}.py").write_text("".join(
+            f"def function_{module}_{number}(value):\n"
+            f"    if value > {number}:\n"
+            f"        return function_{module}_{(number + 1) % 40}(value - 1)\n"
+            f"    return value\n\n\n"
+            for number in range(40)
+        ))
+    store = AnalysisStore.open(tmp_path)
+    try:
+        store.query_facts()
+    finally:
+        store.close()
+
+    published = tmp_path / ".emend" / "cache" / "facts.db"
+    rewritten = tmp_path / "rewritten.db"
+    with closing(sqlite3.connect(published)) as conn:
+        conn.execute("VACUUM INTO ?", (str(rewritten),))
+    assert published.stat().st_size > 500_000
+    assert published.stat().st_size == rewritten.stat().st_size
