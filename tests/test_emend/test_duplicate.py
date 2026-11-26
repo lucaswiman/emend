@@ -1061,16 +1061,17 @@ class MyClass:
 
         # With a working symbol_index, member.symbol should be the actual
         # enclosing class/method name, not a local variable.
+        assert clusters
         for cluster in clusters:
             for member in cluster.members:
-                if member.symbol:
-                    leaf = member.symbol.rsplit(".", 1)[-1]
-                    # symbol should never be a local variable or parameter
-                    assert leaf not in ("self", "name", "x", "y", "z", "a", "b", "c"), (
-                        f"member.symbol is '{member.symbol}' which looks like a "
-                        f"local variable, not an enclosing class/method. "
-                        f"This indicates symbol_index is using col as end_line."
-                    )
+                assert member.symbol
+                leaf = member.symbol.rsplit(".", 1)[-1]
+                # symbol should never be a local variable or parameter
+                assert leaf not in ("self", "name", "x", "y", "z", "a", "b", "c"), (
+                    f"member.symbol is '{member.symbol}' which looks like a "
+                    f"local variable, not an enclosing class/method. "
+                    f"This indicates symbol_index is using col as end_line."
+                )
 
 
 # ---------------------------------------------------------------------------

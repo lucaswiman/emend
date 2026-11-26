@@ -453,8 +453,6 @@ class TestBug3DuplicateMetavar:
     def test_match_source_duplicate_metavar_no_match(self):
         """Pattern $x + $x should NOT match a + b (different values)."""
         result = _match_expr_pattern("a + b", "$x + $x")
-        # Either None or the match should not have consistent x.
-        # The important thing is that it doesn't crash with re.error.
-        if result is not None:
-            # If it matches, x should be consistent
-            assert result.get("x") in ("a", "b")
+        # A repeated metavar must bind one value, so different operands do not match
+        # (and the pattern compiles without re.error).
+        assert result is None

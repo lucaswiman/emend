@@ -217,9 +217,9 @@ class TestFilePathFallback:
         _dispatch(eng, "reindex", {})
         result = _dispatch(eng, "search", {"query": "unique_config.yaml"})
         # Should find the file
-        if result["items"]:
-            assert result["provenance"] == "files"
-            assert result["sources"] == ["files"]
+        assert result["items"]
+        assert result["provenance"] == "files"
+        assert result["sources"] == ["files"]
 
     def test_file_search_falls_back_to_filesystem_without_index(self, tmp_path):
         proj = tmp_path / "proj"

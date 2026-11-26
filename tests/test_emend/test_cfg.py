@@ -524,8 +524,7 @@ class TestDominators:
         for block in cfg.get_blocks():
             bid = block["id"]
             doms = cfg.dominators(bid)
-            if bid != cfg.exit or cfg.predecessors(bid):
-                assert cfg.entry in doms or bid == cfg.entry
+            assert cfg.entry in doms or bid == cfg.entry
 
     def test_self_dominates(self):
         cfgs = _build("""\
