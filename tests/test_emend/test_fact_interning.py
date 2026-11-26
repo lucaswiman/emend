@@ -1022,3 +1022,19 @@ def test_bridge_fragment_search_reads_a_reopened_database(tmp_path):
         assert [text for text, _ in reopened.texts_containing(["stored"], 10)] == ["pkg.stored"]
     finally:
         reopened.close()
+
+
+def test_bridge_fragment_search_reads_a_dictionary_larger_than_one_page():
+    """The dictionary is read in pages; none may be skipped or read twice."""
+    db = _dictionary_db()
+    texts = [f"name.{number:06}" for number in range(45_000)]
+    db.import_relations(
+        {"edge": (["source", "target", "label"], [[text, "", "x"] for text in texts])},
+        {"edge": (0, 1)},
+    )
+    found = db.texts_containing(["name."], 100_000)
+    assert [text for text, _ in found] == texts
+    assert [ident for _, ident in found] == db.intern_ids(texts)
+    assert [text for text, _ in db.texts_containing(["0444"], 3)] == [
+        "name.000444", "name.004440", "name.004441",
+    ]

@@ -65,7 +65,7 @@
 
 | File | Purpose |
 |------|---------|
-| `editor_search.py` | Editor integration: `EditorSearchEngine`, FTS5 trigram index, JSON-RPC server (`run_editor_server`), scoring, partial-pattern normalisation. **3.2k lines.** |
+| `editor_search.py` | Editor integration: `EditorSearchEngine`, FTS5 trigram index, JSON-RPC server (`run_editor_server`), scoring, partial-pattern normalisation. **3.2k lines.** `parse.db` holds symbols only (`symbol_index` is a view over `symbol` and `symbol_file`); reference lookups read the fact graph as last published (`AnalysisStore.published_facts()`), never scanning the project. |
 | `mcp/` | MCP (Model Context Protocol) server package. Exposes emend's commands as MCP tools over stdio or SSE; uses `MCPServer` from the `mcp` package. Optional `mcp` extra. Submodules: `dispatch.py` (`MCPServer` app, profile/schema/run infrastructure), `find.py` (`search` tool), `edit.py` (`transform` tool), `analyze.py` (`references` + `analyze` tools), `checks.py` (`check` tool), `tooling.py` (`facts_query` + `mappings` + `grammar_and_cookbook` tools). |
 | `knowledge.py` | Identifier and module mapping store: `MappingStore` (YAML-backed at `.emend/mappings.yaml`), repo checkout helpers, MCP/RPC integration. |
 

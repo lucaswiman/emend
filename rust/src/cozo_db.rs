@@ -37,6 +37,11 @@ const STORED_TEXTS: &str = "q[id] <- $ids ?[id, text] := q[id], *interned[id, te
 const STORED_TEXT: &str = "?[text] := *interned[$id, text]";
 const ALL_IDS: &str = "?[text, id] := *intern[text, id]";
 const ALL_TEXTS: &str = "?[id, text] := *interned[id, text]";
+/// The dictionary in text order, a page at a time: a result is held in memory
+/// whole, and the whole dictionary at once is several times its own size.
+const IDS_PAGE: usize = 20_000;
+const FIRST_IDS: &str = "?[text, id] := *intern[text, id] :limit 20000";
+const NEXT_IDS: &str = "?[text, id] := *intern[text, id], text > $after :limit 20000";
 const PUT_INTERN: &str = "?[text, id] <- $entries :put intern {text => id}";
 const PUT_INTERNED: &str = "?[text, id] <- $entries :put interned {id => text}";
 
@@ -620,13 +625,32 @@ impl PyCozoDb {
             return Ok(Vec::new());
         }
         if !self.dictionary().all_ids {
-            let read = |script: &str, params| self.read(script, params);
-            let found = stored_ids(&read, None)?;
-            let mut dictionary = self.dictionary_mut();
-            // A write commits its texts to this map itself, so nothing that
-            // finished meanwhile is missing from it.
-            dictionary.ids.extend(found);
-            dictionary.all_ids = true;
+            let mut after: Option<String> = None;
+            loop {
+                let page = match &after {
+                    None => self.read(FIRST_IDS, BTreeMap::new())?,
+                    Some(text) => {
+                        self.read(NEXT_IDS, one_param("after", DataValue::from(text.as_str())))?
+                    }
+                }
+                .rows;
+                let full = page.len() == IDS_PAGE;
+                let mut dictionary = self.dictionary_mut();
+                for row in &page {
+                    if let (Some(text), Some(id)) = (row[0].get_str(), row[1].get_int()) {
+                        dictionary.ids.insert(text.to_string(), id);
+                        if after.as_deref().is_none_or(|last| last < text) {
+                            after = Some(text.to_string());
+                        }
+                    }
+                }
+                if !full {
+                    // A write commits its texts to this map itself, so nothing
+                    // that finished meanwhile is missing from it.
+                    dictionary.all_ids = true;
+                    break;
+                }
+            }
         }
         let needles: Vec<String> = if ignore_case {
             fragments.iter().map(|fragment| fragment.to_lowercase()).collect()
