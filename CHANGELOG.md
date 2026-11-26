@@ -30,7 +30,12 @@
   installed plugins per file, and reading up-to-date facts scans the project
   once without waiting on the publication lock.
 - Adding or removing a module, and reverting a file's content, now re-parse the
-  affected files instead of loading cached per-file facts.
+  affected files instead of loading cached per-file facts. A changed set of
+  modules builds a new fact generation rather than rewriting every row of the
+  old one, so the first query afterwards costs about as much as a cold index
+  (Django: 23 s, where rewriting took 90 s).
+- A query on a project with no index stores facts a few files at a time
+  instead of holding the whole project's facts in memory first.
 
 ## 0.5.6
 
