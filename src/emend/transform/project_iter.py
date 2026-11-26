@@ -21,17 +21,13 @@ logger = logging.getLogger(__name__)
 
 _METAVAR_RE = re.compile(r'\$(?:\.\.\.)?[A-Z_][A-Z_0-9]*')
 
-def _ext_from_path(file_path: str | Path) -> str:
-    """Return the file extension (without dot) for passing to emend_core functions."""
-    return Path(file_path).suffix.lstrip('.') or 'py'
-
 
 def extract_pattern_literals(pattern_str: str) -> list[str]:
     """Extract literal identifier tokens from a pattern string for pre-filtering.
 
     For a pattern like "$X.objects.filter($...ARGS)", returns ["objects", "filter"].
-    These can be used with Rust filter_files_by_content to quickly eliminate files
-    that cannot possibly match the pattern.
+    ``find_pattern_in_project`` passes these to Rust ``read_and_filter_files``
+    to quickly eliminate files that cannot possibly match the pattern.
     """
     # Remove metavariables
     cleaned = _METAVAR_RE.sub('', pattern_str)
@@ -287,18 +283,10 @@ def _file_to_module(file_path: str, project_path: str | None) -> str:
     return module_name_for_file(file_path, project_path)
 
 
-# Non-dot directories to skip.  All directories starting with '.' are
-# skipped automatically by the Rust scanner (emend_core.collect_python_files).
-# The canonical list lives in Rust (scanner.rs); we import it here so
-# Python and Rust always agree.
-_SKIP_DIRS = frozenset(_rust.skip_dirs())
-
 from emend.file_collection import (
     collect_source_files as _collect_source_files,
-    collect_source_files_scandir as _collect_source_files_scandir,
-    detect_project_languages,
+    detect_project_languages,  # noqa: F401  (re-exported via emend.transform)
 )
-
 
 
 

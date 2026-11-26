@@ -78,7 +78,7 @@ def rename_symbol(
     Raises:
         ValueError: If symbol not found
     """
-    from .project_iter import _find_project_root, _normalize_module_qn, _file_to_module, _files_importing_module, visit_project_ts
+    from .project_iter import _find_project_root, _files_importing_module, visit_project_ts
     from .refs import _rename_in_docstrings
     symbol_name = selector.symbol_path[-1] if selector.symbol_path else None
     if not symbol_name:

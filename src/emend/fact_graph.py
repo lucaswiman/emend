@@ -434,11 +434,6 @@ class FactGraph:
                 self._client = _SharedGenerationClient(self, self._client)
             self._privatize = privatize
 
-    @property
-    def is_shared(self) -> bool:
-        """Whether writes are currently redirected to a private copy."""
-        return self._privatize is not None
-
     def _private_client(self) -> Any:
         """Move this graph to a private copy of its shared generation."""
         with self._privatize_lock:
@@ -780,7 +775,7 @@ class FactGraph:
         """Add a definition-use fact."""
         self.add_def_uses_batch([fact])
 
-    # -- Batch mutation (for build_from_project performance) ---------------
+    # -- Batch mutation ----------------------------------------------------
 
     def _put_batch(
         self,
@@ -1350,36 +1345,6 @@ class FactGraph:
             )
             for r in result["rows"]
         ]
-
-    def method_call_types(
-        self,
-        file_path: str | None = None,
-        func_qn: str | None = None,
-    ) -> list[tuple[str, str, str, str, str]]:
-        """Resolve receiver types for method calls via type_binding join.
-
-        Returns (file_path, func_qn, receiver, method, receiver_type) tuples
-        for method calls where the receiver has a known type binding.
-        """
-        clauses = [
-            "*method_call[fp, fq, rcv, meth, bid, ln]",
-            "*type_binding[_, fp, def_line, _, type_str]",
-            "*def_use[fp, fq, rcv, _, _, bid, def_line, _, _, _]",
-        ]
-        params: dict[str, Any] = {}
-        if file_path is not None:
-            clauses.append("fp == $fp")
-            params["fp"] = file_path
-        if func_qn is not None:
-            clauses.append("fq == $fq")
-            params["fq"] = func_qn
-        query = "?[fp, fq, rcv, meth, type_str] := " + ", ".join(clauses)
-        try:
-            result = self._client.run(query, params)
-        except Exception:
-            logger.debug("method_call_types query failed", exc_info=True)
-            return []
-        return [(r[0], r[1], r[2], r[3], r[4]) for r in result["rows"]]
 
     def cfg_blocks(self, func_qn: str | None = None, file_path: str | None = None) -> list[CfgBlockFact]:
         """Query CFG block facts."""
@@ -2637,12 +2602,6 @@ class FactGraph:
         return build_from_project(
             cls, project_path, language, db_path, languages, include_types
         )
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers for build_from_project
-# ---------------------------------------------------------------------------
-
 
 
 # ---------------------------------------------------------------------------

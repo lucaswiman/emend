@@ -4,7 +4,6 @@ from typing import Annotated, Optional
 
 import typer
 
-from emend.cli_base import tool_app
 from emend.transform import warm_caches
 
 def index_cmd(

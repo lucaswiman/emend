@@ -394,11 +394,3 @@ def test_overlay_snapshot_is_coherent_for_value_graph(tmp_path):
         assert graph.snapshot.snapshot_id != disk_id
     finally:
         store.close()
-
-
-def test_flow_legacy_line_order_adapter_is_removed_after_cutover():
-    import emend.checks.flow as flow
-
-    # Trace's legacy helpers are covered by test_phase17_remove_legacy_intra;
-    # this guards the former flow-specific simulator boundary.
-    assert not hasattr(flow, "_execute_via_python")

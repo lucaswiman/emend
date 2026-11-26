@@ -139,7 +139,7 @@ pub struct FlowFacts {
 }
 
 // ---------------------------------------------------------------------------
-// CFG queries (predecessors, successors, dominators)
+// CFG queries (predecessors, dominators)
 // ---------------------------------------------------------------------------
 
 impl FunctionCfg {
@@ -151,14 +151,6 @@ impl FunctionCfg {
             .collect()
     }
 
-    pub fn successors(&self, block_id: BlockId) -> Vec<BlockId> {
-        self.edges
-            .iter()
-            .filter(|e| e.from == block_id)
-            .map(|e| e.to)
-            .collect()
-    }
-
     /// Build predecessor adjacency list (block_id → list of predecessors).
     fn pred_adj(&self) -> HashMap<BlockId, Vec<BlockId>> {
         let mut adj: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
@@ -167,18 +159,6 @@ impl FunctionCfg {
         }
         for e in &self.edges {
             adj.entry(e.to).or_default().push(e.from);
-        }
-        adj
-    }
-
-    /// Build successor adjacency list (block_id → list of successors).
-    fn succ_adj(&self) -> HashMap<BlockId, Vec<BlockId>> {
-        let mut adj: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
-        for b in &self.blocks {
-            adj.insert(b.id, Vec::new());
-        }
-        for e in &self.edges {
-            adj.entry(e.from).or_default().push(e.to);
         }
         adj
     }
@@ -240,25 +220,6 @@ impl FunctionCfg {
         let adj = self.pred_adj();
         let dom = Self::compute_dominator_map(&self.blocks, &adj, self.entry);
         dom.get(&block_id).cloned().unwrap_or_default()
-    }
-
-    /// Compute post-dominators: dominators on the reverse CFG from exit.
-    pub fn post_dominators(&self, block_id: BlockId) -> HashSet<BlockId> {
-        let adj = self.succ_adj();
-        let dom = Self::compute_dominator_map(&self.blocks, &adj, self.exit);
-        dom.get(&block_id).cloned().unwrap_or_default()
-    }
-
-    /// Compute the full dominator map for all blocks at once.
-    pub fn all_dominators(&self) -> HashMap<BlockId, HashSet<BlockId>> {
-        let adj = self.pred_adj();
-        Self::compute_dominator_map(&self.blocks, &adj, self.entry)
-    }
-
-    /// Compute the full post-dominator map for all blocks at once.
-    pub fn all_post_dominators(&self) -> HashMap<BlockId, HashSet<BlockId>> {
-        let adj = self.succ_adj();
-        Self::compute_dominator_map(&self.blocks, &adj, self.exit)
     }
 }
 

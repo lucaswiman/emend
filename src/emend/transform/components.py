@@ -1,7 +1,6 @@
 """Component access, modification, and diff generation."""
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 from emend import emend_core as _rust
@@ -471,9 +470,6 @@ def remove_component(selector: ExtendedSelector, apply: bool = False) -> str:
             f"{'.'.join(selector.symbol_path)}: overlapping byte ranges"
         ),
     )
-
-
-_CONTENT_REF_RE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\.content\}")
 
 
 def _extract_string_content_from_text(text: str, ext: str = "py") -> str | None:

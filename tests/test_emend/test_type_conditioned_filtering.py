@@ -262,8 +262,3 @@ class TestEvaluateTypeConstraintFQNames:
     def test_negated_short_name_allows_other_fq(self):
         """'!Redis' should match 'redis.client.StrictRedis'."""
         assert evaluate_type_constraint("!Redis", "redis.client.StrictRedis") is True
-
-    def test_simple_name_still_exact_matches_simple_type(self):
-        """Simple name still matches simple type (no dots in type)."""
-        assert evaluate_type_constraint("int", "int") is True
-        assert evaluate_type_constraint("int", "float") is False

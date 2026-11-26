@@ -141,15 +141,6 @@ impl PyCfg {
             .collect()
     }
 
-    /// Return the IDs of all successor blocks of ``block_id``.
-    fn successors(&self, block_id: u32) -> Vec<u32> {
-        self.inner
-            .successors(BlockId(block_id))
-            .into_iter()
-            .map(|b| b.0)
-            .collect()
-    }
-
     /// Return the IDs of all dominators of ``block_id`` (sorted).
     fn dominators(&self, block_id: u32) -> Vec<u32> {
         let mut v: Vec<u32> = self
@@ -160,48 +151,6 @@ impl PyCfg {
             .collect();
         v.sort();
         v
-    }
-
-    /// Return the IDs of all post-dominators of ``block_id`` (sorted).
-    fn post_dominators(&self, block_id: u32) -> Vec<u32> {
-        let mut v: Vec<u32> = self
-            .inner
-            .post_dominators(BlockId(block_id))
-            .into_iter()
-            .map(|b| b.0)
-            .collect();
-        v.sort();
-        v
-    }
-
-    /// Compute the full dominator map for all blocks at once.
-    ///
-    /// Returns a dict mapping block_id → sorted list of dominator block_ids.
-    fn all_dominators(&self) -> HashMap<u32, Vec<u32>> {
-        self.inner
-            .all_dominators()
-            .into_iter()
-            .map(|(k, v)| {
-                let mut ids: Vec<u32> = v.into_iter().map(|b| b.0).collect();
-                ids.sort();
-                (k.0, ids)
-            })
-            .collect()
-    }
-
-    /// Compute the full post-dominator map for all blocks at once.
-    ///
-    /// Returns a dict mapping block_id → sorted list of post-dominator block_ids.
-    fn all_post_dominators(&self) -> HashMap<u32, Vec<u32>> {
-        self.inner
-            .all_post_dominators()
-            .into_iter()
-            .map(|(k, v)| {
-                let mut ids: Vec<u32> = v.into_iter().map(|b| b.0).collect();
-                ids.sort();
-                (k.0, ids)
-            })
-            .collect()
     }
 
     // ── Counts ──────────────────────────────────────────────────────────────

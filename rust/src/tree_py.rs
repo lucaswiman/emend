@@ -29,8 +29,7 @@ use crate::pattern::parse_by_extension;
 
 /// Detect the tree-sitter language name from a file extension. Returns
 /// `None` for unknown extensions rather than silently falling back to
-/// Python, so that `parse_source` can honour the "unknown → None"
-/// contract documented in the roadmap.
+/// Python, so that `parse_source` returns `None` for an unknown extension.
 fn language_from_ext(ext: &str) -> Option<&'static str> {
     Some(match ext {
         "py" | "pyi" => "python",
@@ -198,11 +197,6 @@ impl PyNode {
             }
         }
         out
-    }
-
-    /// Return the `i`-th child (including anonymous), or `None` if out of range.
-    fn child(&self, i: usize) -> Option<PyNode> {
-        self.node.child(i).map(|c| self.clone_child(c))
     }
 
     /// Return the `i`-th named child, or `None` if out of range.

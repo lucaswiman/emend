@@ -1,5 +1,7 @@
 """Tests for dead-code detection on TypeScript projects."""
 
+import textwrap
+
 import pytest
 
 
@@ -318,3 +320,89 @@ class TestDeadCodeTypeScript:
         # renderWidget is exported — not dead
         assert "renderWidget" not in dead_names
         assert "describeWidget" not in dead_names
+
+
+class TestUnreachableBlocksTypeScript:
+    """Unreachable block detection for TypeScript source files."""
+
+    def _build_index(self, project_path: str) -> None:
+        from emend.transform import warm_caches
+
+        warm_caches(project_path, type_engine="none")
+
+    def test_unreachable_after_return_ts(self, tmp_path):
+        """Code after a return statement in a TypeScript function is unreachable."""
+        from emend.transform import DeadBlock, DeadSymbol, find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.ts").write_text(textwrap.dedent("""\
+            function f(): number {
+                return 1;
+                const x = 2;
+            }
+        """))
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        blocks = [d for d in dead if isinstance(d, DeadBlock)]
+        assert len(blocks) >= 1
+        assert any(b.start_line >= 3 for b in blocks)
+
+    def test_unreachable_after_throw_ts(self, tmp_path):
+        """Code after a throw statement in a TypeScript function is unreachable."""
+        from emend.transform import DeadBlock, DeadSymbol, find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.ts").write_text(textwrap.dedent("""\
+            function f(): never {
+                throw new Error("oops");
+                const x = 2;
+            }
+        """))
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        blocks = [d for d in dead if isinstance(d, DeadBlock)]
+        assert len(blocks) >= 1
+        assert any(b.start_line >= 3 for b in blocks)
+
+    def test_reachable_after_if_return_ts(self, tmp_path):
+        """Code after a conditional return IS reachable - should not be flagged."""
+        from emend.transform import DeadBlock, DeadSymbol, find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.ts").write_text(textwrap.dedent("""\
+            function f(x: number): number {
+                if (x > 0) {
+                    return x;
+                }
+                return -x;
+            }
+        """))
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        blocks = [d for d in dead if isinstance(d, DeadBlock)]
+        assert len(blocks) == 0
+
+    def test_unreachable_after_if_else_both_return_ts(self, tmp_path):
+        """Code after an if/else where both branches return is unreachable."""
+        from emend.transform import DeadBlock, DeadSymbol, find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.ts").write_text(textwrap.dedent("""\
+            function f(x: number): number {
+                if (x > 0) {
+                    return x;
+                } else {
+                    return -x;
+                }
+                const dead = 1;
+            }
+        """))
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        blocks = [d for d in dead if isinstance(d, DeadBlock)]
+        assert len(blocks) >= 1
+        assert any(b.start_line >= 7 for b in blocks)

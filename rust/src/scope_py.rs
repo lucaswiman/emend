@@ -84,18 +84,6 @@ impl PyScopeResolver {
         self.inner.module_name_for_file(&PathBuf::from(path))
     }
 
-    /// Index multiple files sequentially.
-    fn index_files(&mut self, files_and_sources: Vec<(String, String)>) -> PyResult<()> {
-        for (path, source) in &files_and_sources {
-            let path_buf = PathBuf::from(path);
-            let ext = path_buf.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if let Some(tree) = crate::pattern::parse_by_extension(source, ext) {
-                self.inner.index_file(&path_buf, source, &tree);
-            }
-        }
-        Ok(())
-    }
-
     /// Returns (name, line, column) for each definition.  ``line`` and
     /// ``column`` are **0-indexed** (matching ``scopes_in_file``).
     fn definitions_in_file(&self, path: &str) -> Vec<(String, usize, usize)> {
@@ -114,18 +102,6 @@ impl PyScopeResolver {
 
     fn all_qualified_names(&self) -> Vec<String> {
         self.inner.qn_index.keys().cloned().collect()
-    }
-
-    fn lookup_qn(&self, qn: &str) -> Vec<(String, usize, usize)> {
-        self.inner
-            .qn_index
-            .get(qn)
-            .map(|locs| {
-                locs.iter()
-                    .map(|loc| (loc.file.to_string_lossy().into_owned(), loc.line, loc.column))
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     fn imports_in_file(&self, path: &str) -> Vec<(String, String, Option<String>, bool)> {
@@ -297,31 +273,12 @@ impl PyScopeResolver {
         structured.iter().map(|si| structured_import_to_pydict(py, si)).collect()
     }
 
-    /// Returns all identifier names with their annotation context for a file.
+    /// Returns all identifier names with annotation context from a source string.
     ///
     /// Each entry is ``(name, in_annotation)``.  Includes every identifier
     /// node that is not the attribute-field of an attribute access and not
-    /// a language keyword.  Used to replace ``ast.walk()`` for collecting
-    /// referenced names and classifying them as runtime vs annotation.
-    fn all_identifiers_in_file(&self, path: &str) -> Vec<(String, bool)> {
-        let path_buf = PathBuf::from(path);
-        let _fs = match self.inner.file_scopes.get(&path_buf) {
-            Some(fs) => fs,
-            None => return Vec::new(),
-        };
-        let ext = path_buf.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let source = std::fs::read_to_string(&path_buf).unwrap_or_default();
-        let tree = match crate::pattern::parse_by_extension(&source, ext) {
-            Some(t) => t,
-            None => return Vec::new(),
-        };
-        self.inner.collect_identifiers_with_annotation(&tree, &source)
-    }
-
-    /// Returns all identifier names with annotation context from a source string.
-    ///
-    /// Like ``all_identifiers_in_file`` but works on a source string directly
-    /// without requiring the file to be indexed.
+    /// a language keyword.  Works on a source string directly; the file does
+    /// not need to be indexed.
     #[pyo3(signature = (source, ext=None))]
     fn collect_identifiers_from_source(
         &self,
@@ -357,33 +314,6 @@ impl PyScopeResolver {
         structured.iter().map(|si| structured_import_to_pydict(py, si)).collect()
     }
 
-    /// Collect Rust `use` and `mod` declarations from a source string.
-    ///
-    /// This is a language-specific parser for Rust that handles the recursive
-    /// use-tree grammar (``scoped_use_list``, ``use_wildcard``, ``use_as_clause``…).
-    /// Returns a list of ``(local_name, module_path, imported_name, is_star, line)``
-    /// tuples, where ``line`` is 1-based.
-    ///
-    /// Use this instead of ``imports_in_file`` or
-    /// ``collect_structured_imports_from_source`` for Rust source files.
-    #[pyo3(signature = (source, ext=None))]
-    fn collect_rust_imports_from_source(
-        &self,
-        source: &str,
-        ext: Option<&str>,
-    ) -> Vec<(String, String, Option<String>, bool, usize)> {
-        let ext = ext.unwrap_or("rs");
-        let tree = match crate::pattern::parse_by_extension(source, ext) {
-            Some(t) => t,
-            None => return Vec::new(),
-        };
-        self.inner
-            .collect_rust_imports(&tree, source)
-            .into_iter()
-            .map(|(b, line, _)| (b.local_name, b.module_path, b.imported_name, b.is_star, line))
-            .collect()
-    }
-
     /// Returns all qualified name strings mentioned in a file (for pre-filter index).
     fn all_qnames_in_file(&self, path: &str) -> Vec<String> {
         let path = PathBuf::from(path);
@@ -392,10 +322,6 @@ impl PyScopeResolver {
             .get(&path)
             .map(|fs| fs.all_qnames.clone())
             .unwrap_or_default()
-    }
-
-    fn file_count(&self) -> usize {
-        self.inner.file_scopes.len()
     }
 
     /// Returns all symbols defined in a file as a list of dicts.

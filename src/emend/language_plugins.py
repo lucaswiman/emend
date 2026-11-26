@@ -140,12 +140,6 @@ class ImportHandler(ABC):
 class CommentHandler(ABC):
     """Abstract interface for comment and docstring operations."""
 
-    @property
-    @abstractmethod
-    def line_comment_prefix(self) -> str:
-        """The single-line comment prefix (e.g. ``#`` for Python, ``//`` for TS)."""
-        ...
-
     @abstractmethod
     def find_docstrings(
         self, source: str, symbol_byte_range: tuple[int, int]
@@ -430,7 +424,6 @@ class RegexCommentHandler(CommentHandler):
     ) -> None:
         if prefix is None:
             prefix = _get_comment_prefix(language or "")
-        self._prefix = prefix
         escaped = re.escape(prefix)
         # Match "noqa: tag1, tag2" with tags.  Capture the full remainder of
         # the line (``(.*)``) rather than a single non-whitespace run so that
@@ -443,10 +436,6 @@ class RegexCommentHandler(CommentHandler):
         self._noqa_bare_pat = re.compile(
             escaped + r"\s*noqa\s*$"
         )
-
-    @property
-    def line_comment_prefix(self) -> str:
-        return self._prefix
 
     def find_docstrings(
         self, source: str, symbol_byte_range: tuple[int, int]

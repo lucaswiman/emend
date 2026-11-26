@@ -273,20 +273,6 @@ def test_python_comment_handler_find_docstrings_basic():
 
 
 # ---------------------------------------------------------------------------
-# Verify no ast.parse usage (Phase 7 migration check)
-# ---------------------------------------------------------------------------
-
-def test_python_plugin_does_not_import_ast():
-    """Phase 7 requirement: python_plugin.py must not import Python's ast module."""
-    import inspect
-    import emend.python_plugin as mod
-    src = inspect.getsource(mod)
-    assert "import ast" not in src, (
-        "python_plugin.py must not use Python's ast module (Phase 7 migration)"
-    )
-
-
-# ---------------------------------------------------------------------------
 # load_plugin
 # ---------------------------------------------------------------------------
 

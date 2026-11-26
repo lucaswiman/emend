@@ -172,6 +172,44 @@ class TestPythonImports:
         assert facts[0].importing_file == "myproject/app.py"
 
 
+class TestPythonMultiLineImports:
+    """Verify that multi-line parenthesised imports are correctly extracted.
+
+    The old hand-rolled regex matched only single-line imports and missed
+    multi-line statements such as ``from foo import (\\n    bar,\\n    baz\\n)``.
+    The canonical native batch must handle all such cases.
+    """
+
+    def _imports(self, source: str) -> list[str]:
+        """Return a sorted list of (module, imported_name) string pairs."""
+        facts = _facts("test_module.py", source)
+        return sorted(
+            f"{f.imported_module}:{f.imported_name or ''}"
+            for f in facts
+        )
+
+    def test_multi_line_parenthesised_import(self):
+        src = "from foo import (\n    bar,\n    baz\n)\n"
+        pairs = self._imports(src)
+        assert "foo:bar" in pairs, f"Expected foo:bar in {pairs}"
+        assert "foo:baz" in pairs, f"Expected foo:baz in {pairs}"
+
+    def test_mixed_imports(self):
+        src = (
+            "import sys\n"
+            "from foo import (\n"
+            "    bar,\n"
+            "    baz,\n"
+            ")\n"
+            "from qux import quux\n"
+        )
+        pairs = self._imports(src)
+        assert "sys:" in pairs
+        assert "foo:bar" in pairs
+        assert "foo:baz" in pairs
+        assert "qux:quux" in pairs
+
+
 # ---------------------------------------------------------------------------
 # TypeScript / JavaScript import extraction
 # ---------------------------------------------------------------------------
@@ -220,17 +258,8 @@ class TestTypeScriptImports:
         # The binding name 'X' is always recorded; the star indicator may vary.
         assert f.imported_name == "X"
 
-    def test_side_effect_import(self):
-        # Side-effect imports (import "module") are not tracked by
-        # PyScopeResolver.imports_in_file() and are silently omitted.
-        facts = _facts("test.ts", 'import "module";\n')
-        assert isinstance(facts, list)
         # May return 0 facts — just ensure no exception is raised.
 
-    def test_commonjs_require(self):
-        # CommonJS require() is not tracked by PyScopeResolver and is omitted.
-        facts = _facts("test.ts", 'const X = require("module");\n')
-        assert isinstance(facts, list)
         # May return 0 facts — just ensure no exception is raised.
 
     def test_type_import(self):
@@ -240,11 +269,6 @@ class TestTypeScriptImports:
         assert f.imported_module == "module"
         assert f.imported_name == "X"
 
-    def test_re_export(self):
-        # Re-exports (export { X } from "module") are not tracked by
-        # PyScopeResolver.imports_in_file() and are silently omitted.
-        facts = _facts("test.ts", 'export { X } from "module";\n')
-        assert isinstance(facts, list)
         # May return 0 facts — just ensure no exception is raised.
 
     def test_multiple_named_imports(self):
@@ -315,11 +339,23 @@ class TestTypeScriptImports:
         facts = _facts("test.ts", "const x = 1;\n")
         assert facts == []
 
-    def test_require_with_destructuring(self):
-        """const { A, B } = require('mod') — CommonJS require is not tracked by
-        PyScopeResolver.imports_in_file() and is silently omitted."""
-        facts = _facts("test.js", "const { A, B } = require('mod');\n")
-        assert isinstance(facts, list)
+
+class TestTypeScriptUnsupportedImportForms:
+    """Side-effect imports, re-exports and CommonJS ``require`` produce no import facts."""
+
+    def _imports(self, filename: str, source: str):
+        """Return ImportFact objects from the canonical native batch."""
+        return _facts(filename, source)
+
+    @pytest.mark.parametrize("source", [
+        'import "./side-effect";',
+        'export { X } from "./bar";',
+        'const { a, b } = require("./c");',
+        'const X = require("module");',
+    ])
+    def test_unsupported_import_forms_are_omitted(self, source):
+        assert self._imports("/tmp/app.ts", source) == []
+
         # May return 0 facts — just ensure no exception is raised.
 
 
@@ -464,3 +500,43 @@ class TestRustImports:
         assert len(facts) == 1
         f = facts[0]
         assert f.imported_name == "Read"
+
+
+class TestRustImportContracts:
+    """Exact ``ImportFact`` rows for single Rust ``use`` / ``mod`` forms and nested trees."""
+
+    def _extract(self, content: str) -> list[ImportFact]:
+        return _facts("test.rs", content)
+
+    @pytest.mark.parametrize(("source", "module", "name", "alias"), [
+        pytest.param("use std::io;\n", "std", "io", None, id="simple-use"),
+        pytest.param("pub use crate::foo::Bar;\n", "crate::foo", "Bar", None, id="reexport"),
+        pytest.param("use std::collections::HashMap as HM;\n", "std::collections", "HashMap", "HM", id="alias"),
+        pytest.param("use std::io::*;\n", "std::io", "*", None, id="glob"),
+        pytest.param("mod sub_module;\n", "sub_module", None, None, id="external-module"),
+        pytest.param("use super::baz as b;\n", "super", "baz", "b", id="relative-alias"),
+        pytest.param("pub(crate) use std::sync::Arc;\n", "std::sync", "Arc", None, id="crate-visibility"),
+    ])
+    def test_single_import_contract(self, source, module, name, alias):
+        assert self._extract(source) == [ImportFact("test.rs", module, name, alias, 1)]
+
+    def test_nested_use_tree(self):
+        """``use std::{io, fmt::{self, Display}}`` — nested use tree."""
+        src = "use std::{io, fmt::{self, Display}};\n"
+        facts = self._extract(src)
+        by_name = {f.imported_name: f for f in facts}
+        # io from std
+        assert "io" in by_name
+        assert by_name["io"].imported_module == "std"
+        # fmt (self) from std::fmt
+        assert "fmt" in by_name
+        assert by_name["fmt"].imported_module == "std"
+        # Display from std::fmt
+        assert "Display" in by_name
+        assert by_name["Display"].imported_module == "std::fmt"
+
+    def test_inline_mod_not_extracted(self):
+        """``mod name { ... }`` inline modules are NOT extracted as imports."""
+        src = "mod inner {\n    pub fn foo() {}\n}\n"
+        facts = self._extract(src)
+        assert len(facts) == 0

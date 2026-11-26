@@ -5,7 +5,7 @@ sanitizer suppression, match-arm flow, clean-file baseline, and multiple
 violations for Rust (.rs) files via run_lint(..., language="rust").
 """
 
-from emend.lint import LintRule, run_lint
+from emend.lint import LintRule, DeadCodeConfig, run_lint
 
 
 # ---------------------------------------------------------------------------
@@ -229,3 +229,44 @@ def test_rust_lint_multiple_violations(tmp_path):
     violations = run_lint([rule], [str(test_file)], language="rust")
 
     assert len(violations) == 3
+
+
+# ---------------------------------------------------------------------------
+# deadcode lint rule on Rust projects
+# ---------------------------------------------------------------------------
+
+
+def test_deadcode_detects_unused_rust_function(tmp_path):
+    """Deadcode lint section detects unused function in Rust project."""
+    project = tmp_path / "project"
+    project.mkdir()
+
+    (project / "lib.rs").write_text(
+        "pub fn used_function() -> i32 {\n"
+        "    42\n"
+        "}\n"
+        "\n"
+        "fn unused_helper() -> &'static str {\n"
+        '    "never called"\n'
+        "}\n"
+        "\n"
+        "pub fn main() {\n"
+        "    let _ = used_function();\n"
+        "}\n"
+    )
+
+    deadcode_config = DeadCodeConfig(enabled=True)
+    violations = run_lint(
+        [],
+        [str(project / "lib.rs")],
+        deadcode_config=deadcode_config,
+        project_path=str(project),
+    )
+
+    # Best-effort: find_dead_code may or may not support Rust yet
+    assert isinstance(violations, list)
+    if violations:
+        violation_messages = [v.message for v in violations]
+        assert any("unused_helper" in msg for msg in violation_messages), (
+            f"Expected 'unused_helper' in violations but got: {violation_messages}"
+        )

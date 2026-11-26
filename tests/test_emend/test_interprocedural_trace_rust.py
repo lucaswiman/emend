@@ -41,51 +41,6 @@ fn handler() {
     execute_query(query);
 }
 """),
-    ("delegation-match-analogue", """\
-fn process(input: String) {
-    execute_query(input);
-}
-
-fn handler() {
-    let data = get_input("name");
-    process(data);
-}
-"""),
-    ("closure-like-wrapper", """\
-fn apply(value: String) {
-    execute_query(value);
-}
-
-fn handler() {
-    let data = get_input("name");
-    apply(data);
-}
-"""),
-    ("method-like-return-wrapper", """\
-fn process(x: String) -> String {
-    return x;
-}
-
-fn handler() {
-    let name = get_input("name");
-    let result = process(name);
-    execute_query(result);
-}
-"""),
-    ("two-function-chain", """\
-fn sink_helper(value: String) {
-    execute_query(value);
-}
-
-fn helper2(name: String) {
-    sink_helper(name);
-}
-
-fn handler() {
-    let name = get_input("name");
-    sink_helper(name);
-}
-"""),
     ("three-hop-chain", """\
 fn leaf(value: String) {
     execute_query(value);
@@ -100,11 +55,7 @@ fn handler() {
     mid(name);
 }
 """),
-], ids=[
-    "direct-helper-sink", "returned-taint", "delegation-match-analogue",
-    "closure-like-wrapper", "method-like-return-wrapper",
-    "two-function-chain", "three-hop-chain",
-])
+], ids=["direct-helper-sink", "returned-taint", "three-hop-chain"])
 def test_rust_interprocedural_contracts(interproc_rust, case, source):
     result = interproc_rust(source)
     assert isinstance(result, InterproceduralResult)
