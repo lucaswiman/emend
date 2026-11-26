@@ -359,7 +359,7 @@ def test_bulk_import_into_an_owned_graph_never_changes_the_published_generation(
         graph.client.import_relations({"symbol": (
             ["qualified_name", "file_path", "name", "kind", "line", "end_line", "parent"],
             [["app.bulk", "app.py", "bulk", "function", 9, 9, ""]],
-        )})
+        )}, {"symbol": (0, 1, 6)})
         assert _names(graph) == ["bulk", "original"]
         other = AnalysisStore(tmp_path)
         try:

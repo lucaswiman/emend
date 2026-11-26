@@ -22,7 +22,7 @@ import threading
 from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Iterable
 
 from emend.analysis_extraction import _extract_file_facts, _normalize_qn
 from emend.analysis_snapshot import (
@@ -56,8 +56,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-FACT_GRAPH_SCHEMA_VERSION = "12"
+FACT_GRAPH_SCHEMA_VERSION = "13"
 _FACT_INSERT_BATCH_SIZE = 25_000
+
+# File paths and qualified names are stored as integer ids; the ``intern`` and
+# ``interned`` relations hold each text once.  Ids count up from ``ID_BASE``,
+# which is also the id of the empty string, so each is larger than any line,
+# column, block or byte offset in the graph.
+ID_BASE = 1 << 40
 
 
 @dataclass(frozen=True)
@@ -118,19 +124,26 @@ class _SharedGenerationClient:
         self._client = client
 
     def run(self, query: str, params: dict[str, Any] | None = None, *,
-            read_only: bool = False) -> dict[str, Any]:
+            read_only: bool = False, decode: bool = True) -> dict[str, Any]:
         try:
-            return self._client.run(query, params, read_only=True)
+            return self._client.run(query, params, read_only=True, decode=decode)
         except RuntimeError as error:
             if read_only or "read-only" not in str(error):
                 raise
-        return self._graph._private_client().run(query, params)
+        return self._graph._private_client().run(query, params, decode=decode)
 
-    def run_transaction(self, operations: list[tuple[str, dict[str, Any]]]) -> None:
+    def intern_ids(self, texts: list[str]) -> list[int]:
+        return self._client.intern_ids(texts)
+
+    def run_transaction(self, operations: list[tuple[Any, ...]]) -> None:
         self._graph._private_client().run_transaction(operations)
 
-    def import_relations(self, data: dict[str, tuple[list[str], list[list[Any]]]]) -> None:
-        self._graph._private_client().import_relations(data)
+    def import_relations(
+        self,
+        data: dict[str, tuple[list[str], list[list[Any]]]],
+        interned: dict[str, tuple[int, ...]] | None = None,
+    ) -> None:
+        self._graph._private_client().import_relations(data, interned)
 
     def backup(self, path: str) -> None:
         self._client.backup(path)
@@ -139,21 +152,37 @@ class _SharedGenerationClient:
         self._client.close()
 
 
-_SCHEMA_INIT = """\
+# Columns of the pseudo-type ``Id`` hold a file path or a qualified name.  They
+# are stored as ``Int`` ids of the ``intern``/``interned`` dictionary: every
+# write encodes them by column name and every query result is decoded, so only
+# rule text sees the ids.  Two columns that a rule unifies must both be ``Id``
+# or both be ``String``; a mismatch silently matches nothing.
+#
+# Left as text on purpose: ``search_symbol.qualified_name`` (the in-file name,
+# such as ``Class.method``, stored once per symbol and never joined),
+# ``source_loc.loc_id`` (``func_qn:block`` for blocks, unique per block),
+# ``import.imported_module`` and ``file_revision.file_path`` (absolute, while
+# facts hold project-relative paths).  An id for a text that occurs once would
+# cost a dictionary row and save nothing.
+_SCHEMA = """\
+{:create intern {text: String => id: Int}}
+
+{:create interned {id: Int => text: String}}
+
 {:create symbol {
-    qualified_name: String,
-    file_path: String
+    qualified_name: Id,
+    file_path: Id
     =>
     name: String,
     kind: String,
     line: Int,
     end_line: Int,
-    parent: String default ""
+    parent: Id default ""
 }}
 
 {:create search_symbol {
-    file_path: String,
-    module_qualified_name: String
+    file_path: Id,
+    module_qualified_name: Id
     =>
     name: String,
     qualified_name: String,
@@ -161,53 +190,53 @@ _SCHEMA_INIT = """\
     line: Int,
     end_line: Int,
     depth: Int,
-    parent: String default "",
+    parent: Id default "",
     signature: String default "",
     returns: String default "",
     decorators: String default ""
 }}
 
 {:create call {
-    caller_qn: String,
-    callee_qn: String,
-    file_path: String,
+    caller_qn: Id,
+    callee_qn: Id,
+    file_path: Id,
     line: Int,
     col: Int
     =>
-    func_qn: String default "",
+    func_qn: Id default "",
     block_id: Int default -1
 }}
 
 {:create call_by_callee {
-    callee_qn: String,
-    caller_qn: String,
-    file_path: String,
+    callee_qn: Id,
+    caller_qn: Id,
+    file_path: Id,
     line: Int,
     col: Int
     =>
-    func_qn: String default "",
+    func_qn: Id default "",
     block_id: Int default -1
 }}
 
 {:create call_by_file {
-    file_path: String,
-    caller_qn: String,
-    callee_qn: String,
+    file_path: Id,
+    caller_qn: Id,
+    callee_qn: Id,
     line: Int,
     col: Int
     =>
-    func_qn: String default "",
+    func_qn: Id default "",
     block_id: Int default -1
 }}
 
 {:create reference {
-    symbol_qn: String,
-    file_path: String,
+    symbol_qn: Id,
+    file_path: Id,
     line: Int,
     col: Int
     =>
     ref_kind: String,
-    func_qn: String default "",
+    func_qn: Id default "",
     block_id: Int default -1
 }}
 
@@ -215,15 +244,15 @@ _SCHEMA_INIT = """\
     source_var: String,
     sink_var: String,
     label: String,
-    file_path: String,
-    func_qn: String,
+    file_path: Id,
+    func_qn: Id,
     source_line: Int,
     sink_line: Int
 }}
 
 {:create type_binding {
-    symbol_qn: String,
-    file_path: String,
+    symbol_qn: Id,
+    file_path: Id,
     line: Int,
     binding_kind: String
     =>
@@ -231,7 +260,7 @@ _SCHEMA_INIT = """\
 }}
 
 {:create import {
-    importing_file: String,
+    importing_file: Id,
     imported_module: String,
     imported_name: String default "",
     line: Int
@@ -240,8 +269,8 @@ _SCHEMA_INIT = """\
 }}
 
 {:create cfg_edge {
-    file_path: String,
-    func_qn: String,
+    file_path: Id,
+    func_qn: Id,
     from_block: Int,
     to_block: Int,
     edge_kind: String,
@@ -250,14 +279,14 @@ _SCHEMA_INIT = """\
 }}
 
 {:create flow_blob {
-    file_path: String
+    file_path: Id
     =>
     payload: Bytes
 }}
 
 {:create def_use {
-    file_path: String,
-    func_qn: String,
+    file_path: Id,
+    func_qn: Id,
     var_name: String,
     kind: String default "write",
     def_block: Int,
@@ -270,8 +299,8 @@ _SCHEMA_INIT = """\
 }}
 
 {:create method_call {
-    file_path: String,
-    func_qn: String,
+    file_path: Id,
+    func_qn: Id,
     receiver: String,
     method: String,
     block_id: Int,
@@ -279,8 +308,8 @@ _SCHEMA_INIT = """\
 }}
 
 {:create cfg_block {
-    file_path: String,
-    func_qn: String,
+    file_path: Id,
+    func_qn: Id,
     block_id: Int
     =>
     is_entry: Bool default false,
@@ -288,13 +317,13 @@ _SCHEMA_INIT = """\
 }}
 
 {:create decorator_on {
-    symbol_qn: String,
+    symbol_qn: Id,
     decorator: String,
-    file_path: String
+    file_path: Id
 }}
 
 {:create source_loc {
-    file_path: String,
+    file_path: Id,
     loc_kind: String,
     loc_id: String
     =>
@@ -305,9 +334,9 @@ _SCHEMA_INIT = """\
 }}
 
 {:create func_summary {
-    func_qn: String,
+    func_qn: Id,
     param_name: String,
-    file_path: String
+    file_path: Id
     =>
     flows_to_return: Bool default false,
     flows_to_sink: Bool default false,
@@ -321,8 +350,8 @@ _SCHEMA_INIT = """\
 {:create entry_point_prefix { prefix: String }}
 
 {:create exported_symbol {
-    file_path: String,
-    qualified_name: String
+    file_path: Id,
+    qualified_name: Id
 }}
 
 {:create file_revision {
@@ -335,31 +364,31 @@ _SCHEMA_INIT = """\
     version: Int default -1
 }}
 
-{:create file_namespace {file_path: String => namespace: String}}
+{:create file_namespace {file_path: Id => namespace: String}}
 
 {:create ref_by_block {
-    file_path: String,
-    func_qn: String,
+    file_path: Id,
+    func_qn: Id,
     block_id: Int,
-    symbol_qn: String
+    symbol_qn: Id
 }}
 
 {:create noncall_private_member_ref {
-    file_path: String,
-    func_qn: String,
+    file_path: Id,
+    func_qn: Id,
     block_id: Int,
     member_name: String
 }}
 
 {:create reachable_block {
-    file_path: String,
-    func_qn: String,
+    file_path: Id,
+    func_qn: Id,
     block_id: Int
 }}
 
 {:create module_level_ref {
-    symbol_qn: String,
-    file_path: String,
+    symbol_qn: Id,
+    file_path: Id,
     line: Int
 }}
 
@@ -370,6 +399,24 @@ _SCHEMA_INIT = """\
 }}
 
 """
+
+
+def _interned_columns(schema: str) -> dict[str, frozenset[str]]:
+    """Map each relation to its ``Id`` columns."""
+    return {
+        relation: frozenset(re.findall(r"(\w+): Id\b", columns))
+        for relation, columns in re.findall(r"\{:create (\w+) \{([^}]*)\}\}", schema)
+    }
+
+
+_INTERNED_COLUMNS = _interned_columns(_SCHEMA)
+_SCHEMA_INIT = _SCHEMA.replace(': Id default ""', f": Int default {ID_BASE}").replace(": Id", ": Int")
+
+
+def _interned_positions(relation: str, columns: list[str]) -> tuple[int, ...]:
+    """Positions, in a row of *columns*, of the cells stored as ids."""
+    interned = _INTERNED_COLUMNS.get(relation, frozenset())
+    return tuple(index for index, column in enumerate(columns) if column in interned)
 
 
 def _init_schema(client: Any) -> None:
@@ -584,13 +631,29 @@ class FactGraph:
         """Expose the underlying CozoDB client for raw CozoScript queries."""
         return self._client
 
-    def run_query(self, cozoscript: str) -> dict[str, Any]:
+    def run_query(self, cozoscript: str, *, decode: bool = True) -> dict[str, Any]:
         """Execute a read-only CozoScript query and return the result dict.
 
         The result has keys ``headers`` (list of column names) and
-        ``rows`` (list of row tuples).
+        ``rows`` (list of row tuples).  Path and qualified-name columns hold
+        ids inside the script, but the rows carry their text, in the order of
+        that text unless the script has its own ``:order``.  To compare such a
+        column with text, look its id up: ``*intern["pkg.mod.func", id]``.
+        ``decode=False`` returns the stored ids.
         """
-        return self._client.run(cozoscript, read_only=True)
+        return self._client.run(cozoscript, read_only=True, decode=decode)
+
+    def _id(self, text: str) -> int:
+        """The stored id of a path or qualified name; -1, which no row holds, if unknown."""
+        return self._client.intern_ids([text])[0]
+
+    def _ids(self, texts: Iterable[str]) -> list[int]:
+        """``_id`` of each text, in one lookup."""
+        return self._client.intern_ids(list(texts))
+
+    def _known_ids(self, texts: Iterable[str]) -> list[int]:
+        """Ids of the texts the graph holds; no row can name the others."""
+        return [ident for ident in self._ids(texts) if ident >= 0]
 
     def close(self) -> None:
         """Close the underlying database connection."""
@@ -651,7 +714,7 @@ class FactGraph:
         Keeping the replacement atomic prevents a consumer from observing a
         mixture of two analyzer generations.
         """
-        operations: list[tuple[str, dict[str, Any]]] = [(
+        operations: list[tuple[Any, ...]] = [(
             "?[symbol_qn, file_path, line, binding_kind] := "
             "*type_binding[symbol_qn, file_path, line, binding_kind, _] "
             ":rm type_binding {symbol_qn, file_path, line, binding_kind => }",
@@ -706,7 +769,7 @@ class FactGraph:
             rows = self._client.run(
                 "?[file_path, payload] := *flow_blob[file_path, payload], "
                 "file_path == $file_path",
-                {"file_path": file_path},
+                {"file_path": self._id(file_path)},
             )["rows"]
         return [(row[0], row[1]) for row in rows]
 
@@ -783,39 +846,44 @@ class FactGraph:
         cols: str,
         schema: str,
         rows: list[list[Any]],
-        operations: list[tuple[str, dict[str, Any]]] | None = None,
+        operations: list[tuple[Any, ...]] | None = None,
         *, register_namespace: bool = True,
     ) -> None:
         """Run ``?[<cols>] <- $rows :put <relation> {<schema>}``.
 
-        Caller is responsible for skipping empty inserts.
+        The cells of the relation's ``Id`` columns are given as text; the
+        client stores them as ids.  Caller is responsible for skipping empty
+        inserts.
         """
         columns = [column.strip() for column in cols.split(",")]
+        pending: list[tuple[Any, ...]] = [] if operations is None else operations
         if register_namespace and relation != "file_namespace" and "file_path" in columns:
             from emend.language_registry import detect_language
 
             index = columns.index("file_path")
-            seed = (
+            pending.append((
                 "candidate[file_path, namespace] <- $rows\n"
                 "?[file_path, namespace] := candidate[file_path, namespace], "
                 "not *file_namespace[file_path, _] :put file_namespace {file_path => namespace}",
                 {"rows": [[path, detect_language(path) or ""]
                           for path in sorted({r[index] for r in rows})]},
-            )
-            if operations is None:
-                self._client.run(*seed)
-            else:
-                operations.append(seed)
+                {"rows": (0,)},
+            ))
         query = f"?[{cols}] <- $rows :put {relation} {{{schema}}}"
+        interned = _interned_positions(relation, columns)
         for start in range(0, len(rows), _FACT_INSERT_BATCH_SIZE):
-            operation = (query, {"rows": rows[start : start + _FACT_INSERT_BATCH_SIZE]})
-            if operations is None:
-                self._client.run(*operation)
-            else:
-                operations.append(operation)
+            params = {"rows": rows[start : start + _FACT_INSERT_BATCH_SIZE]}
+            pending.append((query, params, {"rows": interned}) if interned else (query, params))
+        if operations is None:
+            self._client.run_transaction(pending)
 
-    def _run_mutations(self, operations: list[tuple[str, dict[str, Any]]]) -> None:
-        """Run generated mutations in one synchronous Cozo transaction."""
+    def _run_mutations(self, operations: list[tuple[Any, ...]]) -> None:
+        """Run generated mutations in one synchronous Cozo transaction.
+
+        An operation is ``(script, params)``, or ``(script, params, interned)``
+        where ``interned`` maps a row parameter to the positions of the cells
+        holding text that is stored as ids.
+        """
         if operations:
             self._client.run_transaction(operations)
 
@@ -823,7 +891,7 @@ class FactGraph:
         """Resolve a source file's language namespace without changing its QNs."""
         rows = self._client.run(
             "?[ns] := *file_namespace[fp, ns], fp in $paths",
-            {"paths": [file_path, self.stored_path(file_path)]},
+            {"paths": self._ids([file_path, self.stored_path(file_path)])},
         )["rows"]
         if rows:
             return rows[0][0]
@@ -877,7 +945,9 @@ class FactGraph:
         """Legacy bare-QN writes require an unambiguous definition owner."""
         if file_path:
             return file_path
-        rows = self._client.run("?[fp] := *symbol[$qn, fp, _, _, _, _, _]", {"qn": qn})["rows"]
+        rows = self._client.run(
+            "?[fp] := *symbol[$qn, fp, _, _, _, _, _]", {"qn": self._id(qn)},
+        )["rows"]
         if len(rows) > 1:
             raise ValueError(f"Ambiguous symbol {qn!r}; provide file_path")
         return rows[0][0] if rows else ""
@@ -1116,7 +1186,7 @@ class FactGraph:
             params["kind"] = kind
         if file_path is not None:
             clauses.append("fp == $file_path")
-            params["file_path"] = file_path
+            params["file_path"] = self._id(file_path)
 
         query = (
             "?[fp, n, qn, k, line, end_line, parent] := "
@@ -1141,7 +1211,7 @@ class FactGraph:
         result = self._run_namespaced(
             "?[caller, callee, fp, line, col, fq, bid] := "
             "caller = $qn, scope_call[$qn, callee, fp, line, col, fq, bid]",
-            {"qn": caller_qn}, namespace=namespace,
+            {"qn": self._id(caller_qn)}, namespace=namespace,
         )
         return [
             CallFact(caller_qn=r[0], callee_qn=r[1], file_path=r[2], line=r[3],
@@ -1154,7 +1224,7 @@ class FactGraph:
         result = self._run_namespaced(
             "?[caller, callee, fp, line, col, fq, bid] := "
             "callee = $qn, scope_call_by_callee[$qn, caller, fp, line, col, fq, bid]",
-            {"qn": callee_qn}, namespace=namespace,
+            {"qn": self._id(callee_qn)}, namespace=namespace,
         )
         return [
             CallFact(caller_qn=r[0], callee_qn=r[1], file_path=r[2], line=r[3],
@@ -1167,7 +1237,7 @@ class FactGraph:
         result = self._run_namespaced(
             "?[qn, fp, line, col, kind, fq, bid] := "
             "qn = $qn, scope_reference[$qn, fp, line, col, kind, fq, bid]",
-            {"qn": symbol_qn}, namespace=namespace,
+            {"qn": self._id(symbol_qn)}, namespace=namespace,
         )
         return [
             ReferenceFact(symbol_qn=r[0], file_path=r[1], line=r[2], col=r[3],
@@ -1189,7 +1259,7 @@ class FactGraph:
             params["label"] = label
         if file_path is not None:
             clauses.append("fp == $file_path")
-            params["file_path"] = file_path
+            params["file_path"] = self._id(file_path)
 
         query = (
             "?[sv, skv, lbl, fp, fq, sl, skl] := "
@@ -1209,7 +1279,7 @@ class FactGraph:
         result = self._client.run(
             "?[qn, ts, fp, line, bk] := "
             "*type_binding[qn, fp, line, bk, ts], qn == $qn",
-            {"qn": symbol_qn},
+            {"qn": self._id(symbol_qn)},
         )
         return [
             TypeFact(symbol_qn=r[0], type_str=r[1], file_path=r[2], line=r[3], binding_kind=r[4])
@@ -1221,7 +1291,7 @@ class FactGraph:
         result = self._client.run(
             "?[f, mod, name, alias, line] := "
             "*import[f, mod, name, line, alias], f == $fp",
-            {"fp": file_path},
+            {"fp": self._id(file_path)},
         )
         return [
             ImportFact(
@@ -1244,10 +1314,10 @@ class FactGraph:
         params: dict[str, Any] = {}
         if func_qn is not None:
             clauses.append("fq == $func_qn")
-            params["func_qn"] = func_qn
+            params["func_qn"] = self._id(func_qn)
         if file_path is not None:
             clauses.append("fp == $file_path")
-            params["file_path"] = file_path
+            params["file_path"] = self._id(file_path)
         query = "?[fp, fq, fb, tb, ek, fl, tl] := " + ", ".join(clauses)
         result = self._client.run(query, params)
         return [
@@ -1304,13 +1374,13 @@ class FactGraph:
         params: dict[str, Any] = {}
         if func_qn is not None:
             clauses.append("fq == $func_qn")
-            params["func_qn"] = func_qn
+            params["func_qn"] = self._id(func_qn)
         if var_name is not None:
             clauses.append("vn == $var_name")
             params["var_name"] = var_name
         if file_path is not None:
             clauses.append("fp == $file_path")
-            params["file_path"] = file_path
+            params["file_path"] = self._id(file_path)
         query = "?[fp, fq, vn, k, db, ub, dl, dc, ul, uc] := " + ", ".join(clauses)
         result = self._client.run(query, params)
         return [
@@ -1332,10 +1402,10 @@ class FactGraph:
         params: dict[str, Any] = {}
         if func_qn is not None:
             clauses.append("fq == $func_qn")
-            params["func_qn"] = func_qn
+            params["func_qn"] = self._id(func_qn)
         if file_path is not None:
             clauses.append("fp == $file_path")
-            params["file_path"] = file_path
+            params["file_path"] = self._id(file_path)
         query = "?[fp, fq, rcv, meth, bid, ln] := " + ", ".join(clauses)
         result = self._client.run(query, params)
         return [
@@ -1352,10 +1422,10 @@ class FactGraph:
         params: dict[str, Any] = {}
         if func_qn is not None:
             clauses.append("fq == $func_qn")
-            params["func_qn"] = func_qn
+            params["func_qn"] = self._id(func_qn)
         if file_path is not None:
             clauses.append("fp == $file_path")
-            params["file_path"] = file_path
+            params["file_path"] = self._id(file_path)
         query = "?[fp, fq, bid, ie, ix] := " + ", ".join(clauses)
         result = self._client.run(query, params)
         return [
@@ -1368,7 +1438,7 @@ class FactGraph:
         """Return all decorators on a symbol."""
         result = self._client.run(
             "?[sqn, dec, fp] := *decorator_on[sqn, dec, fp], sqn == $qn",
-            {"qn": symbol_qn},
+            {"qn": self._id(symbol_qn)},
         )
         return [DecoratorOnFact(symbol_qn=r[0], decorator=r[1], file_path=r[2]) for r in result["rows"]]
 
@@ -1396,7 +1466,7 @@ class FactGraph:
         params: dict[str, Any] = {}
         if func_qn is not None:
             clauses.append("fq == $func_qn")
-            params["func_qn"] = func_qn
+            params["func_qn"] = self._id(func_qn)
         query = "?[fq, pn, ftr, fts, sl, fp] := " + ", ".join(clauses)
         result = self._client.run(query, params)
         return [
@@ -1415,10 +1485,10 @@ class FactGraph:
         params: dict[str, Any] = {}
         if file_path is not None:
             clauses.append("fp == $file_path")
-            params["file_path"] = file_path
+            params["file_path"] = self._id(file_path)
         if qualified_name is not None:
             clauses.append("qn == $qualified_name")
-            params["qualified_name"] = qualified_name
+            params["qualified_name"] = self._id(qualified_name)
         result = self._client.run("?[fp, qn] := " + ", ".join(clauses), params)
         return [
             ExportedSymbolFact(file_path=r[0], qualified_name=r[1])
@@ -1448,7 +1518,7 @@ class FactGraph:
             "reaches[a] := scope_call_by_callee[$qn, a, _, _, _, _, _]\n"
             "reaches[a] := reaches[mid], scope_call_by_callee[mid, a, _, _, _, _, _]\n"
             "?[a] := reaches[a]",
-            {"qn": symbol_qn},
+            {"qn": self._id(symbol_qn)},
         )
         return {r[0] for r in result["rows"]} - {symbol_qn}
 
@@ -1458,7 +1528,7 @@ class FactGraph:
             "reaches[b] := scope_call[$qn, b, _, _, _, _, _]\n"
             "reaches[b] := reaches[mid], scope_call[mid, b, _, _, _, _, _]\n"
             "?[b] := reaches[b]",
-            {"qn": symbol_qn},
+            {"qn": self._id(symbol_qn)},
         )
         return {r[0] for r in result["rows"]} - {symbol_qn}
 
@@ -1523,7 +1593,8 @@ class FactGraph:
             self._inline_relation(f"seed_ep_{kind}", ["value"], [(v,) for v in values or []])
             for kind, values in (
                 ("decorator", entry_point_decorators), ("name", entry_point_names),
-                ("prefix", entry_point_prefixes), ("qn", entry_point_qualified_names),
+                ("prefix", entry_point_prefixes),
+                ("qn", self._known_ids(entry_point_qualified_names or [])),
             )
         )
         return rules + (
@@ -1542,8 +1613,14 @@ class FactGraph:
         )
 
     def entry_point_qualified_names(self, *, namespace=None, **options) -> set[str]:
+        # A requested name the graph does not hold has no id to seed the rules
+        # with; it is an entry point all the same.
+        requested = list(options.get("entry_point_qualified_names") or [])
+        unheld = [name for name, ident in zip(requested, self._ids(requested)) if ident < 0]
         return {row[0] for row in self._run_namespaced(
-            self._entry_point_rules(**options) + '?[qn] := entry_point[qn]',
+            self._entry_point_rules(**options) + '?[qn] := entry_point[qn]\n'
+            + self._inline_relation("unheld_ep_qn", ["qn"], [(name,) for name in unheld])
+            + '?[qn] := unheld_ep_qn[qn]',
             namespace=namespace,
         )["rows"]}
 
@@ -1596,8 +1673,12 @@ class FactGraph:
                 any(Path(fp).is_relative_to(path) for path in paths)
                 or set(exclude_reference_segments or []) & set(Path(fp).parts[:-1]))
         excluded_file_rules = self._inline_relation(
-            "excluded_reference_file", ["fp"], [(fp,) for fp in sorted(excluded_files)],
+            "excluded_reference_file", ["fp"],
+            [(fp,) for fp in self._known_ids(sorted(excluded_files))],
         )
+        # Module-level code has this function name; top-level symbols have
+        # the empty string for a parent.
+        module_fq, no_parent = self._id("<module>"), ID_BASE
         excl_clauses = ", not excluded_reference_file[fp]"
         excl_clauses_ref = ", not excluded_reference_file[ref_fp]"
 
@@ -1620,7 +1701,7 @@ class FactGraph:
             f"{excl_clauses}\n"
 
             'live_private_method_name[fq, method_name] := '
-            'scope_method_call[fp, fq, _, method_name, _, _], fq == "<module>"'
+            f'scope_method_call[fp, fq, _, method_name, _, _], fq == {module_fq}'
             f"{excl_clauses}\n"
 
             # Non-call uses such as ``callbacks = [self._helper]`` join on a
@@ -1661,7 +1742,7 @@ class FactGraph:
             # Dead top-level symbols.
             "eligible[qn, fp, name, kind, line, end_line, parent] := "
             "scope_symbol[qn, fp, name, kind, line, end_line, parent], "
-            'parent == "", '
+            f'parent == {no_parent}, '
             "not entry_point[qn]\n"
 
             # Private methods on live classes. Public methods stay conservative
@@ -1669,7 +1750,7 @@ class FactGraph:
             # them without a statically visible reference.
             "eligible[qn, fp, name, kind, line, end_line, parent] := "
             "scope_symbol[qn, fp, name, kind, line, end_line, parent], "
-            'parent != "", '
+            f'parent != {no_parent}, '
             'kind in ["method", "async_method"], '
             'starts_with(name, "_"), not starts_with(name, "__"), '
             "live_container[parent], "
@@ -1751,7 +1832,7 @@ class FactGraph:
         params: dict[str, Any] = {}
         if func_qn is not None:
             clauses_filter = ", fq == $fqn"
-            params["fqn"] = func_qn
+            params["fqn"] = self._id(func_qn)
 
         query = (
             "reachable[fp, fq, bid] := "
@@ -1800,18 +1881,15 @@ class FactGraph:
         if not changed_qns:
             return {"impacted": set(), "edges": []}
 
-        # Build a Datalog rule: seed the "changed" relation, then compute
-        # transitive callers.  CozoDB inline relations use the syntax:
-        #   changed[x] <- [["val1"], ["val2"]]
-        seed_rows = ", ".join(f'["{qn}"]' for qn in changed_qns)
-
         if max_depth <= 0:
             return {"impacted": set(), "edges": []}
 
         # Build depth-bounded rules by unrolling the recursion.
         # layer_0 = direct callers of changed; layer_N = callers of layer_(N-1).
         # This avoids unbounded recursion and respects max_depth exactly.
-        rules = [f"changed[x] <- [{seed_rows}]\n"]
+        rules = [self._inline_relation(
+            "changed", ["x"], [(qn,) for qn in self._known_ids(changed_qns)],
+        )]
         rules.append(
             "layer_0[caller] := changed[callee], scope_call_by_callee[callee, caller, _, _, _, _, _]\n"
         )
@@ -1872,10 +1950,10 @@ class FactGraph:
 
         self.require_unambiguous_symbols(initial_deletes, namespace=namespace)
 
-        # Seed the delete set using CozoDB inline relation syntax
-        seed_rows = ", ".join(f'["{qn}"]' for qn in initial_deletes)
         query = (
-            f"to_delete[x] <- [{seed_rows}]\n"
+            self._inline_relation(
+                "to_delete", ["x"], [(qn,) for qn in self._known_ids(initial_deletes)],
+            ) +
             # A symbol has an external caller if called by something NOT
             # in the delete set.
             "has_external_caller[qn] := scope_call_by_callee[qn, caller, _, _, _, _, _], "
@@ -1921,13 +1999,14 @@ class FactGraph:
             kinds: If provided, only return symbols of these kinds.
         """
         if exclude_qns:
-            seed_rows = ", ".join(f'["{qn}"]' for qn in exclude_qns)
             # When excluding callers, we only consider a symbol alive if
             # it has a call-site caller NOT in the excluded set.  We use
             # call facts (which carry the caller QN) rather than bare
             # reference facts (which don't).
             query = (
-                f"excluded[x] <- [{seed_rows}]\n"
+                self._inline_relation(
+                    "excluded", ["x"], [(qn,) for qn in self._known_ids(exclude_qns)],
+                ) +
                 "alive[qn] := scope_call_by_callee[qn, caller, _, _, _, _, _], not excluded[caller]\n"
                 "dead[qn, fp, name, kind, line, end_line, parent] := "
                 "scope_symbol[qn, fp, name, kind, line, end_line, parent], "
@@ -1974,7 +2053,7 @@ class FactGraph:
         Replaces Python file traversal in find_references().
         """
         clauses = ["scope_reference[$qn, fp, line, col, kind, fq, bid]"]
-        params: dict[str, Any] = {"qn": symbol_qn}
+        params: dict[str, Any] = {"qn": self._id(symbol_qn)}
 
         # Kind filtering
         if writes_only:
@@ -2016,7 +2095,7 @@ class FactGraph:
             "?[caller_qn, callee_qn, fp, line, col, fq, bid] := "
             "caller_qn = $fqn, "
             "scope_call[$fqn, callee_qn, fp, line, col, fq, bid]",
-            {"fqn": func_qn}, namespace=namespace,
+            {"fqn": self._id(func_qn)}, namespace=namespace,
         )
         return [
             CallFact(
@@ -2035,7 +2114,7 @@ class FactGraph:
             result = self._client.run(
                 "?[caller_qn, callee_qn] := "
                 "*call_by_file[$fp, caller_qn, callee_qn, _, _, _, _]",
-                {"fp": file_path},
+                {"fp": self._id(file_path)},
             )
         else:
             result = self._client.run(
@@ -2273,7 +2352,7 @@ class FactGraph:
         self,
         file_paths: list[str],
         *,
-        operations: list[tuple[str, dict[str, Any]]] | None = None,
+        operations: list[tuple[Any, ...]] | None = None,
     ) -> None:
         """Delete all facts for the given files.
 
@@ -2282,7 +2361,9 @@ class FactGraph:
         use a simple filter; relations keyed on ``symbol_qn`` or
         ``func_qn`` join through the ``symbol`` relation first.
         """
-        if not file_paths:
+        # A path the graph has no id for has no rows.
+        stored = self._known_ids(file_paths)
+        if not stored:
             return
 
         # CozoDB `:rm` requires that the query variable names in `?[...]`
@@ -2382,10 +2463,10 @@ class FactGraph:
             "{importing_file, imported_module, imported_name, line => }",
         ):
             if operations is not None:
-                operations.append((query, {"fps": file_paths}))
+                operations.append((query, {"fps": stored}))
                 continue
             try:
-                self._client.run(query, {"fps": file_paths})
+                self._client.run(query, {"fps": stored})
             except Exception:
                 logger.debug("Fact removal query failed", exc_info=True)
 
@@ -2393,7 +2474,7 @@ class FactGraph:
         self,
         extracted_files: list[ExtractedFile],
         *,
-        operations: list[tuple[str, dict[str, Any]]] | None = None,
+        operations: list[tuple[Any, ...]] | None = None,
     ) -> None:
         """Insert the language-neutral rows returned by the canonical extractor."""
         specs = {
@@ -2443,7 +2524,10 @@ class FactGraph:
                 for key, (relation, cols, _schema) in specs.items() if rows[key]
             }
             if data:
-                self._client.import_relations(data)
+                self._client.import_relations(data, {
+                    relation: _interned_positions(relation, columns)
+                    for relation, (columns, _rows) in data.items()
+                })
             return
         for key, (relation, cols, schema) in specs.items():
             relation_rows = rows.get(key, [])
@@ -2462,7 +2546,7 @@ class FactGraph:
         if not stored_paths:
             self._insert_extracted_facts(extracted_files)
             return
-        operations: list[tuple[str, dict[str, Any]]] = []
+        operations: list[tuple[Any, ...]] = []
         self.remove_files(stored_paths, operations=operations)
         self._insert_extracted_facts(extracted_files, operations=operations)
         self._run_mutations(operations)
@@ -2672,17 +2756,32 @@ def _compile_sequence_query(
 
     variables = {name: f"v{i}" for i, name in enumerate(origins)}
 
+    def located(name: str, captures: list[str], rows: list[tuple]) -> list[str]:
+        """Rules for matched locations, which name their file and function as text.
+
+        The stored relations hold ids, so the rows are joined with the
+        dictionary once here; a location the graph has no id for has no facts.
+        """
+        columns = ", ".join(["block", "line", *captures])
+        return [
+            FactGraph._inline_relation(
+                f"{name}_at", ["path", "function", "block", "line", *captures], rows,
+            ).rstrip("\n"),
+            f"{name}[fp, fq, {columns}] := {name}_at[path, function, {columns}], "
+            "*intern[path, fp], *intern[function, fq]",
+        ]
+
     def relation(i: int, block: str, line: str) -> str:
         args = ["fp", "fq", block, line, *(variables[name] for name in keys[i])]
         return f"step_{i}[{', '.join(args)}]"
 
     for i, step in enumerate(steps):
         if i not in effects:
-            rules.append(FactGraph._inline_relation(
-                f"step_{i}", ["fp", "fq", "block", "line", *map(variables.get, keys[i])],
+            rules.extend(located(
+                f"step_{i}", [variables[name] for name in keys[i]],
                 [(fp, fq, bid, line, *(bindings.get(name) for name in keys[i]))
                  for fp, fq, bid, line, bindings in step_locations[step.bind]],
-            ).rstrip("\n"))
+            ))
             continue
         kind, name = effects[i]
         var = variables[name]
@@ -2711,12 +2810,12 @@ def _compile_sequence_query(
                                for name in row[3] if name in variables})
         capture_args = [variables[name] for name in blocker_keys]
         suffix = "".join(f", {arg}" for arg in capture_args)
-        rules.append(FactGraph._inline_relation(
-            f"blocker_rows_{i}", ["fp", "fq", "block", "line", *capture_args],
+        rules.extend(located(
+            f"blocker_rows_{i}", capture_args,
             [(row[0], row[1], row[2], row[4] if len(row) > 4 else -1,
               *((row[3] if len(row) > 3 else {}).get(name) for name in blocker_keys))
              for row in rows],
-        ).rstrip("\n"))
+        ))
         # Missing captures are wildcards (e.g. unconditional commit()).
         blocker_params = "".join(f", b{j}" for j in range(len(capture_args)))
         checks = "".join(f", (b{j} == null || b{j} == {var})"

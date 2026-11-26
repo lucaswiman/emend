@@ -381,24 +381,31 @@ def _empty_extracted(path, symbols):
 
 def test_replace_extracted_coalesces_relation_mutations(monkeypatch):
     graph = FactGraph()
-    captured = []
-    monkeypatch.setattr(graph, "_run_mutations", captured.extend)
     extracted = [
         _empty_extracted("a.py", [["a.f", "a.py", "f", "function", 1, 1, ""]]),
         _empty_extracted("b.py", [["b.f", "b.py", "f", "function", 1, 1, ""]]),
     ]
+    # Only a file the graph already holds has rows to remove.
+    graph.replace_extracted(extracted, stored_paths=[])
+    captured = []
+    monkeypatch.setattr(graph, "_run_mutations", captured.extend)
 
     graph.replace_extracted(extracted, stored_paths=["a.py", "b.py"])
 
-    removals = [(query, params) for query, params in captured if ":rm symbol" in query]
-    inserts = [(query, params) for query, params in captured if ":put symbol" in query]
+    removals = [operation for operation in captured if ":rm symbol" in operation[0]]
+    inserts = [operation for operation in captured if ":put symbol" in operation[0]]
     assert len(removals) == 1
-    assert removals[0][1] == {"fps": ["a.py", "b.py"]}
+    # Stored paths are named by id; rows stay text until the client stores them.
+    assert removals[0][1:] == ({"fps": graph._ids(["a.py", "b.py"])},)
+    assert all(ident >= fact_graph_module.ID_BASE for ident in removals[0][1]["fps"])
     assert len(inserts) == 1
-    assert inserts[0][1]["rows"] == [
-        ["a.f", "a.py", "f", "function", 1, 1, ""],
-        ["b.f", "b.py", "f", "function", 1, 1, ""],
-    ]
+    assert inserts[0][1:] == (
+        {"rows": [
+            ["a.f", "a.py", "f", "function", 1, 1, ""],
+            ["b.f", "b.py", "f", "function", 1, 1, ""],
+        ]},
+        {"rows": (0, 1, 6)},
+    )
 
 
 def test_replace_extracted_chunks_large_relations(monkeypatch):
@@ -419,7 +426,7 @@ def test_replace_extracted_chunks_large_relations(monkeypatch):
         stored_paths=["a.py"],
     )
 
-    inserts = [params for query, params in captured if ":put symbol" in query]
+    inserts = [params for query, params, *_ in captured if ":put symbol" in query]
     assert [params["rows"] for params in inserts] == [
         [["a.f", "a.py", "f", "function", 1, 1, ""]],
         [["a.g", "a.py", "g", "function", 2, 2, ""]],

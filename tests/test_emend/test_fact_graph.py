@@ -48,7 +48,9 @@ def test_batched_fact_mutations_abort_as_one_transaction(tmp_path, request, pers
     with pytest.raises(RuntimeError, match="CozoDB query error"):
         graph._run_mutations(
             [
-                (put, {"rows": [["a.after", "a.py", "after", "function", 2, 2, ""]]}),
+                # The cells at positions 0, 1 and 6 are stored as ids.
+                (put, {"rows": [["a.after", "a.py", "after", "function", 2, 2, ""]]},
+                 {"rows": (0, 1, 6)}),
                 ("?[x] := *missing_relation[x]", {}),
             ]
         )
@@ -435,7 +437,8 @@ class TestCozoScriptQueries:
     def test_raw_query_transitive_closure(self):
         g = _make_graph()
         result = g.run_query(
-            'reaches[b] := *call["app.main", b, _, _, _, _, _]\n'
+            # Names are stored as ids: look the id of the text up first.
+            'reaches[b] := *intern["app.main", main], *call[main, b, _, _, _, _, _]\n'
             'reaches[b] := *call[mid, b, _, _, _, _, _], reaches[mid]\n'
             '?[b] := reaches[b]'
         )

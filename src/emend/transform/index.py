@@ -633,13 +633,17 @@ def _query_symbol_index_cozo(
 ) -> list[dict] | None:
     """Query owner-managed completion metadata via CozoDB Datalog."""
     from emend.analysis_store import AnalysisStore
-    fdb = AnalysisStore.open(project_root).query_facts().client
+    graph = AnalysisStore.open(project_root).query_facts()
+    fdb = graph.client
 
     try:
+        # ``fp``, ``mqn`` and ``parent`` hold ids; ``*interned`` binds the text
+        # that the ordering and the prefix match need.
         clauses = [
             "*search_symbol[fp, mqn, name, qn, kind, line, end_line, depth, "
             "parent, sig, returns, decs]"
         ]
+        texts = ["*interned[fp, path]"]
         params: dict = {}
 
         if name_pattern:
@@ -670,21 +674,23 @@ def _query_symbol_index_cozo(
             except ValueError:
                 rel_fp = resolved
             clauses.append("fp == $file_path")
-            params["file_path"] = rel_fp
+            params["file_path"] = graph._id(rel_fp)
 
         if qualified_name:
             # Match qn, mqn, or mqn prefix
-            clauses.append(
-                "(qn == $qname or mqn == $qname or "
-                "starts_with(mqn, $qname_prefix))"
+            texts.append("*interned[mqn, module_name]")
+            texts.append(
+                "(qn == $qname or mqn == $qname_id or "
+                "starts_with(module_name, $qname_prefix))"
             )
             params["qname"] = qualified_name
+            params["qname_id"] = graph._id(qualified_name)
             params["qname_prefix"] = qualified_name + "."
 
         query = (
-            "?[name, qn, kind, fp, line, end_line, depth, parent, sig, returns, decs] := "
-            + ", ".join(clauses)
-            + "\n:order name, fp, line"
+            "?[name, qn, kind, path, line, end_line, depth, parent, sig, returns, decs] := "
+            + ", ".join(clauses + texts)
+            + "\n:order name, path, line"
         )
         if limit > 0:
             query += f"\n:limit {limit}"

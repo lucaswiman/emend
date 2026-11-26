@@ -153,6 +153,8 @@ def benchmark_queries(facts_path: str, iterations: int) -> dict[str, dict]:
     QS_FILTER = "django.db.models.query.QuerySet.filter"
     MODEL = "django.db.models.base.Model"
     QUERY_PY = "django/db/models/query.py"
+    # Raw scripts compare path and qualified-name columns with ids.
+    model_id, filter_id, query_py_id = graph._ids([MODEL, QS_FILTER, QUERY_PY])
 
     # --- High-level API queries (current implementation) ---
 
@@ -195,7 +197,7 @@ def benchmark_queries(facts_path: str, iterations: int) -> dict[str, dict]:
         """refs with positional $qn binding (indexed)."""
         return client.run(
             "?[fp, line, col, kind, fq, bid] := *reference[$qn, fp, line, col, kind, fq, bid]",
-            {"qn": MODEL},
+            {"qn": model_id},
         )
 
     def _refs_eq_filter():
@@ -203,14 +205,14 @@ def benchmark_queries(facts_path: str, iterations: int) -> dict[str, dict]:
         return client.run(
             "?[fp, line, col, kind, fq, bid] := "
             "*reference[sqn, fp, line, col, kind, fq, bid], sqn == $qn",
-            {"qn": MODEL},
+            {"qn": model_id},
         )
 
     def _callees_positional():
         """callees with positional $fqn binding (indexed)."""
         return client.run(
             "?[callee, fp, line, col, fq, bid] := *call[$fqn, callee, fp, line, col, fq, bid]",
-            {"fqn": QS_FILTER},
+            {"fqn": filter_id},
         )
 
     def _callees_eq_filter():
@@ -218,7 +220,7 @@ def benchmark_queries(facts_path: str, iterations: int) -> dict[str, dict]:
         return client.run(
             "?[caller, callee, fp, line, col, fq, bid] := "
             "*call[caller, callee, fp, line, col, fq, bid], caller == $fqn",
-            {"fqn": QS_FILTER},
+            {"fqn": filter_id},
         )
 
     # --- Key ordering tests ---
@@ -227,40 +229,40 @@ def benchmark_queries(facts_path: str, iterations: int) -> dict[str, dict]:
         """call: positional binding on caller_qn (1st key) — indexed."""
         return client.run(
             '?[callee, fp, line] := *call[$qn, callee, fp, line, _, _, _]',
-            {"qn": QS_FILTER},
+            {"qn": filter_id},
         )
 
     def _call_filter_2nd_key():
         """call: positional binding on callee_qn (2nd key) — scan."""
         return client.run(
             '?[caller, fp, line] := *call[caller, $qn, fp, line, _, _, _]',
-            {"qn": QS_FILTER},
+            {"qn": filter_id},
         )
 
     def _ref_filter_1st_key():
         """reference: positional binding on symbol_qn (1st key) — indexed."""
         return client.run(
             '?[fp, line, col, kind] := *reference[$qn, fp, line, col, kind, _, _]',
-            {"qn": MODEL},
+            {"qn": model_id},
         )
 
     def _ref_filter_2nd_key():
         """reference: positional binding on file_path (2nd key) — scan."""
         return client.run(
             '?[sqn, line, col, kind] := *reference[sqn, $fp, line, col, kind, _, _]',
-            {"fp": QUERY_PY},
+            {"fp": query_py_id},
         )
 
     def _cfg_filter_1st():
         return client.run(
             '?[fq, fb, tb, ek] := *cfg_edge[$fp, fq, fb, tb, ek, _, _]',
-            {"fp": QUERY_PY},
+            {"fp": query_py_id},
         )
 
     def _cfg_filter_2nd():
         return client.run(
             '?[fp, fb, tb, ek] := *cfg_edge[fp, $fq, fb, tb, ek, _, _]',
-            {"fq": QS_FILTER},
+            {"fq": filter_id},
         )
 
     # --- Full scan benchmarks ---
