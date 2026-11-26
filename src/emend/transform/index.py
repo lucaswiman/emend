@@ -119,23 +119,37 @@ def _write_index_rows(
     with conn:
         if qn_rows:
             revised_paths = list({row[0] for row in qn_rows})
-            for table in ("qn_index", "symbol_index"):
-                conn.executemany(
-                    f"DELETE FROM {table} WHERE file_path = ?",
-                    ((path,) for path in revised_paths),
-                )
+            conn.executemany(
+                "DELETE FROM qn_index WHERE file_path = ?",
+                ((path,) for path in revised_paths),
+            )
+            conn.executemany(
+                "DELETE FROM symbol WHERE file_id = "
+                "(SELECT id FROM symbol_file WHERE path = ?)",
+                ((path,) for path in revised_paths),
+            )
             conn.executemany(
                 "INSERT OR REPLACE INTO qn_index(file_path, hash, names) "
                 "VALUES (?, ?, ?)",
                 qn_rows,
             )
         if sym_rows:
+            # The ``symbol_index`` view takes the same rows through a trigger;
+            # a whole file's rows go faster straight into its tables.
+            file_ids = {}
+            for path in {row[0] for row in sym_rows}:
+                conn.execute(
+                    "INSERT OR IGNORE INTO symbol_file (path) VALUES (?)", (path,)
+                )
+                file_ids[path] = conn.execute(
+                    "SELECT id FROM symbol_file WHERE path = ?", (path,)
+                ).fetchone()[0]
             conn.executemany(
-                "INSERT INTO symbol_index "
-                "(file_path, name, qualified_name, kind, "
+                "INSERT INTO symbol "
+                "(file_id, name, qualified_name, kind, "
                 "line, end_line, depth, parent, bases, signature, returns) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                sym_rows,
+                ((file_ids[row[0]], *row[1:]) for row in sym_rows),
             )
 
 

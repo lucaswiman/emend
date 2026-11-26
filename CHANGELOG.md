@@ -36,6 +36,24 @@
   (Django: 23 s, where rewriting took 90 s).
 - A query on a project with no index stores facts a few files at a time
   instead of holding the whole project's facts in memory first.
+- A much smaller search index. `parse.db` no longer keeps its own copy of
+  every reference (the fact graph has them), stores each file path once, and
+  its full-text index holds neither a copy of the text nor trigram positions.
+  For Django it shrinks from 411 MB plus a 32 MB write-ahead log to 32 MB.
+  An existing index is converted in place and shrinks on the next
+  `emend tool index`.
+- Write-ahead logs are emptied when indexing finishes; they were left at their
+  largest size.
+- A cold index parses each file once. Fact extraction now returns the symbol
+  rows and name set that the search index used to derive with a second parse
+  (Django: 25 s to 19 s).
+- Editor reference search (`references`, the fallback for incomplete patterns,
+  members offered after a dot) reads the fact graph as of the last index.
+  Results are the same for Python. For JavaScript and TypeScript, a reference
+  is now found under the fact graph's dotted name (`util.run`), where the
+  search index had the slash-separated module path (`util/run`). The first
+  such lookup after an index reads the name dictionary into memory.
+- The incomplete-pattern fallback now reports when its results were truncated.
 
 ## 0.5.6
 

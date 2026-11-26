@@ -134,7 +134,7 @@ class TestFTS5:
         rebuild_fts(fts_conn)
 
         rows = fts_conn.execute(
-            'SELECT name FROM symbol_fts WHERE name MATCH \'"greet"\'',
+            "SELECT name FROM symbol_fts WHERE name LIKE '%greet%'",
         ).fetchall()
         names = [r[0] for r in rows]
         assert "greet" in names
@@ -786,7 +786,7 @@ def test_failed_index_write_preserves_rows_and_freshness(tmp_path, background):
         engine.reindex()
         before = engine._get_conn().execute("SELECT path, content_hash FROM file_manifest").fetchall()
         engine._store.write(lambda db: db.execute(
-            "CREATE TRIGGER fail_symbol BEFORE INSERT ON symbol_index "
+            "CREATE TRIGGER fail_symbol BEFORE INSERT ON symbol "
             "WHEN NEW.name = 'replacement' BEGIN SELECT RAISE(FAIL, 'storage failure'); END"
         ))
         source.write_text("def accepted():\n    pass\ndef replacement():\n    pass\n")
@@ -1093,3 +1093,68 @@ class TestSearchLiterals:
             result = engine._search_literals(["a_c"], limit=1)
         assert len(result.items) == 1
         assert result.truncated
+
+
+# ---------------------------------------------------------------------------
+# Substring search through the full-text index
+# ---------------------------------------------------------------------------
+
+
+class TestSubstringSearch:
+    """The full-text index finds candidates; the text itself decides a match.
+
+    The index stores trigrams without positions, so it is queried with
+    ``LIKE``.  ``_`` and ``%`` are wildcards there and must not widen a match.
+    """
+
+    SOURCE = (
+        "def parse_pattern(raw):\n    pass\n\n\n"
+        "def parseXpattern(raw):\n    pass\n\n\n"
+        "def fmt(spec='100%'):\n    pass\n\n\n"
+        "def other(spec='100x'):\n    pass\n\n\n"
+        "class Shape:\n"
+        "    def grow_by(self, amount):\n        pass\n\n"
+        "    def growXby(self, amount):\n        pass\n"
+    )
+
+    @pytest.fixture
+    def engine(self, tmp_path):
+        proj = _write_project(tmp_path, {"sample.py": self.SOURCE})
+        _tool_index(proj)
+        with _engine(proj) as engine:
+            yield engine
+
+    def _matches(self, engine, column, query):
+        """Rows the full-text strategy for *column* contributes."""
+        conn = engine._get_conn()
+        assert engine._ensure_fts()
+        return sorted(
+            row[1] for row in conn.execute(
+                engine._fts_strategy(column), engine._fts_parameters(query, 50),
+            )
+        )
+
+    def test_underscore_is_literal_in_a_name(self, engine):
+        assert self._matches(engine, "name", "e_p") == ["parse_pattern"]
+        assert [item["name"] for item in engine.search_symbols("e_pat").items] == [
+            "parse_pattern",
+        ]
+
+    def test_match_ignores_case(self, engine):
+        assert self._matches(engine, "name", "SE_PAT") == ["parse_pattern"]
+
+    def test_percent_is_literal_in_a_signature(self, engine):
+        assert self._matches(engine, "signature", "100%") == ["fmt"]
+
+    def test_underscore_is_literal_in_a_qualified_name(self, engine):
+        assert self._matches(engine, "qualified_name", "Shape.grow_") == ["grow_by"]
+
+    def test_index_stores_trigrams_without_positions_or_text(self, engine):
+        engine._ensure_fts()
+        conn = engine._get_conn()
+        assert conn.execute("SELECT COUNT(*) FROM symbol_fts").fetchone()[0] == 7
+        definition = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'symbol_fts'"
+        ).fetchone()[0]
+        assert "detail=none" in definition
+        assert "content='symbol_index'" in definition

@@ -212,18 +212,30 @@ Overview of cache tables
      - (file_path, name, ...)
      - One row per symbol definition (function, class, method).  Stores name,
        qualified name, kind, line range, depth, parent, signature, return type,
-       and bases.  Indexed on ``name``, ``qualified_name``, ``file_path``,
-       and ``kind`` for fast lookups.
-   * - ``reference_index``
-     - (target_qn, file_path, line, col)
-     - One row per reference to a qualified name.  Each row records the
-       reference kind (``read``, ``write``, ``import``, ``call``).  Indexed on
-       ``target_qn`` for fast find-references.
+       and bases.  It is a view: the rows live in ``symbol``, which names each
+       file by an id into ``symbol_file``, so a path is stored once rather than
+       in every row and again in an index.  Triggers make the view accept the
+       inserts and deletes a table would.  Indexed on ``name``,
+       ``qualified_name`` and file.
+   * - ``symbol_fts``
+     - symbol rowid
+     - FTS5 trigram index over name, qualified name and signature, for
+       substring search.  It holds neither the text (read back from
+       ``symbol_index`` by rowid) nor trigram positions, so it is queried with
+       ``LIKE``: the trigrams pick the candidates and the text decides.
    * - ``index_meta``
      - key name (TEXT)
      - Key-value pairs: ``schema_version``, ``git_head:<worktree_id>``,
        ``indexed_at:<worktree_id>``.  Per-worktree keys are scoped by the
        worktree's resolved root path.
+
+``parse.db`` holds no references.  The editor's reference search, its
+fallback for incomplete patterns and the members it offers for dotted
+completion read the fact graph as last published (``AnalysisStore.published_facts()``),
+without scanning the project; a reindex brings the facts up to date.  Looking
+names up by fragment searches the fact graph's name dictionary in memory, in
+the Rust bridge (``PyCozoDb.texts_containing``).  The first such lookup on a
+database reads the whole dictionary.
 
 How caches are populated
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -231,17 +243,24 @@ How caches are populated
 ``emend tool index`` calls ``warm_caches()``, which scans the project in parallel
 using a ``ThreadPoolExecutor``.  ``--jobs`` controls file-worker concurrency
 (default: CPU count), not the separate type engine's worker count.  Each
-worker derives and caches a file's search projections:
+worker caches a file's search projections:
 
-1. **QN resolution** — ``PyScopeResolver`` → compressed JSON → ``qn_index``.
-2. **Symbol collection** — ``emend_core.collect_symbols_from_str()`` →
-   ``symbol_index`` rows (name, kind, line, signature, etc.).
-3. **Reference collection** — ``PyScopeResolver`` reference output →
-   ``reference_index`` rows (target QN, line, column, ref_kind).
+1. **Mentioned names** — compressed JSON → ``qn_index``.
+2. **Symbols** — ``symbol_index`` rows (name, kind, line, signature, etc.).
+
+A file whose facts are extracted in the same pass is parsed once: fact
+extraction (``emend_core.extract_file_fact_rows``) returns its symbol rows and
+its mentioned names along with its facts.  The names are used only when they
+are provably what the configured ``PyScopeResolver`` would give.  Facts are
+extracted without the project's roots, so a file in which a name was resolved
+against a root (a relative path import in JavaScript or TypeScript, a crate
+root in Rust), or whose module name differs, is given to the scope resolver.
+A file whose facts are already stored is parsed for both
+(``PyScopeResolver``, ``emend_core.collect_symbols_from_str()``).
 
 All analysis is handled by the Rust tree-sitter backend.
 
-Workers also extract native facts for the files the fact database must store:
+Workers extract native facts for the files the fact database must store:
 every file on a cold build, afterwards only files whose revision changed (a
 change to the set of modules re-extracts every file).  A bounded queue feeds
 these directly to one fact writer while subsequent files are still being

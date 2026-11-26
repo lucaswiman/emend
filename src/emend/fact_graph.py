@@ -135,6 +135,11 @@ class _SharedGenerationClient:
     def intern_ids(self, texts: list[str]) -> list[int]:
         return self._client.intern_ids(texts)
 
+    def texts_containing(
+        self, fragments: list[str], limit: int, *, ignore_case: bool = False,
+    ) -> list[tuple[str, int]]:
+        return self._client.texts_containing(fragments, limit, ignore_case=ignore_case)
+
     def run_transaction(self, operations: list[tuple[Any, ...]]) -> None:
         self._graph._private_client().run_transaction(operations)
 
@@ -2120,6 +2125,39 @@ class FactGraph:
         )["rows"]
         return [tuple(row) for row in rows]
 
+    def _referenced_names(
+        self,
+        fragments: list[str],
+        script: str,
+        params: dict[str, Any],
+        *,
+        limit: int,
+        ignore_case: bool,
+    ) -> list[list[Any]]:
+        """Run *script* over the first names, in name order, that hold a fragment.
+
+        *script* reads its candidates from ``names[nid, name]`` and returns at
+        most *limit* rows in an order that starts with the name.  Not every
+        candidate has a row (a path is in the dictionary too, and a name may
+        have no reference in scope), so candidates are taken until enough do.
+
+        The bridge searches the dictionary in memory.  Its first search on a
+        database reads the whole dictionary; the query engine would read it on
+        every search, and test each row far more slowly.
+        """
+        wanted = max(8 * limit, 256)
+        while True:
+            names = self._client.texts_containing(fragments, wanted, ignore_case=ignore_case)
+            if not names:
+                return []
+            rows = self._client.run(
+                "names[nid, name] <- $names\n" + script,
+                {**params, "names": [[nid, name] for name, nid in names]},
+            )["rows"]
+            if len(rows) >= limit or len(names) < wanted:
+                return rows
+            wanted *= 8
+
     def references_to_names_containing(
         self, fragment: str, *, limit: int, file_paths: Iterable[str] | None = None,
     ) -> list[tuple[str, str, int, int, str]]:
@@ -2129,12 +2167,9 @@ class FactGraph:
         then position.  At most *limit* are returned: those of the first
         matching names in name order, each name's in path order.  *file_paths*
         keeps only references in those stored paths.
-
-        The name dictionary is read in name order until enough names match,
-        so a fragment that matches nothing reads all of it.
         """
         limit = int(limit)
-        params: dict[str, Any] = {"fragment": fragment.lower()}
+        params: dict[str, Any] = {}
         scope = files = ""
         if file_paths is not None:
             params["files"] = [[ident] for ident in self._known_ids(file_paths)]
@@ -2142,41 +2177,34 @@ class FactGraph:
                 return []
             files = "scope[fid] <- $files\n"
             scope = "scope[fid], "
-        # Every name returned has a reference, so *limit* names are enough.
-        names = self._client.run(
-            f"{files}?[name, nid] := *intern[name, nid], "
-            "str_includes(lowercase(name), $fragment), "
-            f"*reference{{symbol_qn: nid, file_path: fid}}{', scope[fid]' if scope else ''} "
-            f":limit {limit}",
-            params, decode=False,
-        )["rows"]
-        if not names:
-            return []
-        params["names"] = [[nid, name] for name, nid in names]
-        rows = self._client.run(
-            f"{files}names[nid, name] <- $names\n"
-            "?[name, path, line, col, kind] := names[nid, name], "
+        rows = self._referenced_names(
+            [fragment],
+            f"{files}?[name, path, line, col, kind] := names[nid, name], "
             "*reference{symbol_qn: nid, file_path: fid, line, col, ref_kind: kind}, "
             f"{scope}*interned[fid, path] "
             f":order name, path, line, col :limit {limit}",
-            params,
-        )["rows"]
+            params, limit=limit, ignore_case=True,
+        )
         return sorted(
             (tuple(row) for row in rows),
             key=lambda row: (row[1], row[2], row[3], row[0]),
         )
 
-    def referenced_names_containing(self, fragment: str, *, limit: int) -> list[str]:
-        """The first referenced names, in name order, that contain *fragment*.
+    def referenced_names_containing(
+        self, fragments: str | Iterable[str], *, limit: int,
+    ) -> list[str]:
+        """The first referenced names, in name order, that contain a fragment.
 
-        The match is exact about case.  The name dictionary is read in name
-        order until *limit* names match.
+        The match is exact about case.
         """
-        rows = self._client.run(
-            "?[name] := *intern[name, nid], str_includes(name, $fragment), "
-            f"*reference{{symbol_qn: nid}} :limit {int(limit)}",
-            {"fragment": fragment},
-        )["rows"]
+        fragments = [fragments] if isinstance(fragments, str) else list(fragments)
+        limit = int(limit)
+        rows = self._referenced_names(
+            fragments,
+            "?[name] := names[nid, name], *reference{symbol_qn: nid} "
+            f":order name :limit {limit}",
+            {}, limit=limit, ignore_case=False,
+        )
         return [row[0] for row in rows]
 
     def reference_count(self) -> int:

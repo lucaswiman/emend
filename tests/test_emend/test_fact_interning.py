@@ -952,3 +952,73 @@ def test_bridge_concurrent_writes_keep_the_dictionary_dense(tmp_path, persistent
     assert len(db.run("?[source, target] := *edge[source, target, _]")["rows"]) == (
         workers * batches * size
     )
+
+
+# ---------------------------------------------------------------------------
+# Searching the dictionary by fragment
+# ---------------------------------------------------------------------------
+
+
+def _store_texts(db: PyCozoDb, texts: list[str]) -> None:
+    db.run_transaction([(
+        "?[source, target, label] <- $rows :put edge {source, target => label}",
+        {"rows": [[text, "", "x"] for text in texts]},
+        {"rows": (0, 1)},
+    )])
+
+
+def _searchable_db() -> PyCozoDb:
+    db = _dictionary_db()
+    _store_texts(db, ["pkg.Zeta", "pkg.alpha", "pkg.Alpha_one", "other.beta", "src/pkg/a.py"])
+    return db
+
+
+def test_bridge_finds_stored_texts_by_fragment_in_text_order():
+    db = _searchable_db()
+    found = db.texts_containing(["pkg."], 10)
+    assert [text for text, _ in found] == ["pkg.Alpha_one", "pkg.Zeta", "pkg.alpha"]
+    assert [ident for _, ident in found] == db.intern_ids([text for text, _ in found])
+    assert all(ident >= ID_BASE for _, ident in found)
+
+
+def test_bridge_fragment_search_keeps_the_first_texts_under_a_limit():
+    db = _searchable_db()
+    assert [text for text, _ in db.texts_containing(["pkg."], 2)] == [
+        "pkg.Alpha_one", "pkg.Zeta",
+    ]
+    assert db.texts_containing(["pkg."], 0) == []
+
+
+def test_bridge_fragment_search_matches_any_fragment_and_can_ignore_case():
+    db = _searchable_db()
+    assert [text for text, _ in db.texts_containing(["beta", "Zeta"], 10)] == [
+        "other.beta", "pkg.Zeta",
+    ]
+    assert db.texts_containing(["ALPHA"], 10) == []
+    assert [text for text, _ in db.texts_containing(["ALPHA"], 10, ignore_case=True)] == [
+        "pkg.Alpha_one", "pkg.alpha",
+    ]
+    assert db.texts_containing(["absent"], 10) == []
+    assert db.texts_containing([], 10) == []
+
+
+def test_bridge_fragment_search_sees_texts_added_after_it_first_ran():
+    db = _searchable_db()
+    assert db.texts_containing(["gamma"], 10) == []
+    # A text looked up and not found is remembered as absent, not as a text.
+    assert db.intern_ids(["pkg.gamma"]) == [-1]
+    assert db.texts_containing(["gamma"], 10) == []
+    _store_texts(db, ["pkg.gamma"])
+    assert [text for text, _ in db.texts_containing(["gamma"], 10)] == ["pkg.gamma"]
+
+
+def test_bridge_fragment_search_reads_a_reopened_database(tmp_path):
+    path = tmp_path / "facts.db"
+    first = _dictionary_db(str(path))
+    _store_texts(first, ["pkg.stored"])
+    first.close()
+    reopened = PyCozoDb("sqlite", str(path))
+    try:
+        assert [text for text, _ in reopened.texts_containing(["stored"], 10)] == ["pkg.stored"]
+    finally:
+        reopened.close()

@@ -1181,7 +1181,11 @@ def _mentioned_names(db_path: Path) -> dict[str, list[str]]:
 
 def _symbol_rows(db_path: Path) -> list[tuple]:
     with sqlite3.connect(db_path) as conn:
-        return conn.execute("SELECT * FROM symbol_index ORDER BY rowid").fetchall()
+        return conn.execute(
+            "SELECT file_path, name, qualified_name, module_qn, kind, line, end_line, "
+            "depth, parent, bases, signature, returns, decorators "
+            "FROM symbol_index ORDER BY rowid"
+        ).fetchall()
 
 
 @pytest.mark.parametrize("name", sorted(SYMBOL_SAMPLES))
@@ -1314,3 +1318,131 @@ def test_search_index_is_rebuilt_when_facts_are_already_current(tmp_path):
     warm_caches(str(project), type_engine=None)
 
     assert _symbol_rows(db_path) == before
+
+
+# ---------------------------------------------------------------------------
+# Symbol storage: each path once, a full-text index without its own text
+# ---------------------------------------------------------------------------
+
+
+def _objects(conn: sqlite3.Connection) -> dict[str, str]:
+    return dict(conn.execute("SELECT name, type FROM sqlite_master"))
+
+
+class TestSymbolStorage:
+    def _indexed(self, tmp_path) -> Path:
+        from emend.transform import warm_caches
+
+        project = make_project_dir(tmp_path)
+        (project / "a.py").write_text(SOURCE)
+        (project / "b.py").write_text(
+            "class Thing:\n    def go(self, speed):\n        pass\n\n\ndef stop():\n    pass\n"
+        )
+        warm_caches(str(project), type_engine=None)
+        return project
+
+    def test_each_path_is_stored_once(self, tmp_path):
+        """A symbol row names its file by id; ``symbol_index`` is the view
+        that readers and older writers keep using."""
+        project = self._indexed(tmp_path)
+        with sqlite3.connect(project / ".emend" / "cache" / "parse.db") as conn:
+            objects = _objects(conn)
+            assert objects["symbol_index"] == "view"
+            assert objects["symbol"] == objects["symbol_file"] == "table"
+            assert conn.execute("SELECT path FROM symbol_file ORDER BY path").fetchall() == [
+                (str(project / "a.py"),), (str(project / "b.py"),),
+            ]
+            assert {type(row[0]) for row in conn.execute("SELECT file_id FROM symbol")} == {int}
+            assert conn.execute(
+                "SELECT file_path, qualified_name FROM symbol_index ORDER BY qualified_name"
+            ).fetchall() == [
+                (str(project / "b.py"), "Thing"),
+                (str(project / "b.py"), "Thing.go"),
+                (str(project / "a.py"), "hello"),
+                (str(project / "b.py"), "stop"),
+            ]
+
+    def test_view_accepts_the_writes_a_table_did(self, tmp_path):
+        from emend.transform.cache import _initialize_cache_connection
+
+        with sqlite3.connect(tmp_path / "parse.db") as conn:
+            _initialize_cache_connection(conn)
+            conn.executemany(
+                "INSERT INTO symbol_index "
+                "(file_path, name, qualified_name, kind, line, end_line, signature) "
+                "VALUES (?, ?, ?, 'function', ?, ?, ?)",
+                [
+                    ("/p/a.py", "one", "one", 1, 2, "def one(x)"),
+                    ("/p/a.py", "two", "two", 4, 5, None),
+                    ("/p/b.py", "three", "three", 1, 2, None),
+                ],
+            )
+            assert conn.execute("SELECT COUNT(*) FROM symbol_file").fetchone() == (2,)
+            assert conn.execute(
+                "SELECT rowid, file_path, name, depth, signature FROM symbol_index ORDER BY rowid"
+            ).fetchall() == [
+                (1, "/p/a.py", "one", 1, "def one(x)"),
+                (2, "/p/a.py", "two", 1, None),
+                (3, "/p/b.py", "three", 1, None),
+            ]
+            conn.execute("DELETE FROM symbol_index WHERE file_path = ?", ("/p/a.py",))
+            assert conn.execute("SELECT name FROM symbol_index").fetchall() == [("three",)]
+            conn.execute("DELETE FROM symbol_index")
+            assert conn.execute("SELECT COUNT(*) FROM symbol").fetchone() == (0,)
+
+    def test_old_table_is_converted_in_place(self, tmp_path):
+        """Rows keep their rowids, so full-text rows written before the
+        upgrade still point at them."""
+        from emend.transform.cache import _initialize_cache_connection
+
+        with sqlite3.connect(tmp_path / "parse.db") as conn:
+            conn.executescript("""
+                CREATE TABLE symbol_index (
+                    file_path TEXT NOT NULL, name TEXT NOT NULL, qualified_name TEXT NOT NULL,
+                    module_qn TEXT, kind TEXT NOT NULL, line INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL, depth INTEGER NOT NULL DEFAULT 1, parent TEXT,
+                    bases TEXT, signature TEXT, returns TEXT, decorators TEXT);
+                CREATE INDEX idx_sym_name ON symbol_index(name);
+                CREATE INDEX idx_sym_qn ON symbol_index(qualified_name);
+                CREATE INDEX idx_sym_file ON symbol_index(file_path);
+                CREATE INDEX idx_sym_kind ON symbol_index(kind);
+                INSERT INTO symbol_index (rowid, file_path, name, qualified_name, kind, line, end_line, depth, parent, bases)
+                    VALUES (7, '/p/a.py', 'go', 'Thing.go', 'method', 3, 4, 2, 'Thing', NULL),
+                           (9, '/p/a.py', 'Thing', 'Thing', 'class', 1, 4, 1, NULL, 'Base'),
+                           (12, '/p/b.py', 'stop', 'stop', 'function', 1, 2, 1, NULL, NULL);
+                CREATE VIRTUAL TABLE symbol_fts USING fts5(name, qualified_name, signature, tokenize='trigram');
+                INSERT INTO symbol_fts (rowid, name, qualified_name, signature)
+                    SELECT rowid, name, qualified_name, '' FROM symbol_index;
+            """)
+            _initialize_cache_connection(conn)
+            _initialize_cache_connection(conn)
+
+            assert _objects(conn)["symbol_index"] == "view"
+            assert "idx_sym_kind" not in _objects(conn)
+            assert conn.execute(
+                "SELECT rowid, file_path, name, qualified_name, kind, line, end_line, depth, parent, bases "
+                "FROM symbol_index ORDER BY rowid"
+            ).fetchall() == [
+                (7, "/p/a.py", "go", "Thing.go", "method", 3, 4, 2, "Thing", None),
+                (9, "/p/a.py", "Thing", "Thing", "class", 1, 4, 1, None, "Base"),
+                (12, "/p/b.py", "stop", "stop", "function", 1, 2, 1, None, None),
+            ]
+            assert conn.execute(
+                "SELECT s.qualified_name FROM symbol_fts f JOIN symbol_index s ON f.rowid = s.rowid "
+                "WHERE symbol_fts MATCH 'thing' ORDER BY s.rowid"
+            ).fetchall() == [("Thing.go",), ("Thing",)]
+
+    def test_full_text_index_keeps_no_copy_of_the_text(self, tmp_path):
+        project = self._indexed(tmp_path)
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(project))
+        try:
+            assert [item["name"] for item in engine.search_symbols("hing").items] == ["Thing"]
+        finally:
+            engine.close()
+        with sqlite3.connect(project / ".emend" / "cache" / "parse.db") as conn:
+            objects = _objects(conn)
+            assert conn.execute("SELECT COUNT(*) FROM symbol_fts").fetchone() == (4,)
+        assert "symbol_fts_data" in objects
+        assert "symbol_fts_content" not in objects

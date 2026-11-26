@@ -1425,6 +1425,29 @@ class TestReferenceLookupForSearch:
         # A file path is in the same dictionary as the names, but is not one.
         assert graph.referenced_names_containing("src/", limit=10) == []
 
+    def test_referenced_names_match_any_of_several_fragments(self):
+        graph = _reference_graph()
+        assert graph.referenced_names_containing(["other.w", "mod.Run_"], limit=10) == [
+            "pkg.mod.Run_All", "pkg.other.walk",
+        ]
+        assert graph.referenced_names_containing(["other.w", "mod.Run_"], limit=1) == [
+            "pkg.mod.Run_All",
+        ]
+        assert graph.referenced_names_containing([], limit=10) == []
+
+    def test_fragment_search_reads_past_candidates_that_are_not_referenced(self):
+        """Paths share the dictionary with names: hundreds of them matching
+        first must not hide the one name that is referenced."""
+        graph = FactGraph()
+        graph.add_references_batch([
+            ReferenceFact("aaa.other", f"zz_{number:03}.py", 1, 0, "read")
+            for number in range(300)
+        ] + [ReferenceFact("zzz.target", "last.py", 4, 2, "call")])
+        assert graph.referenced_names_containing("zz", limit=1) == ["zzz.target"]
+        assert graph.references_to_names_containing("ZZ", limit=1) == [
+            ("zzz.target", "last.py", 4, 2, "call"),
+        ]
+
     def test_reference_count(self):
         assert _reference_graph().reference_count() == 6
         assert FactGraph().reference_count() == 0
