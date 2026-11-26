@@ -416,6 +416,18 @@ def module_name_for_file(
     root = Path(project_root).resolve() if project_root else find_project_root(path)
     language = language or detect_language(path) or "python"
     source_root, _root_module = module_resolution_context(root, language, file_path=path)
+    separator = module_separator or get_module_separator(language)
+    return module_name_under_root(path, root, source_root, language, separator)
+
+
+def module_name_under_root(
+    path: Path, root: Path, source_root: Path, language: str, separator: str,
+) -> str:
+    """Name the module at *path* given resolved paths and its module root.
+
+    A project scan names every file; the roots are the same for all files of
+    one language, so the caller resolves them once.
+    """
     try:
         relative = path.relative_to(source_root)
     except ValueError:
@@ -430,7 +442,6 @@ def module_name_for_file(
         )
         else [*directories, stem]
     )
-    separator = module_separator or get_module_separator(language)
     return separator.join(module_parts) if module_parts else stem
 
 

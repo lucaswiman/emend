@@ -250,3 +250,80 @@ def test_published_facts_in_the_doubled_key_layout_are_rebuilt(tmp_path):
     finally:
         store.close()
     assert _generations(tmp_path) == []
+
+
+def test_reading_current_facts_scans_once_and_takes_no_publication_lock(tmp_path, monkeypatch):
+    """A reader of an up-to-date index must not queue behind writers."""
+    from contextlib import contextmanager
+
+    _project(tmp_path)
+    writer = AnalysisStore(tmp_path)
+    writer.query_facts()
+    writer.close()
+
+    scans = 0
+    scan = AnalysisStore._scan_disk_locked
+
+    def counted_scan(self):
+        nonlocal scans
+        scans += 1
+        return scan(self)
+
+    @contextmanager
+    def forbidden_lock(self):
+        raise AssertionError("a reader took the publication lock")
+        yield
+
+    monkeypatch.setattr(AnalysisStore, "_scan_disk_locked", counted_scan)
+    monkeypatch.setattr(AnalysisStore, "_facts_write_lock", forbidden_lock)
+    reader = AnalysisStore(tmp_path)
+    try:
+        assert _names(reader.query_facts()) == ["original"]
+        assert scans == 1
+        assert _names(reader.query_facts()) == ["original"]
+        assert scans == 2
+    finally:
+        reader.close()
+
+
+def test_scanning_resolves_each_source_path_once(tmp_path, monkeypatch):
+    """Canonicalising a path costs a system call per directory level."""
+    from emend.project_config import module_name_for_file
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'sample'\n")
+    package = tmp_path / "src" / "sample" / "nested"
+    package.mkdir(parents=True)
+    names = [f"module_{index}.py" for index in range(20)]
+    for name in names:
+        (package / name).write_text("value = 1\n")
+    (package / "__init__.py").write_text("")
+    (tmp_path / "lib.rs").write_text("pub fn run() {}\n")
+    (tmp_path / "web.ts").write_text("export const value = 1;\n")
+    store = AnalysisStore(tmp_path)
+    try:
+        store.disk_snapshot()
+        resolves = 0
+        resolve = Path.resolve
+
+        def counted(self, *args, **kwargs):
+            nonlocal resolves
+            resolves += 1
+            return resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", counted)
+        snapshot = store.disk_snapshot()
+        monkeypatch.undo()
+    finally:
+        store.close()
+
+    files = len(snapshot.files)
+    assert files == 23
+    assert resolves <= files + 12, f"{resolves} path resolutions for {files} files"
+    for revision in snapshot.files:
+        assert revision.module_name == module_name_for_file(
+            revision.file_path, tmp_path, language=revision.language,
+        )
+    names = {revision.module_name for revision in snapshot.files}
+    assert {"lib", "web"} <= names
+    assert any(name.endswith("sample.nested") for name in names)
+    assert any(name.endswith("sample.nested.module_0") for name in names)

@@ -560,12 +560,19 @@ class AnalysisStore:
             language: get_module_separator(language, configs.get(language))
             for language in registry[1]
         }
+        from emend.project_config import module_name_under_root, module_resolution_context
+
         files = sorted(
             str(Path(path).resolve())
             for path in collect_all_source_files(
                 str(self.project_root), languages=list(registry[1]), registry=registry
             )
         )
+        # Every path above is canonical and so is the project root; resolving
+        # them again per file costs a system call per directory level.
+        root = self.project_root.resolve()
+        root_text = str(root)
+        module_roots: dict[str, Path] = {}
         contents: dict[str, str] = {}
         revisions: list[FileRevision] = []
         observed: dict[str, tuple[int, int, int, int, int, str, str, str]] = {}
@@ -577,8 +584,14 @@ class AnalysisStore:
                 continue
             old = previous.get(file_path)
             language = detect_language(file_path, registry=registry) or "python"
-            module_name = self._module_name(
-                file_path, language, module_separators.get(language)
+            module_root = module_roots.get(language)
+            if module_root is None:
+                module_root = module_roots[language] = module_resolution_context(
+                    root, language,
+                )[0]
+            module_name = module_name_under_root(
+                Path(file_path), root, module_root, language,
+                module_separators.get(language) or get_module_separator(language),
             )
             identity = self._stat_identity(stat)
             if old is not None and old[:5] == identity:
@@ -608,8 +621,8 @@ class AnalysisStore:
                     continue
                 contents[file_path] = content
                 content_hash = hashlib.sha256(content.encode()).hexdigest()
-            revisions.append(FileRevision.create(
-                self.project_root, file_path, content_hash, language, module_name,
+            revisions.append(FileRevision(
+                root_text, file_path, content_hash, language, module_name,
                 analysis_config=configs.get(language),
             ))
             observed[file_path] = (*identity, content_hash, language, module_name)
@@ -1091,7 +1104,12 @@ class AnalysisStore:
             self._unlink(path)
             raise
 
-    def _ensure_disk_facts(self, scan: _DiskScan, extract=None):
+    def _adopt_published_facts(self):
+        """Bind the published generation, if this store has none and it is valid.
+
+        Publication is an atomic rename of a finished generation, so this
+        needs no lock: whatever generation is found is complete.
+        """
         graph = self._disk_graph
         if graph is not None and not self._generation_exists(graph):
             # Another process retired this generation's name; reopen.
@@ -1113,6 +1131,10 @@ class AnalysisStore:
                     if candidate is not None:
                         candidate.close()
                     self._unlink(path)
+        return graph
+
+    def _ensure_disk_facts(self, scan: _DiskScan, extract=None):
+        graph = self._adopt_published_facts()
         if graph is not None and graph.snapshot.snapshot_id == scan.snapshot.snapshot_id:
             if extract is not None:
                 for _ in extract((), {}):
@@ -1544,11 +1566,12 @@ class AnalysisStore:
         """Return the current facts, optionally with an owner-managed type view."""
         with self._graph_lock:
             scan = self._scan_disk()
-            disk_graph = self._disk_graph
+            # A reader of an up-to-date index neither waits for writers nor
+            # scans again: it adopts the generation that is already published.
+            disk_graph = self._adopt_published_facts()
             if (
                 disk_graph is None
                 or disk_graph.snapshot.snapshot_id != scan.snapshot.snapshot_id
-                or not self._generation_exists(disk_graph)
             ):
                 with self._facts_write_lock():
                     # A waiting process may have observed an older revision;
