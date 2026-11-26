@@ -327,3 +327,45 @@ def test_scanning_resolves_each_source_path_once(tmp_path, monkeypatch):
     assert {"lib", "web"} <= names
     assert any(name.endswith("sample.nested") for name in names)
     assert any(name.endswith("sample.nested.module_0") for name in names)
+
+
+def test_bulk_import_puts_rows_and_replaces_by_key():
+    from emend.emend_core import PyCozoDb
+
+    db = PyCozoDb("mem", "")
+    db.run(":create item {name: String, line: Int => kind: String, payload: Bytes}")
+    db.run(":create other {name: String}")
+    columns = ["name", "line", "kind", "payload"]
+    db.import_relations({
+        "item": (columns, [["a", 1, "def", b"\x00\xff"], ["b", 2, "use", b""]]),
+        "other": (["name"], [["x"]]),
+    })
+    db.import_relations({"item": (columns, [["a", 1, "call", b"new"]])})
+
+    rows = db.run("?[name, line, kind, payload] := *item[name, line, kind, payload]")["rows"]
+    assert rows == [["a", 1, "call", b"new"], ["b", 2, "use", b""]]
+    assert db.run("?[name] := *other[name]")["rows"] == [["x"]]
+    with pytest.raises(RuntimeError):
+        db.import_relations({"item": (["name", "line"], [["c", 3]])})
+    with pytest.raises(RuntimeError):
+        db.import_relations({"missing": (["name"], [["c"]])})
+
+
+def test_bulk_import_into_an_owned_graph_never_changes_the_published_generation(tmp_path):
+    _project(tmp_path)
+    store = AnalysisStore(tmp_path)
+    try:
+        graph = store.query_facts()
+        graph.client.import_relations({"symbol": (
+            ["qualified_name", "file_path", "name", "kind", "line", "end_line", "parent"],
+            [["app.bulk", "app.py", "bulk", "function", 9, 9, ""]],
+        )})
+        assert _names(graph) == ["bulk", "original"]
+        other = AnalysisStore(tmp_path)
+        try:
+            assert _names(other.query_facts()) == ["original"]
+        finally:
+            other.close()
+    finally:
+        store.close()
+    assert _generations(tmp_path) == []

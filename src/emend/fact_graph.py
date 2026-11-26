@@ -130,6 +130,9 @@ class _SharedGenerationClient:
     def run_transaction(self, operations: list[tuple[str, dict[str, Any]]]) -> None:
         self._graph._private_client().run_transaction(operations)
 
+    def import_relations(self, data: dict[str, tuple[list[str], list[list[Any]]]]) -> None:
+        self._graph._private_client().import_relations(data)
+
     def backup(self, path: str) -> None:
         self._client.backup(path)
 
@@ -2469,6 +2472,16 @@ class FactGraph:
             for key in specs:
                 rows[key].extend(extracted.rows.get(key, []))
 
+        if operations is None:
+            # Nothing is removed first, so there is no script to share a
+            # transaction with: put every relation's rows in one bulk write.
+            data = {
+                relation: ([column.strip() for column in cols.split(",")], rows[key])
+                for key, (relation, cols, _schema) in specs.items() if rows[key]
+            }
+            if data:
+                self._client.import_relations(data)
+            return
         for key, (relation, cols, schema) in specs.items():
             relation_rows = rows.get(key, [])
             if relation_rows:
@@ -2483,6 +2496,9 @@ class FactGraph:
         stored_paths: list[str],
     ) -> None:
         """Replace path-owned rows using precomputed extraction artifacts."""
+        if not stored_paths:
+            self._insert_extracted_facts(extracted_files)
+            return
         operations: list[tuple[str, dict[str, Any]]] = []
         self.remove_files(stored_paths, operations=operations)
         self._insert_extracted_facts(extracted_files, operations=operations)

@@ -202,6 +202,32 @@ impl PyCozoDb {
         })
     }
 
+    /// Put rows into existing relations in one transaction, without scripts.
+    ///
+    /// ``data`` maps a relation name to ``(column_names, rows)``; every column
+    /// of the relation must be named.  A row replaces the stored row with the
+    /// same key.  Evaluating a ``:put`` script costs several times more per
+    /// row, which dominates building a large fact graph.
+    fn import_relations(&self, py: Python<'_>, data: &Bound<'_, PyDict>) -> PyResult<()> {
+        let mut relations = BTreeMap::new();
+        for (name, value) in data.iter() {
+            let (headers, rows): (Vec<String>, Bound<'_, PyList>) = value.extract()?;
+            let mut converted = Vec::with_capacity(rows.len());
+            for row in rows.iter() {
+                let row = row.cast_into::<PyList>()?;
+                converted.push(
+                    row.iter()
+                        .map(|cell| py_to_datavalue(&cell))
+                        .collect::<PyResult<Vec<_>>>()?,
+                );
+            }
+            relations.insert(name.extract::<String>()?, NamedRows::new(headers, converted));
+        }
+        py.detach(|| self.db.import_relations(relations)).map_err(|error| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("CozoDB import error: {}", error))
+        })
+    }
+
     /// Save a consistent database snapshot to a new SQLite file.
     fn backup(&self, py: Python<'_>, path: &str) -> PyResult<()> {
         py.detach(|| self.db.backup_db(path)).map_err(|error| {
