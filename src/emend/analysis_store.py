@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from functools import cache
@@ -13,9 +14,13 @@ import os
 import pickle
 import posixpath
 from pathlib import Path
+import re
+import secrets
+import socket
 import sqlite3
 import threading
-import tempfile
+import time
+import weakref
 import zlib
 from collections.abc import Callable, Iterable
 
@@ -31,6 +36,71 @@ EXTRACTION_ARTIFACT_VERSION = "22"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 TYPE_RESULT_VERSION = 5  # FileTypes now carries failure diagnostics.
 logger = logging.getLogger(__name__)
+
+# Private fact generations are named ``facts-<role>-h<host>p<pid>-<token>.db``
+# so that a later process can tell whether the owner is still running.
+_GENERATION_NAME = re.compile(
+    r"^facts-[a-z]+-(?:h(?P<host>[0-9a-f]{8})p(?P<pid>\d+)-)?[A-Za-z0-9_]+\.db$"
+)
+_GENERATION_SIDECARS = ("-journal", "-wal", "-shm")
+# Names written before owners were recorded cannot be attributed; they are
+# removed once they are old enough that only an abandoned copy remains.
+_UNOWNED_GENERATION_AGE = 3600
+# A generation from another host or container shares no process table with
+# this one, so only age can retire it.
+_FOREIGN_GENERATION_AGE = 7 * 24 * 3600
+_LIVE_STORES: "weakref.WeakSet[AnalysisStore]" = weakref.WeakSet()
+_LIVE_STORES_LOCK = threading.Lock()
+
+
+@cache
+def _host_tag() -> str:
+    """Identify the process table that this process's pid belongs to."""
+    identity = socket.gethostname()
+    try:
+        identity += os.readlink("/proc/self/ns/pid")
+    except OSError:
+        pass
+    return hashlib.sha256(identity.encode()).hexdigest()[:8]
+
+
+def generation_owner_tag() -> str:
+    """Return the owner marker embedded in this process's generation names."""
+    return f"h{_host_tag()}p{os.getpid()}"
+
+
+def _process_is_gone(pid: int) -> bool:
+    """Whether *pid* is known to have exited (never true on Windows)."""
+    if os.name == "nt":
+        # Signal 0 terminates a process there; an open file cannot be removed
+        # anyway, so removal itself is the liveness test.
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _close_live_stores() -> None:
+    """Release every generation this process still owns at interpreter exit."""
+    with _LIVE_STORES_LOCK:
+        stores = list(_LIVE_STORES)
+    for store in stores:
+        # A forked child inherits its parent's stores but owns none of their
+        # files; only the creating process may remove them.
+        if store._owner_pid != os.getpid():
+            continue
+        try:
+            store._release_generations()
+        except Exception:
+            logger.debug("Could not release fact generations", exc_info=True)
+
+
+atexit.register(_close_live_stores)
+
 
 def collect_symbol_info(filepath: Path, source: str) -> list[SymbolInfo]:
     """Project exact source into fresh, caller-owned lookup/index results."""
@@ -92,6 +162,10 @@ class AnalysisStore:
         self._observed_loaded = False
         self._symbols: dict[tuple[str, str], tuple] = {}
         self._external_type_files = {}
+        self._owner_pid = os.getpid()
+        with _LIVE_STORES_LOCK:
+            _LIVE_STORES.add(self)
+        self._sweep_abandoned_generations()
 
     def symbols(self, source: str, ext: str = "py") -> tuple:
         """Return immutable syntax symbols; content identity never includes a path."""
@@ -227,21 +301,79 @@ class AnalysisStore:
         """Create the owner directory and keep generated data out of VCS."""
         self._prepare_cache_directory(self.cache_dir)
 
+    def _generation_name(self, prefix: str) -> Path:
+        """Return an unused, owner-tagged database name in the owner cache."""
+        self.ensure_cache_directory()
+        return self.cache_dir / (
+            f"{prefix}{generation_owner_tag()}-{secrets.token_hex(6)}.db"
+        )
+
     def _temporary_db_path(self, prefix: str) -> Path:
         """Allocate an empty private database in the owner cache."""
-        self.ensure_cache_directory()
-        fd, name = tempfile.mkstemp(prefix=prefix, suffix=".db", dir=self.cache_dir)
-        os.close(fd)
-        return Path(name)
+        while True:
+            path = self._generation_name(prefix)
+            try:
+                os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            except FileExistsError:
+                continue
+            return path
+
+    def _sweep_abandoned_generations(self) -> None:
+        """Remove private generations whose owning process no longer exists.
+
+        A process that is killed cannot remove its own generations, and each
+        one can be as large as the published database.
+        """
+        try:
+            with os.scandir(self.cache_dir) as entries:
+                names = [entry.name for entry in entries]
+        except OSError:
+            return
+        now = time.time()
+        for name in names:
+            base = name
+            for suffix in _GENERATION_SIDECARS:
+                if name.endswith(suffix):
+                    base = name[: -len(suffix)]
+            match = _GENERATION_NAME.match(base)
+            if match is None:
+                continue
+            path = self.cache_dir / name
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            # Unowned names are always copies, so their write time is their
+            # age.  An owned name can be a link to an old generation; linking
+            # refreshes only the change time.
+            written = now - stat.st_mtime
+            age = now - max(stat.st_mtime, stat.st_ctime)
+            if match["pid"] is None:
+                abandoned = written > _UNOWNED_GENERATION_AGE
+            elif match["host"] != _host_tag():
+                abandoned = age > _FOREIGN_GENERATION_AGE
+            elif os.name == "nt":
+                # Give a live owner time to open what it has just created.
+                abandoned = int(match["pid"]) != os.getpid() and age > 60
+            else:
+                abandoned = (
+                    int(match["pid"]) != os.getpid()
+                    and _process_is_gone(int(match["pid"]))
+                )
+            if abandoned:
+                self._unlink(path)
 
     @staticmethod
     def _unlink(path: Path | None) -> None:
         """Best-effort removal for an obsolete private generation."""
         if path is not None:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            for candidate in (path, *(
+                path.with_name(path.name + suffix) for suffix in _GENERATION_SIDECARS
+            )):
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     @staticmethod
     def _graph_path(graph: object | None) -> Path | None:
@@ -250,6 +382,21 @@ class AnalysisStore:
 
     _stat_identity = staticmethod(file_stat_identity)
 
+    def _release_generations(self) -> None:
+        """Close every owned graph and remove its private backing file."""
+        self._discard_overlay_graph(close=True)
+        if self._typed_graph is not None:
+            typed_graph = self._typed_graph[1]
+            typed_path = self._graph_path(typed_graph)
+            typed_graph.close()
+            self._unlink(typed_path)
+            self._typed_graph = None
+        if self._disk_graph is not None:
+            disk_path = self._graph_path(self._disk_graph)
+            self._disk_graph.close()
+            self._disk_graph = None
+            self._unlink(disk_path)
+
     def close(self) -> None:
         with self._connection_lock:
             self._closing = True
@@ -257,22 +404,11 @@ class AnalysisStore:
             self._writers.clear()
         for writer in writers:
             writer.close()
-        self._discard_overlay_graph(close=True)
         self._overlays.clear()
-        if self._typed_graph is not None:
-            typed_graph = self._typed_graph[1]
-            typed_path = self._graph_path(typed_graph)
-            typed_graph.close()
-            self._unlink(typed_path)
-            self._typed_graph = None
         if self._type_oracle is not None:
             self._type_oracle[1].close()
             self._type_oracle = None
-        if self._disk_graph is not None:
-            disk_path = self._graph_path(self._disk_graph)
-            self._disk_graph.close()
-            self._disk_graph = None
-            self._unlink(disk_path)
+        self._release_generations()
         with self._connection_lock:
             self._symbols.clear()
             if self._connection is not None:
@@ -689,6 +825,73 @@ class AnalysisStore:
             raise
         return path
 
+    def _link_generation(self, source_path: Path, prefix: str) -> Path | None:
+        """Give one generation a second name without copying its contents.
+
+        The engine reopens a database by name, so a reader needs a name that
+        publication never replaces.  Returns ``None`` where another name cannot
+        serve: an open file cannot be replaced on Windows, and some filesystems
+        have no hard links.
+        """
+        if os.name == "nt":
+            return None
+        for _ in range(8):
+            path = self._generation_name(prefix)
+            try:
+                os.link(source_path, path)
+            except FileExistsError:
+                continue
+            except OSError:
+                return None
+            return path
+        return None
+
+    def _privatize_generation(self, current_path: str) -> str:
+        """Copy a shared generation before one of its graphs is written."""
+        current = Path(current_path)
+        private = self._snapshot_copy(current, "facts-private-")
+        if current != self.facts_path:
+            self._unlink(current)
+        return str(private)
+
+    def _open_published(self, source_path: Path):
+        """Open the published generation under a name only this process uses."""
+        from emend.fact_graph import FactGraph
+
+        path = self._link_generation(source_path, "facts-open-")
+        shared = path is not None
+        if path is None:
+            path = self._snapshot_copy(source_path, "facts-open-")
+        try:
+            # The engine aborts on a file that is not a database and would
+            # initialize an empty one in place; reject both before it opens.
+            with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
+                if db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cozo'"
+                ).fetchone() is None:
+                    raise sqlite3.DatabaseError(f"no fact storage in {source_path}")
+            graph = FactGraph(db_path=str(path), initialize_schema=False)
+        except BaseException:
+            self._unlink(path)
+            raise
+        if shared:
+            graph.mark_shared(self._privatize_generation)
+        return graph, path
+
+    def _publish_generation(self, graph, path: Path) -> None:
+        """Atomically make a finished private generation the published one."""
+        publish_path = self._link_generation(path, "facts-publish-")
+        shared = publish_path is not None
+        if publish_path is None:
+            publish_path = self._snapshot_copy(path, "facts-publish-")
+        try:
+            os.replace(publish_path, self.facts_path)
+        finally:
+            self._unlink(publish_path)
+        if shared:
+            # The published name now refers to this graph's own file.
+            graph.mark_shared(self._privatize_generation)
+
     def _set_disk_graph(self, graph: object) -> None:
         previous_path = self._graph_path(self._disk_graph)
         self._disk_graph = graph
@@ -698,7 +901,7 @@ class AnalysisStore:
     def _updated_graph(self, previous, snapshot: AnalysisSnapshot, contents, extract=None):
         """Apply one revision delta, equally for disk and overlay generations."""
         from emend.analysis_linking import ModuleCatalog, link_extracted_files
-        from emend.fact_graph import FactGraph
+        from emend.fact_graph import FactGraph, prepare_cozo_storage
 
         if previous is None:
             path = self._temporary_db_path("facts-next-")
@@ -741,6 +944,7 @@ class AnalysisStore:
             if previous is None:
                 # Bulk-save the cold build once; subsequent edits keep using
                 # disk-backed deltas rather than loading the graph into RAM.
+                prepare_cozo_storage(path)
                 graph._client.backup(str(path))
                 graph.close()
                 graph = FactGraph(db_path=str(path))
@@ -757,14 +961,15 @@ class AnalysisStore:
             raise
 
     def _ensure_disk_facts(self, scan: _DiskScan, extract=None):
-        from emend.fact_graph import FactGraph
-
         graph = self._disk_graph
+        if graph is not None and not self._generation_exists(graph):
+            # Another process retired this generation's name; reopen.
+            graph.close()
+            self._disk_graph = graph = None
         if graph is None and self.facts_path.is_file():
             path = candidate = None
             try:
-                path = self._snapshot_copy(self.facts_path, "facts-open-")
-                candidate = FactGraph(db_path=str(path))
+                candidate, path = self._open_published(self.facts_path)
                 published = candidate.published_snapshot(self.project_root)
                 if published is not None:
                     candidate.bind_snapshot(published, source_loader=self._revision_source)
@@ -784,18 +989,18 @@ class AnalysisStore:
             graph.bind_snapshot(scan.snapshot, source_loader=self._revision_source)
             return graph
         candidate, path = self._updated_graph(graph, scan.snapshot, scan.contents, extract)
-        publish_path = None
         try:
-            publish_path = self._snapshot_copy(path, "facts-publish-")
-            os.replace(publish_path, self.facts_path)
+            self._publish_generation(candidate, path)
         except BaseException:
             candidate.close()
             self._unlink(path)
             raise
-        finally:
-            self._unlink(publish_path)
         self._set_disk_graph(candidate)
         return candidate
+
+    def _generation_exists(self, graph: object) -> bool:
+        path = self._graph_path(graph)
+        return path is None or path.exists()
 
     def _discard_overlay_graph(self, *, close: bool = False) -> None:
         graph = self._overlay_graph
@@ -1188,6 +1393,7 @@ class AnalysisStore:
             if (
                 disk_graph is None
                 or disk_graph.snapshot.snapshot_id != scan.snapshot.snapshot_id
+                or not self._generation_exists(disk_graph)
             ):
                 with self._facts_write_lock():
                     # A waiting process may have observed an older revision;

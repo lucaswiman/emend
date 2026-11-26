@@ -17,6 +17,9 @@ import hashlib
 import json
 import logging
 import re
+import sqlite3
+import threading
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -72,11 +75,66 @@ class DeadSymbolFact(SymbolFact):
 # CozoDB helpers
 # ---------------------------------------------------------------------------
 
-def _create_cozo_client(db_path: str | None = None) -> Any:
+# Cozo keeps every relation in one key/value table and creates it only when it
+# is missing.  Its own definition is a rowid table, which stores each key twice
+# (once in the table, once in the primary-key index).  Creating the table first
+# as a clustered index keeps one copy; Cozo's statements are unchanged.
+_COZO_STORAGE_TABLE = (
+    "CREATE TABLE IF NOT EXISTS cozo (k BLOB PRIMARY KEY, v BLOB) WITHOUT ROWID"
+)
+
+
+def prepare_cozo_storage(db_path: str | Path) -> None:
+    """Create Cozo's storage table with single-copy keys in a new database."""
+    with closing(sqlite3.connect(str(db_path))) as db:
+        db.execute(_COZO_STORAGE_TABLE)
+        db.commit()
+
+
+def _create_cozo_client(db_path: str | None = None, *, prepare: bool = True) -> Any:
     """Use the required native backend, in memory unless a path is supplied."""
     from emend.emend_core import PyCozoDb
 
-    return PyCozoDb("mem", "") if db_path is None else PyCozoDb("sqlite", str(db_path))
+    if db_path is None:
+        return PyCozoDb("mem", "")
+    if prepare:
+        try:
+            prepare_cozo_storage(db_path)
+        except sqlite3.Error:
+            # Cozo reports an unusable file itself, as it did before.
+            logger.debug("Could not prepare Cozo storage at %s", db_path, exc_info=True)
+    return PyCozoDb("sqlite", str(db_path))
+
+
+class _SharedGenerationClient:
+    """Cozo client for a generation that other readers can also see.
+
+    Every script first runs with Cozo's read-only guarantee, so the backing
+    file cannot change.  The first script Cozo rejects as a write moves the
+    owning graph to a private copy and runs there.
+    """
+
+    def __init__(self, graph: "FactGraph", client: Any) -> None:
+        self._graph = graph
+        self._client = client
+
+    def run(self, query: str, params: dict[str, Any] | None = None, *,
+            read_only: bool = False) -> dict[str, Any]:
+        try:
+            return self._client.run(query, params, read_only=True)
+        except RuntimeError as error:
+            if read_only or "read-only" not in str(error):
+                raise
+        return self._graph._private_client().run(query, params)
+
+    def run_transaction(self, operations: list[tuple[str, dict[str, Any]]]) -> None:
+        self._graph._private_client().run_transaction(operations)
+
+    def backup(self, path: str) -> None:
+        self._client.backup(path)
+
+    def close(self) -> None:
+        self._client.close()
 
 
 _SCHEMA_INIT = """\
@@ -368,9 +426,14 @@ class FactGraph:
         snapshot: AnalysisSnapshot | None = None,
         source_overrides: dict[str, str] | None = None,
         source_loader: Callable[[FileRevision], str | None] | None = None,
+        initialize_schema: bool = True,
     ) -> None:
         self._db_path = db_path
-        self._client = _create_cozo_client(db_path)
+        # A published generation already has its schema.  Opening one must not
+        # write to it, so its owner skips both table and relation creation.
+        self._client = _create_cozo_client(db_path, prepare=initialize_schema)
+        self._privatize: Callable[[str], str] | None = None
+        self._privatize_lock = threading.Lock()
         self._snapshot = snapshot
         self._source_overrides = dict(source_overrides or {})
         self._source_loader = source_loader
@@ -380,7 +443,35 @@ class FactGraph:
         self._revisions_by_path = {
             revision.file_path: revision for revision in snapshot.files
         } if snapshot is not None else {}
-        _init_schema(self._client)
+        if initialize_schema:
+            _init_schema(self._client)
+
+    def mark_shared(self, privatize: Callable[[str], str]) -> None:
+        """Stop writing this graph's backing file; other readers can see it.
+
+        ``privatize(current_path)`` must return the path of a private copy.
+        It is called at most once, before this graph's first later write.
+        """
+        with self._privatize_lock:
+            if self._privatize is None:
+                self._client = _SharedGenerationClient(self, self._client)
+            self._privatize = privatize
+
+    @property
+    def is_shared(self) -> bool:
+        """Whether writes are currently redirected to a private copy."""
+        return self._privatize is not None
+
+    def _private_client(self) -> Any:
+        """Move this graph to a private copy of its shared generation."""
+        with self._privatize_lock:
+            privatize = self._privatize
+            if privatize is not None:
+                private_path = privatize(str(self._db_path))
+                self._client = _create_cozo_client(private_path, prepare=False)
+                self._db_path = private_path
+                self._privatize = None
+            return self._client
 
     @property
     def snapshot(self) -> AnalysisSnapshot:
