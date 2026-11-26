@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 
 use crate::cfg::{self, FunctionCfg};
 use crate::scope::{LanguageConfig, Reference, ScopeResolver};
@@ -19,6 +19,7 @@ enum Cell {
     String(String),
     Int(i64),
     Bool(bool),
+    Bytes(Vec<u8>),
 }
 
 impl From<String> for Cell {
@@ -84,8 +85,7 @@ impl FactBatch {
             "noncall_private_member_refs",
             "module_level_refs",
             "exported_qns",
-            "flow_events",
-            "flow_edges",
+            "flow_blob",
             "local_refs",
             "local_imports",
         ] {
@@ -116,6 +116,7 @@ impl FactBatch {
                             Cell::Bool(value) => {
                                 value.into_pyobject(py)?.to_owned().into_any().unbind()
                             }
+                            Cell::Bytes(value) => PyBytes::new(py, &value).into_any().unbind(),
                         })
                     })
                     .collect::<PyResult<_>>()?;
@@ -659,34 +660,13 @@ fn extract_batch(
     let (cfgs, flow) = cfg::build_analysis_from_tree(source, &tree, &config);
 
     let mut batch = FactBatch::new();
-    for event in flow.events {
-        batch.relation("flow_events").push(row![
-            rel_path,
-            event.id,
-            event.func_id,
-            event.func_name,
-            event.func_start,
-            event.role,
-            event.var.unwrap_or_default(),
-            event.access_path.unwrap_or_default(),
-            event.block,
-            event.start_byte,
-            event.end_byte,
-            event.start_line,
-            event.start_col,
-            event.end_line,
-            event.end_col,
-            event.ordinal,
-            event.call_id.map_or(-1, i64::from),
-            event.arg_index.map_or(-1, i64::from),
-            event.arg_name.unwrap_or_default(),
-            event.text,
+    // Flow occurrences are only ever read back per file, so the whole file's
+    // facts are one stored value instead of a row per occurrence.
+    if !flow.events.is_empty() || !flow.edges.is_empty() {
+        batch.relation("flow_blob").push(vec![
+            rel_path.into(),
+            Cell::Bytes(crate::flow_blob::encode(flow.events, flow.edges)),
         ]);
-    }
-    for edge in flow.edges {
-        batch
-            .relation("flow_edges")
-            .push(row![rel_path, edge.from, edge.to, edge.kind]);
     }
 
     let symbols = project_symbols(&mut batch, &raw_symbols, rel_path, module_name);
@@ -842,7 +822,12 @@ mod tests {
             include_str!("../../src/emend/languages/python/config.toml"),
         )
         .unwrap();
-        assert_eq!(batch.rows.len(), 22);
+        assert_eq!(batch.rows.len(), 21);
+        assert!(matches!(
+            batch.rows["flow_blob"].as_slice(),
+            [row] if matches!(&row[0], Cell::String(path) if path == "pkg/mod.py")
+                && matches!(&row[1], Cell::Bytes(payload) if !payload.is_empty())
+        ));
         assert!(batch.qnames.iter().any(|name| name == "pkg.mod.main"));
         assert!(batch.rows["exported_qns"]
             .iter()

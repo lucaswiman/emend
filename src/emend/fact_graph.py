@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-FACT_GRAPH_SCHEMA_VERSION = "11"
+FACT_GRAPH_SCHEMA_VERSION = "12"
 _FACT_INSERT_BATCH_SIZE = 25_000
 
 
@@ -247,35 +247,10 @@ _SCHEMA_INIT = """\
     to_line: Int
 }}
 
-{:create flow_event {
-    file_path: String,
-    event_id: Int
+{:create flow_blob {
+    file_path: String
     =>
-    func_id: String,
-    func_name: String,
-    func_start: Int,
-    role: String,
-    var: String,
-    access_path: String,
-    block: Int,
-    start_byte: Int,
-    end_byte: Int,
-    start_line: Int,
-    start_col: Int,
-    end_line: Int,
-    end_col: Int,
-    ordinal: Int,
-    call_id: Int default -1,
-    arg_index: Int default -1,
-    arg_name: String default "",
-    text: String default ""
-}}
-
-{:create flow_edge {
-    file_path: String,
-    from_event: Int,
-    to_event: Int,
-    edge_kind: String
+    payload: Bytes
 }}
 
 {:create def_use {
@@ -720,32 +695,67 @@ class FactGraph:
         """Add a control flow edge fact."""
         self.add_cfg_edges_batch([fact])
 
+    # Flow occurrences and edges are stored as one compact value per file
+    # (``flow_blob``).  A project has millions of them and nothing joins on
+    # them, so a stored row each made them over half of the database.
+
+    def _flow_blobs(self, file_path: str | None = None) -> list[tuple[str, bytes]]:
+        """Return ``(file_path, payload)`` for one file, or for every file."""
+        if file_path is None:
+            rows = self._client.run(
+                "?[file_path, payload] := *flow_blob[file_path, payload]"
+            )["rows"]
+        else:
+            rows = self._client.run(
+                "?[file_path, payload] := *flow_blob[file_path, payload], "
+                "file_path == $file_path",
+                {"file_path": file_path},
+            )["rows"]
+        return [(row[0], row[1]) for row in rows]
+
+    def _merge_flow_facts(
+        self,
+        events: dict[str, list[tuple]],
+        edges: dict[str, list[tuple]],
+    ) -> None:
+        """Add facts to each named file's stored value, keyed like relations.
+
+        An event replaces the stored event with the same id; an edge that is
+        already stored is not repeated.
+        """
+        from emend import emend_core
+
+        rows = []
+        for file_path in sorted(events.keys() | edges.keys()):
+            stored_events: list[tuple] = []
+            stored_edges: list[tuple] = []
+            for _path, payload in self._flow_blobs(file_path):
+                stored_events = emend_core.decode_flow_events(payload)
+                stored_edges = emend_core.decode_flow_edges(payload)
+            rows.append([file_path, emend_core.encode_flow_facts(
+                [*stored_events, *events.get(file_path, ())],
+                [*stored_edges, *edges.get(file_path, ())],
+            )])
+        if rows:
+            self._put_batch(
+                "flow_blob", "file_path, payload", "file_path => payload", rows,
+            )
+
     def add_flow_event(self, fact: FlowEventFact) -> None:
         """Add one value-flow occurrence fact."""
         self.add_flow_events_batch([fact])
 
     def add_flow_events_batch(self, facts: list[FlowEventFact]) -> None:
         """Bulk-insert value-flow occurrence facts."""
-        if not facts:
-            return
-        rows = [[
-            f.file_path, f.event_id, f.func_id, f.func_name, f.func_start,
-            f.role, f.var or "", f.access_path or "", f.block, f.start_byte, f.end_byte,
-            f.start_line, f.start_col, f.end_line, f.end_col,
-            f.ordinal, -1 if f.call_id is None else f.call_id,
-            -1 if f.arg_index is None else f.arg_index,
-            f.arg_name or "", f.text,
-        ] for f in facts]
-        self._put_batch(
-            "flow_event",
-            "file_path, event_id, func_id, func_name, func_start, role, var, access_path, "
-            "block, start_byte, end_byte, start_line, start_col, end_line, "
-            "end_col, ordinal, call_id, arg_index, arg_name, text",
-            "file_path, event_id => func_id, func_name, func_start, role, var, access_path, "
-            "block, start_byte, end_byte, start_line, start_col, end_line, "
-            "end_col, ordinal, call_id, arg_index, arg_name, text",
-            rows,
-        )
+        events: dict[str, list[tuple]] = {}
+        for f in facts:
+            events.setdefault(f.file_path, []).append((
+                f.event_id, f.func_id, f.func_name, f.func_start, f.role,
+                f.var, f.access_path, f.block, f.start_byte, f.end_byte,
+                f.start_line, f.start_col, f.end_line, f.end_col, f.ordinal,
+                f.call_id, f.arg_index, f.arg_name, f.text,
+            ))
+        self._merge_flow_facts(events, {})
 
     def add_flow_edge(self, fact: FlowEdgeFact) -> None:
         """Add one directed value-flow edge fact."""
@@ -754,18 +764,15 @@ class FactGraph:
     def add_flow_edges_batch(self, facts: list[FlowEdgeFact]) -> None:
         """Bulk-insert value-flow edges.
 
-        ``edge_kind`` is intentionally part of the Cozo key: two occurrences
-        can have more than one semantic relationship between them.
+        ``edge_kind`` is part of an edge's identity: two occurrences can have
+        more than one semantic relationship between them.
         """
-        if not facts:
-            return
-        rows = [[f.file_path, f.from_event, f.to_event, f.edge_kind] for f in facts]
-        self._put_batch(
-            "flow_edge",
-            "file_path, from_event, to_event, edge_kind",
-            "file_path, from_event, to_event, edge_kind",
-            rows,
-        )
+        edges: dict[str, list[tuple]] = {}
+        for f in facts:
+            edges.setdefault(f.file_path, []).append(
+                (f.from_event, f.to_event, f.edge_kind)
+            )
+        self._merge_flow_facts({}, edges)
 
     def add_def_use(self, fact: DefUseFact) -> None:
         """Add a definition-use fact."""
@@ -1260,60 +1267,34 @@ class FactGraph:
         func_id: str | None = None,
         role: str | None = None,
     ) -> list[FlowEventFact]:
-        """Query occurrence/value events with optional narrow filters."""
-        clauses = [
-            "*flow_event[fp, eid, fid, fn, fs, role, var, ap, block, sb, eb, "
-            "sl, sc, el, ec, ord, cid, ai, an, text]"
-        ]
-        params: dict[str, Any] = {}
-        if file_path is not None:
-            clauses.append("fp == $file_path")
-            params["file_path"] = file_path
-        if func_id is not None:
-            clauses.append("fid == $func_id")
-            params["func_id"] = func_id
-        if role is not None:
-            clauses.append("role == $role")
-            params["role"] = role
-        result = self._client.run(
-            "?[fp, eid, fid, fn, fs, role, var, ap, block, sb, eb, sl, sc, el, ec, ord, cid, ai, an, text] := "
-            + ", ".join(clauses), params
-        )
-        return [
-            FlowEventFact(
-                file_path=r[0], event_id=r[1], func_id=r[2], func_name=r[3],
-                func_start=r[4], role=r[5], var=r[6] or None, access_path=r[7] or None,
-                block=r[8], start_byte=r[9], end_byte=r[10], start_line=r[11],
-                start_col=r[12], end_line=r[13], end_col=r[14], ordinal=r[15],
-                call_id=None if r[16] == -1 else r[16],
-                arg_index=None if r[17] == -1 else r[17],
-                arg_name=r[18] or None,
-                text=r[19],
-            )
-            for r in result["rows"]
-        ]
+        """Return occurrence/value events, ordered by file and event id."""
+        from emend import emend_core
+
+        facts: list[FlowEventFact] = []
+        for path, payload in self._flow_blobs(file_path):
+            events = emend_core.decode_flow_events(payload)
+            if func_id is not None:
+                events = [event for event in events if event[1] == func_id]
+            if role is not None:
+                events = [event for event in events if event[4] == role]
+            facts.extend(FlowEventFact(path, *event) for event in events)
+        return facts
 
     def flow_edges(
         self,
         file_path: str | None = None,
         edge_kind: str | None = None,
     ) -> list[FlowEdgeFact]:
-        """Query occurrence/value edges with optional filters."""
-        clauses = ["*flow_edge[fp, fr, to, kind]"]
-        params: dict[str, Any] = {}
-        if file_path is not None:
-            clauses.append("fp == $file_path")
-            params["file_path"] = file_path
-        if edge_kind is not None:
-            clauses.append("kind == $edge_kind")
-            params["edge_kind"] = edge_kind
-        result = self._client.run(
-            "?[fp, fr, to, kind] := " + ", ".join(clauses), params
-        )
-        return [
-            FlowEdgeFact(file_path=r[0], from_event=r[1], to_event=r[2], edge_kind=r[3])
-            for r in result["rows"]
-        ]
+        """Return occurrence/value edges, ordered by file and endpoints."""
+        from emend import emend_core
+
+        facts: list[FlowEdgeFact] = []
+        for path, payload in self._flow_blobs(file_path):
+            edges = emend_core.decode_flow_edges(payload)
+            if edge_kind is not None:
+                edges = [edge for edge in edges if edge[2] == edge_kind]
+            facts.extend(FlowEdgeFact(path, *edge) for edge in edges)
+        return facts
 
     def def_uses(
         self,
@@ -2123,8 +2104,8 @@ class FactGraph:
             self._all_entry_point_decorators,
             self._all_entry_point_names,
             self._all_exported_symbols,
-            self._all_flow_events,
-            self._all_flow_edges,
+            self.flow_events,
+            self.flow_edges,
             self._all_file_namespaces,
         ]
 
@@ -2193,32 +2174,6 @@ class FactGraph:
             lambda r: CfgEdgeFact(
                 file_path=r[0], func_qn=r[1], from_block=r[2],
                 to_block=r[3], edge_kind=r[4], from_line=r[5], to_line=r[6],
-            ),
-        )
-
-    def _all_flow_events(self) -> list[FlowEventFact]:
-        return self._query_all(
-            "flow_event",
-            "fp, eid, fid, fn, fs, role, var, ap, block, sb, eb, sl, sc, el, ec, ord, cid, ai, an, text",
-            lambda r: FlowEventFact(
-                file_path=r[0], event_id=r[1], func_id=r[2], func_name=r[3],
-                func_start=r[4], role=r[5], var=r[6] or None, access_path=r[7] or None,
-                block=r[8], start_byte=r[9], end_byte=r[10], start_line=r[11],
-                start_col=r[12], end_line=r[13], end_col=r[14], ordinal=r[15],
-                call_id=None if r[16] == -1 else r[16],
-                arg_index=None if r[17] == -1 else r[17],
-                arg_name=r[18] or None,
-                text=r[19],
-            ),
-            relation_cols="fp, eid, fid, fn, fs, role, var, ap, block, sb, eb, sl, sc, el, ec, ord, cid, ai, an, text",
-        )
-
-    def _all_flow_edges(self) -> list[FlowEdgeFact]:
-        return self._query_all(
-            "flow_edge",
-            "fp, fr, to, kind",
-            lambda r: FlowEdgeFact(
-                file_path=r[0], from_event=r[1], to_event=r[2], edge_kind=r[3]
             ),
         )
 
@@ -2309,6 +2264,8 @@ class FactGraph:
     def from_json(cls, json_str: str) -> FactGraph:
         """Deserialize a fact graph from a JSON string."""
         graph = cls()
+        flow_events: list[FlowEventFact] = []
+        flow_edges: list[FlowEdgeFact] = []
         _TYPE_MAP: dict[str, tuple[type, Callable[..., None]]] = {
             "SymbolFact": (SymbolFact, graph.add_symbol),
             "CallFact": (CallFact, graph.add_call),
@@ -2317,8 +2274,8 @@ class FactGraph:
             "TypeFact": (TypeFact, graph.add_type),
             "ImportFact": (ImportFact, graph.add_import),
             "CfgEdgeFact": (CfgEdgeFact, graph.add_cfg_edge),
-            "FlowEventFact": (FlowEventFact, graph.add_flow_event),
-            "FlowEdgeFact": (FlowEdgeFact, graph.add_flow_edge),
+            "FlowEventFact": (FlowEventFact, flow_events.append),
+            "FlowEdgeFact": (FlowEdgeFact, flow_edges.append),
             "DefUseFact": (DefUseFact, graph.add_def_use),
             "MethodCallFact": (MethodCallFact, graph.add_method_call),
             "CfgBlockFact": (CfgBlockFact, graph.add_cfg_block),
@@ -2340,6 +2297,8 @@ class FactGraph:
             if type_name == "ExportedSymbolFact":
                 entry.setdefault("file_path", "")
             adder(fact_cls(**entry))
+        graph.add_flow_events_batch(flow_events)
+        graph.add_flow_edges_batch(flow_edges)
         return graph
 
     # -- Incremental update / removal -------------------------------------
@@ -2407,14 +2366,9 @@ class FactGraph:
             "*cfg_edge[file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line], "
             "file_path in $fps  :rm cfg_edge "
             "{file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line}",
-            # flow_event/flow_edge are file-owned occurrence relations.
-            "?[file_path, event_id] := "
-            "*flow_event[file_path, event_id, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _], "
-            "file_path in $fps  :rm flow_event {file_path, event_id => }",
-            "?[file_path, from_event, to_event, edge_kind] := "
-            "*flow_edge[file_path, from_event, to_event, edge_kind], "
-            "file_path in $fps  :rm flow_edge "
-            "{file_path, from_event, to_event, edge_kind}",
+            # One stored value holds all of a file's flow occurrences.
+            "?[file_path] := *flow_blob[file_path, _], "
+            "file_path in $fps  :rm flow_blob {file_path => }",
             # def_use
             "?[file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line] := "
             "*def_use[file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line, _, _], "
@@ -2492,15 +2446,7 @@ class FactGraph:
             "calls_by_file": ("call_by_file", "file_path, caller_qn, callee_qn, line, col, func_qn, block_id", "file_path, caller_qn, callee_qn, line, col => func_qn, block_id"),
             "cfg_blocks": ("cfg_block", "file_path, func_qn, block_id, is_entry, is_exit", "file_path, func_qn, block_id => is_entry, is_exit"),
             "cfg_edges": ("cfg_edge", "file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line", "file_path, func_qn, from_block, to_block, edge_kind, from_line, to_line"),
-            "flow_events": (
-                "flow_event",
-                "file_path, event_id, func_id, func_name, func_start, role, var, access_path, block, start_byte, end_byte, start_line, start_col, end_line, end_col, ordinal, call_id, arg_index, arg_name, text",
-                "file_path, event_id => func_id, func_name, func_start, role, var, access_path, block, start_byte, end_byte, start_line, start_col, end_line, end_col, ordinal, call_id, arg_index, arg_name, text",
-            ),
-            "flow_edges": (
-                "flow_edge", "file_path, from_event, to_event, edge_kind",
-                "file_path, from_event, to_event, edge_kind",
-            ),
+            "flow_blob": ("flow_blob", "file_path, payload", "file_path => payload"),
             "def_uses": ("def_use", "file_path, func_qn, var_name, kind, def_block, use_block, def_line, def_col, use_line, use_col", "file_path, func_qn, var_name, kind, def_block, use_block, def_line, use_line => def_col, use_col"),
             "method_calls": ("method_call", "file_path, func_qn, receiver, method, block_id, line", "file_path, func_qn, receiver, method, block_id, line"),
             "source_locs": ("source_loc", "file_path, loc_kind, loc_id, line, col, end_line, rel_line", "file_path, loc_kind, loc_id => line, col, end_line, rel_line"),

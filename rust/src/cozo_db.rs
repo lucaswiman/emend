@@ -5,8 +5,7 @@
 
 use cozo::*;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
-use serde_json::Value as JsonValue;
+use pyo3::types::{PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use std::collections::BTreeMap;
 
 /// A CozoDB database instance exposed to Python.
@@ -17,52 +16,30 @@ pub struct PyCozoDb {
     db: DbInstance,
 }
 
-fn json_value_to_py(py: Python<'_>, val: &JsonValue) -> Py<PyAny> {
-    match val {
-        JsonValue::Null => py.None(),
-        JsonValue::Bool(b) => b.into_pyobject(py).unwrap().to_owned().into_any().unbind(),
-        JsonValue::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                i.into_pyobject(py).unwrap().into_any().unbind()
-            } else if let Some(f) = n.as_f64() {
-                f.into_pyobject(py).unwrap().into_any().unbind()
+/// Convert one stored value directly to its Python form.
+fn datavalue_to_py(py: Python<'_>, value: &DataValue) -> PyResult<Py<PyAny>> {
+    Ok(match value {
+        DataValue::Null => py.None(),
+        DataValue::Bool(flag) => flag.into_pyobject(py)?.to_owned().into_any().unbind(),
+        DataValue::Num(Num::Int(number)) => number.into_pyobject(py)?.into_any().unbind(),
+        DataValue::Num(Num::Float(number)) => {
+            if number.is_finite() {
+                number.into_pyobject(py)?.into_any().unbind()
             } else {
                 py.None()
             }
         }
-        JsonValue::String(s) => s.into_pyobject(py).unwrap().into_any().unbind(),
-        JsonValue::Array(arr) => {
-            let items: Vec<Py<PyAny>> = arr.iter().map(|v| json_value_to_py(py, v)).collect();
-            PyList::new(py, &items).unwrap().into_any().unbind()
+        DataValue::Str(text) => text.as_str().into_pyobject(py)?.into_any().unbind(),
+        DataValue::Bytes(bytes) => PyBytes::new(py, bytes).into_any().unbind(),
+        DataValue::List(items) => {
+            let converted = items
+                .iter()
+                .map(|item| datavalue_to_py(py, item))
+                .collect::<PyResult<Vec<_>>>()?;
+            PyList::new(py, &converted)?.into_any().unbind()
         }
-        JsonValue::Object(obj) => {
-            let dict = PyDict::new(py);
-            for (k, v) in obj {
-                dict.set_item(k, json_value_to_py(py, v)).unwrap();
-            }
-            dict.into_any().unbind()
-        }
-    }
-}
-
-fn datavalue_to_json(val: &DataValue) -> JsonValue {
-    match val {
-        DataValue::Null => JsonValue::Null,
-        DataValue::Bool(b) => JsonValue::Bool(*b),
-        DataValue::Num(n) => match n {
-            Num::Int(i) => JsonValue::Number((*i).into()),
-            Num::Float(f) => {
-                if let Some(n) = serde_json::Number::from_f64(*f) {
-                    JsonValue::Number(n)
-                } else {
-                    JsonValue::Null
-                }
-            }
-        },
-        DataValue::Str(s) => JsonValue::String(s.to_string()),
-        DataValue::List(arr) => JsonValue::Array(arr.iter().map(datavalue_to_json).collect()),
-        _ => JsonValue::String(format!("{:?}", val)),
-    }
+        other => format!("{:?}", other).into_pyobject(py)?.into_any().unbind(),
+    })
 }
 
 fn py_to_datavalue(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<DataValue> {
@@ -79,6 +56,9 @@ fn py_to_datavalue(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<DataValue> {
     }
     if obj.is_exact_instance_of::<PyFloat>() {
         return Ok(DataValue::from(obj.extract::<f64>()?));
+    }
+    if let Ok(bytes) = obj.cast_exact::<PyBytes>() {
+        return Ok(DataValue::Bytes(bytes.as_bytes().to_vec()));
     }
     if obj.is_exact_instance_of::<PyList>() {
         return Ok(DataValue::List(
@@ -135,13 +115,13 @@ fn named_rows_to_py(py: Python<'_>, result: NamedRows) -> PyResult<Py<PyAny>> {
         .rows
         .iter()
         .map(|row| {
-            let py_row: Vec<Py<PyAny>> = row
+            let py_row = row
                 .iter()
-                .map(|value| json_value_to_py(py, &datavalue_to_json(value)))
-                .collect();
-            PyList::new(py, &py_row).unwrap().into_any().unbind()
+                .map(|value| datavalue_to_py(py, value))
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok(PyList::new(py, &py_row)?.into_any().unbind())
         })
-        .collect();
+        .collect::<PyResult<_>>()?;
     dict.set_item("rows", rows)?;
     dict.set_item("next", py.None())?;
     Ok(dict.into_any().unbind())
