@@ -270,22 +270,6 @@ pub struct FileScope {
     pub references: Vec<Reference>,
     /// All QN strings mentioned in this file (for pre-filter index).
     pub all_qnames: Vec<String>,
-    /// Some name here was resolved against the resolver's module, project
-    /// or crate root, so a resolver with other roots would name it otherwise.
-    pub root_dependent: bool,
-}
-
-/// The names one file mentions, gathered while its references are resolved.
-#[derive(Default)]
-struct MentionedNames {
-    names: std::collections::HashSet<String>,
-    root_dependent: bool,
-}
-
-impl MentionedNames {
-    fn insert(&mut self, name: String) -> bool {
-        self.names.insert(name)
-    }
 }
 
 /// An import binding.
@@ -1291,8 +1275,6 @@ struct BuildContext<'a> {
     crate_root: Option<String>,
     module_root: PathBuf,
     project_root: PathBuf,
-    /// An import was resolved against the module or project root.
-    root_dependent: bool,
 }
 
 impl<'a> BuildContext<'a> {
@@ -1314,7 +1296,6 @@ impl<'a> BuildContext<'a> {
             crate_root,
             module_root,
             project_root,
-            root_dependent: false,
         }
     }
 
@@ -1402,12 +1383,10 @@ impl<'a> BuildContext<'a> {
                 owner.push_str(&name);
             }
         }
-        let under_root = canonical_node_import(
+        canonical_binding.module_path = canonical_node_import(
             &canonical_binding.module_path, self.file_path,
             &self.module_root, &self.project_root, &self.module_separator,
-        );
-        self.root_dependent |= under_root.is_some();
-        canonical_binding.module_path = under_root.unwrap_or_else(|| canonical_import_module(
+        ).unwrap_or_else(|| canonical_import_module(
             &canonical_binding.module_path, &owner, &self.module_separator,
             &self.resolution, self.crate_root.as_deref(), false,
         ));
@@ -1793,14 +1772,10 @@ impl ScopeResolver {
         }
 
         // Second pass: resolve all identifier/attribute references to QNs.
-        let (references, mentioned) = self.collect_file_references(
+        let (references, all_qnames) = self.collect_file_references(
             tree, path, source, &module_path, &ctx.scopes, &ctx.scope_index,
             &ctx.scoped_imports,
         );
-        let root_dependent = ctx.root_dependent
-            || mentioned.root_dependent
-            || self.root_module_file.is_some();
-        let all_qnames: Vec<String> = mentioned.names.into_iter().collect();
 
         FileScope {
             content_hash,
@@ -1811,7 +1786,6 @@ impl ScopeResolver {
             definitions: ctx.definitions,
             references,
             all_qnames,
-            root_dependent,
         }
     }
 
@@ -1846,11 +1820,12 @@ impl ScopeResolver {
         scopes: &[Scope],
         scope_index: &HashMap<ScopeId, usize>,
         imports: &[ScopedImportBinding],
-    ) -> (Vec<Reference>, MentionedNames) {
+    ) -> (Vec<Reference>, Vec<String>) {
+        use std::collections::HashSet;
         let source_bytes = source.as_bytes();
 
         let mut refs = Vec::new();
-        let mut qn_set = MentionedNames::default();
+        let mut qn_set = HashSet::new();
         let mut method_targets = MethodTargets::new();
         for scope in scopes {
             if let (Some(owner), Some(parent)) = (&scope.owner_name, scope.parent) {
@@ -1877,7 +1852,8 @@ impl ScopeResolver {
             &mut refs, &mut qn_set,
         );
 
-        (refs, qn_set)
+        let all_qnames: Vec<String> = qn_set.into_iter().collect();
+        (refs, all_qnames)
     }
 
     /// Recursively walk tree-sitter nodes to collect references.
@@ -1895,7 +1871,7 @@ impl ScopeResolver {
         in_import: bool,
         in_annotation: bool,
         refs: &mut Vec<Reference>,
-        qn_set: &mut MentionedNames,
+        qn_set: &mut std::collections::HashSet<String>,
     ) {
         let node = cursor.node();
         let node_kind = node.kind();
@@ -1937,13 +1913,10 @@ impl ScopeResolver {
                 node.child_by_field_name("source"), find_star(node),
             ) {
                 let raw_source = node_text(source_node, source);
-                let under_root = canonical_node_import(
+                let imported = canonical_node_import(
                     raw_source, file_path, &self.module_root, &self.project_root,
                     &self.config.qualified_names.module_separator,
-                );
-                qn_set.root_dependent |= under_root.is_some();
-                let imported = under_root
-                    .unwrap_or_else(|| raw_source.trim_matches(['\'', '"']).to_string());
+                ).unwrap_or_else(|| raw_source.trim_matches(['\'', '"']).to_string());
                 qn_set.insert(imported.clone());
                 refs.push(Reference {
                     file: file_path.to_path_buf(),
@@ -2066,8 +2039,6 @@ impl ScopeResolver {
         }
 
         // Identifier and aggregate-path references differ only in resolution.
-        // `record_reference` holds the name set until its last call below.
-        let resolved_under_root = std::cell::Cell::new(false);
         let mut record_reference = |lexical_qn: String, target: Option<(String, Option<String>)>, kind: Option<ReferenceKind>| {
             let resolved = target.is_some();
             let (qn, import_binding_id) = target.unwrap_or_else(|| (lexical_qn.clone(), None));
@@ -2119,12 +2090,10 @@ impl ScopeResolver {
                             owner.push_str("index");
                         }
                         let raw_source = node_text(source_node, source);
-                        let under_root = canonical_node_import(
+                        let imported = canonical_node_import(
                             raw_source, file_path, &self.module_root, &self.project_root,
                             &self.config.qualified_names.module_separator,
-                        );
-                        if under_root.is_some() { resolved_under_root.set(true); }
-                        let imported = under_root.unwrap_or_else(|| canonical_import_module(
+                        ).unwrap_or_else(|| canonical_import_module(
                             raw_source, &owner,
                             &self.config.qualified_names.module_separator,
                             &self.config.imports.resolution, None, false,
@@ -2247,8 +2216,6 @@ impl ScopeResolver {
                 record_reference(full_name, resolved, None);
             }
         }
-
-        qn_set.root_dependent |= resolved_under_root.get();
 
         // Recurse into children.
         if cursor.goto_first_child() {

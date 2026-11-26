@@ -1280,9 +1280,10 @@ def test_cold_index_takes_symbols_and_names_from_the_fact_pass(tmp_path, monkeyp
     ]
 
 
-def test_names_resolved_against_a_root_come_from_the_scope_resolver(tmp_path, monkeypatch):
-    """A relative path import is named after the project root.  Fact extraction
-    has no root, so its name for the import must not reach the search index."""
+def test_relative_path_imports_are_named_once_for_facts_and_search(tmp_path, monkeypatch):
+    """A relative path import is named against the module root.  Fact
+    extraction is given that root, so its names are the scope resolver's and
+    the file is not analysed a second time for them."""
     from emend.transform import warm_caches
 
     project = make_project_dir(tmp_path)
@@ -1291,15 +1292,20 @@ def test_names_resolved_against_a_root_come_from_the_scope_resolver(tmp_path, mo
     (project / "src" / "view.ts").write_text(
         "import { run } from './helpers';\nexport function show(): void { run(); }\n"
     )
+    (project / "src" / "index.ts").write_text(
+        "export * from './helpers';\nexport { show } from './view';\n"
+    )
     indexed = _record_scope_indexing(monkeypatch)
     warm_caches(str(project), type_engine=None, language=None)
 
-    # ``helpers.ts`` imports nothing, so its names needed no second look.
-    assert indexed == ["view.ts"]
+    # Only ``index.ts`` goes back to the scope resolver: it names an index
+    # file's module after its directory, the fact snapshot after the file.
+    assert indexed == ["index.ts"]
     names = _mentioned_names(project / ".emend" / "cache" / "parse.db")
-    view = names[str(project / "src" / "view.ts")]
-    assert "helpers/run" in view
-    assert not [name for name in view if tmp_path.name in name]
+    assert "helpers/run" in names[str(project / "src" / "view.ts")]
+    assert {"helpers", "view/show"} <= set(names[str(project / "src" / "index.ts")])
+    assert not [name for file_names in names.values() for name in file_names
+                if tmp_path.name in name]
 
 
 def test_search_index_is_rebuilt_when_facts_are_already_current(tmp_path):

@@ -250,11 +250,12 @@ worker caches a file's search projections:
 
 A file whose facts are extracted in the same pass is parsed once: fact
 extraction (``emend_core.extract_file_fact_rows``) returns its symbol rows and
-its mentioned names along with its facts.  The names are used only when they
-are provably what the configured ``PyScopeResolver`` would give.  Facts are
-extracted without the project's roots, so a file in which a name was resolved
-against a root (a relative path import in JavaScript or TypeScript, a crate
-root in Rust), or whose module name differs, is given to the scope resolver.
+its mentioned names along with its facts.  Extraction is given the project
+and module roots, so a relative path import (``./helpers``) is named there as
+the configured ``PyScopeResolver`` names it.  The names are still used only
+when the rest agrees: a file under a Rust crate root (facts are extracted
+without one; the linker resolves ``crate::`` paths), or whose module the two
+name differently (an ``index`` file), is given to the scope resolver.
 A file whose facts are already stored is parsed for both
 (``PyScopeResolver``, ``emend_core.collect_symbols_from_str()``).
 

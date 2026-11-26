@@ -252,9 +252,10 @@ def _index_batch_rows(
                     str(root_module) if root_module else None,
                 )
             scope_resolver = scope_resolvers[resolver_key]
-            # Fact extraction resolves the same scopes without the project's
-            # roots.  Its names are this resolver's exactly when no root took
-            # part: no crate root here, none used there, and one module name.
+            # Fact extraction resolves the same scopes against the same
+            # project and module roots.  Its names are this resolver's when
+            # the rest agrees too: no crate root here (facts are extracted
+            # without one) and the same module name.
             if (
                 shared is not None
                 and shared.search_qnames is not None

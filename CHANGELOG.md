@@ -54,6 +54,22 @@
   search index had the slash-separated module path (`util/run`). The first
   such lookup after an index reads the name dictionary into memory.
 - The incomplete-pattern fallback now reports when its results were truncated.
+- JavaScript and TypeScript re-exports (`export * from './x'`,
+  `export { a } from './x'`) are stored under the module's name. They were
+  stored under a name built from the absolute path of the checkout, so a
+  barrel file was missing from the references of what it re-exports. The fact
+  database is rebuilt once after upgrading.
+- `analyze deadcode` is about three times faster on a large project (Django:
+  104 s to 35 s). It made a database query per file and per symbol, and ran
+  its analysis for languages with no symbols.
+- Faster repeated queries. Embedded SQL, Jinja and GraphQL detection parses
+  each file once instead of seven times, the project scan asks the file system
+  about each directory once, and updating facts after an edit copies the
+  database as a file and removes the edited file's rows by file (Django: a
+  warm `analyze refs` 2.7 s to 1.4 s; the first query after an edit 4.3 s to
+  1.6 s).
+- A freshly built `facts.db` is compacted before it is published (Django:
+  407 MB to 367 MB).
 
 ## 0.5.6
 

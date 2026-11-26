@@ -75,9 +75,8 @@ class ExtractedFile:
     # What the editor's search index keeps about the file, read from the same
     # parse.  Neither is a fact.  ``search_symbols`` rows are ``(name, dotted
     # path, kind, line, end line, depth, enclosing class, bases, signature,
-    # return type)``.  ``search_qnames`` is every name the file mentions, or
-    # ``None`` when one was resolved against a root: facts are extracted
-    # without the project's roots, so only the configured resolver names it.
+    # return type)``.  ``search_qnames`` is every name the file mentions;
+    # ``None`` means they were not collected.
     search_symbols: tuple[tuple, ...] = ()
     search_qnames: tuple[str, ...] | None = None
 

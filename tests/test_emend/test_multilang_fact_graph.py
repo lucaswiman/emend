@@ -458,3 +458,33 @@ def test_typescript_namespace_alias_and_same_line_callers(tmp_path):
         ("mod.b", "dep.bar", "mod.b"),
         ("mod", "dep.baz", ""),
     }
+
+
+def test_reexports_are_named_under_the_module_root_not_the_checkout(tmp_path):
+    """``export ... from './x'`` names its source like any other reference to
+    it, so a barrel file is found among a symbol's references."""
+    from emend.analysis_store import AnalysisStore
+
+    project = tmp_path / "checkout-dir"
+    (project / "src").mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\nname = 'barrel'\n")
+    (project / "src" / "helpers.ts").write_text("export function run(): void {}\n")
+    (project / "src" / "view.ts").write_text(
+        "import { run } from './helpers';\nexport function show(): void { run(); }\n"
+    )
+    (project / "src" / "index.ts").write_text(
+        "export * from './helpers';\nexport { show } from './view';\n"
+    )
+    store = AnalysisStore.open(project)
+    try:
+        graph = store.query_facts()
+        show = graph.reference_locations("view.show")
+        helpers = graph.reference_locations("helpers", ref_kind="wildcard_reexport")
+        leaked = graph.referenced_names_containing("checkout-dir", limit=10)
+    finally:
+        store.close()
+
+    assert ("src/index.ts", 2, 9, "reexport") in show
+    assert ("src/view.ts", 2, 16, "definition") in show
+    assert [location[0] for location in helpers] == ["src/index.ts"]
+    assert leaked == []
