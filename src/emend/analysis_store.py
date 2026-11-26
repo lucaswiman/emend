@@ -21,7 +21,7 @@ import threading
 import time
 import weakref
 import zlib
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 
 from emend import cache_codec
 from emend.analysis_snapshot import AnalysisSnapshot, ExtractedFile, FileRevision, TypeFact
@@ -102,6 +102,22 @@ def _close_live_stores() -> None:
 
 
 atexit.register(_close_live_stores)
+
+
+def _canonical_paths(paths: Iterable[str]) -> Iterator[str]:
+    """Resolve every path, resolving each directory once.
+
+    Resolving a path asks the file system about every directory level, so
+    doing it per file repeats the same questions for a whole directory.
+    """
+    directories: dict[str, str] = {}
+    for path in paths:
+        directory, name = os.path.split(os.path.abspath(path))
+        resolved = directories.get(directory)
+        if resolved is None:
+            resolved = directories[directory] = os.path.realpath(directory)
+        candidate = os.path.join(resolved, name)
+        yield os.path.realpath(candidate) if os.path.islink(candidate) else candidate
 
 
 def collect_symbol_info(filepath: Path, source: str) -> list[SymbolInfo]:
@@ -564,12 +580,9 @@ class AnalysisStore:
         }
         from emend.project_config import module_name_under_root, module_resolution_context
 
-        files = sorted(
-            str(Path(path).resolve())
-            for path in collect_all_source_files(
-                str(self.project_root), languages=list(registry[1]), registry=registry
-            )
-        )
+        files = sorted(_canonical_paths(collect_all_source_files(
+            str(self.project_root), languages=list(registry[1]), registry=registry
+        )))
         # Every path above is canonical and so is the project root; resolving
         # them again per file costs a system call per directory level.
         root = self.project_root.resolve()

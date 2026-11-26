@@ -1360,3 +1360,24 @@ def test_disk_type_engine_returns_empty_overlay_view(tmp_path, monkeypatch):
 
     assert typed.source_text(source) == "value = 'overlay'\n"
     assert typed.types_for("value") == []
+
+
+def test_scan_paths_are_resolved_like_path_resolve(tmp_path):
+    """Directories are resolved once each; the result is what resolving every
+    path would give, through directory and file symlinks alike."""
+    from emend.analysis_store import _canonical_paths
+
+    real = tmp_path / "real"
+    (real / "pkg").mkdir(parents=True)
+    (real / "pkg" / "a.py").write_text("A = 1\n")
+    (real / "pkg" / "b.py").write_text("B = 1\n")
+    (real / "pkg" / "alias.py").symlink_to(real / "pkg" / "a.py")
+    (tmp_path / "linked").symlink_to(real, target_is_directory=True)
+    paths = [
+        str(tmp_path / "linked" / "pkg" / "a.py"),
+        str(tmp_path / "linked" / "pkg" / "b.py"),
+        str(real / "pkg" / "alias.py"),
+        str(real / "pkg" / ".." / "pkg" / "b.py"),
+        str(real / "pkg" / "missing.py"),
+    ]
+    assert list(_canonical_paths(paths)) == [str(Path(path).resolve()) for path in paths]
