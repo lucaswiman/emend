@@ -839,8 +839,9 @@ class AnalysisStore:
 
         *needs_facts* names the revisions whose facts a consumer will store.
         Any other revision whose import list is already remembered is not
-        parsed: its ``extracted`` is ``None``.  ``prepare`` still runs for every
-        revision, on the worker that handles it.
+        parsed: its ``extracted`` is ``None``.  ``prepare(revision, content,
+        extracted)`` still runs for every revision, on the worker that handles
+        it and after that revision's parse, if it had one.
         """
         from emend.analysis_extraction import _extract_file_facts
 
@@ -882,12 +883,14 @@ class AnalysisStore:
 
         def handle(item):
             revision, stored_path, content = item
-            preparation = prepare(revision, content) if prepare is not None else None
             imports = known_imports.get(revision.file_path)
             extracted = None
             if imports is None:
                 extracted = _extract_file_facts(revision, stored_path, content)
                 imports = self._file_imports(extracted)
+            preparation = (
+                prepare(revision, content, extracted) if prepare is not None else None
+            )
             return revision, extracted, imports, preparation
 
         from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait

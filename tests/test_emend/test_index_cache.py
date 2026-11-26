@@ -65,7 +65,9 @@ def test_source_root_change_refreshes_editor_projection_without_content_edits(tm
             assert _ensure_index_fresh(str(tmp_path))
             assert batches.call_count == count
     assert batches.call_count == 2
-    symbols.assert_not_called()
+    # The cold build took its symbols from the fact pass, so the first refresh
+    # parses the file for them; the second finds that projection stored.
+    assert symbols.call_count == 1
 
 
 @pytest.mark.parametrize("failure", [None, "extraction", "writer"])
@@ -1104,3 +1106,211 @@ class TestCacheFootprintAfterIndexing:
 
         compact_cache_database(tmp_path / "absent.db")
         assert not (tmp_path / "absent.db").exists()
+
+
+# ---------------------------------------------------------------------------
+# Symbol rows come from the fact pass; the standalone collector is the fallback
+# ---------------------------------------------------------------------------
+
+SYMBOL_SAMPLES = {
+    "shapes.py": (
+        "import abc\n"
+        "\n"
+        "LIMIT = 3\n"
+        "\n"
+        "\n"
+        "class Shape(abc.ABC, object):\n"
+        "    sides: int = 0\n"
+        "\n"
+        "    @property\n"
+        "    def area(self) -> float:\n"
+        "        return 0.0\n"
+        "\n"
+        "    async def load(self, source: dict[str, int], *args, key=(1, 2), **kwargs) -> None:\n"
+        "        def inner(value):\n"
+        "            return value\n"
+        "        return inner(source)\n"
+        "\n"
+        "\n"
+        "def build(kind, size: int = 1):\n"
+        "    class Local:\n"
+        "        def method(self):\n"
+        "            pass\n"
+        "    return Local\n"
+        "\n"
+        "\n"
+        "def no_parameters():\n"
+        "    return LIMIT\n"
+    ),
+    "widgets.ts": (
+        "export interface Options { size: number }\n"
+        "export class Widget extends Base implements Options {\n"
+        "  size = 1;\n"
+        "  render(target: string, options?: Options): void {}\n"
+        "}\n"
+        "export function make(kind: string): Widget { return new Widget(); }\n"
+        "const helper = (a: number, b: number) => a + b;\n"
+    ),
+    # A relative path import is named after the project's roots, which fact
+    # extraction does not have: its names must come from the scope resolver.
+    "view.ts": (
+        "import { render } from './widgets';\n"
+        "export * from './shared';\n"
+        "export function show(target: string): void { render(target); }\n"
+    ),
+    "engine.rs": (
+        "pub struct Engine { power: u32 }\n"
+        "impl Engine {\n"
+        "    pub fn start(&self, key: &str) -> bool { true }\n"
+        "}\n"
+        "pub trait Runs { fn run(&mut self); }\n"
+        "pub fn build(power: u32) -> Engine { Engine { power } }\n"
+    ),
+}
+
+
+def _mentioned_names(db_path: Path) -> dict[str, list[str]]:
+    from emend import cache_codec
+
+    with sqlite3.connect(db_path) as conn:
+        return {
+            path: cache_codec.decode(names)
+            for path, names in conn.execute("SELECT file_path, names FROM qn_index")
+        }
+
+
+def _symbol_rows(db_path: Path) -> list[tuple]:
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute("SELECT * FROM symbol_index ORDER BY rowid").fetchall()
+
+
+@pytest.mark.parametrize("name", sorted(SYMBOL_SAMPLES))
+def test_fact_pass_search_rows_match_the_standalone_derivation(tmp_path, name):
+    """Both ways of deriving a file's symbols and names give the same rows."""
+    from emend.analysis_extraction import _extract_file_facts
+    from emend.analysis_store import AnalysisStore
+    from emend.transform import _index_batch
+
+    project = make_project_dir(tmp_path)
+    path = project / name
+    path.write_text(SYMBOL_SAMPLES[name])
+    store = AnalysisStore.open(project)
+    (revision,) = store.disk_snapshot().files
+    extracted = _extract_file_facts(revision, name, SYMBOL_SAMPLES[name])
+
+    standalone, shared = tmp_path / "standalone.db", tmp_path / "shared.db"
+    batch = [(str(path), SYMBOL_SAMPLES[name])]
+    _index_batch((str(standalone), str(project), batch))
+    _index_batch(
+        (str(shared), str(project), batch),
+        extracted={str(path): extracted},
+    )
+
+    rows = _symbol_rows(standalone)
+    assert rows
+    assert _symbol_rows(shared) == rows
+    names = _mentioned_names(standalone)
+    assert names[str(path)]
+    assert _mentioned_names(shared) == names
+
+
+def _record_scope_indexing(monkeypatch) -> list[str]:
+    """Return a list that receives each file the scope resolver is given."""
+    from emend import emend_core
+
+    indexed: list[str] = []
+    resolver = emend_core.PyScopeResolver
+
+    class Recording:
+        def __init__(self, *args):
+            self._resolver = resolver(*args)
+
+        def index_file(self, path, source):
+            indexed.append(Path(path).name)
+            return self._resolver.index_file(path, source)
+
+        def __getattr__(self, name):
+            return getattr(self._resolver, name)
+
+    monkeypatch.setattr(emend_core, "PyScopeResolver", Recording)
+    return indexed
+
+
+def test_cold_index_takes_symbols_and_names_from_the_fact_pass(tmp_path, monkeypatch):
+    """A cold build parses each file once, for its facts."""
+    import emend.analysis_store as analysis_store
+    from emend.transform import warm_caches
+
+    project = make_project_dir(tmp_path)
+    (project / "a.py").write_text(SOURCE)
+    (project / "b.py").write_text(
+        "from a import hello\n"
+        "\n"
+        "\n"
+        "class Thing:\n"
+        "    def go(self, speed):\n"
+        "        return hello()\n"
+    )
+
+    def collect(path, source):
+        raise AssertionError(f"symbols of {path.name} were collected a second time")
+
+    monkeypatch.setattr(analysis_store, "collect_symbol_info", collect)
+    indexed = _record_scope_indexing(monkeypatch)
+    warm_caches(str(project), type_engine=None)
+
+    assert indexed == []
+    names = _mentioned_names(project / ".emend" / "cache" / "parse.db")
+    assert set(names[str(project / "a.py")]) == {"a.hello"}
+    assert {"a.hello", "b.Thing", "b.Thing.go"} <= set(names[str(project / "b.py")])
+
+    with sqlite3.connect(project / ".emend" / "cache" / "parse.db") as conn:
+        rows = conn.execute(
+            "SELECT name, qualified_name, kind, parent, signature "
+            "FROM symbol_index ORDER BY qualified_name"
+        ).fetchall()
+    assert rows == [
+        ("Thing", "Thing", "class", None, None),
+        ("go", "Thing.go", "method", "Thing", "def go(self, speed)"),
+        ("hello", "hello", "function", None, None),
+    ]
+
+
+def test_names_resolved_against_a_root_come_from_the_scope_resolver(tmp_path, monkeypatch):
+    """A relative path import is named after the project root.  Fact extraction
+    has no root, so its name for the import must not reach the search index."""
+    from emend.transform import warm_caches
+
+    project = make_project_dir(tmp_path)
+    (project / "src").mkdir()
+    (project / "src" / "helpers.ts").write_text("export function run(): void {}\n")
+    (project / "src" / "view.ts").write_text(
+        "import { run } from './helpers';\nexport function show(): void { run(); }\n"
+    )
+    indexed = _record_scope_indexing(monkeypatch)
+    warm_caches(str(project), type_engine=None, language=None)
+
+    # ``helpers.ts`` imports nothing, so its names needed no second look.
+    assert indexed == ["view.ts"]
+    names = _mentioned_names(project / ".emend" / "cache" / "parse.db")
+    view = names[str(project / "src" / "view.ts")]
+    assert "helpers/run" in view
+    assert not [name for name in view if tmp_path.name in name]
+
+
+def test_search_index_is_rebuilt_when_facts_are_already_current(tmp_path):
+    """Facts that need no parse leave no symbols to share: the collector runs."""
+    from emend.transform import warm_caches
+
+    project = make_project_dir(tmp_path)
+    (project / "a.py").write_text(SOURCE)
+    warm_caches(str(project), type_engine=None)
+    db_path = project / ".emend" / "cache" / "parse.db"
+    before = _symbol_rows(db_path)
+    assert [row[1] for row in before] == ["hello"]
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{db_path}{suffix}").unlink(missing_ok=True)
+
+    warm_caches(str(project), type_engine=None)
+
+    assert _symbol_rows(db_path) == before

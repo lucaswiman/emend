@@ -45,4 +45,9 @@ def _extract_file_facts(
         revision=revision,
         qnames=frozenset(extracted["qnames"]),
         rows=extracted["rows"],
+        search_symbols=tuple(extracted["search_symbols"]),
+        search_qnames=(
+            None if extracted["search_qnames"] is None
+            else tuple(extracted["search_qnames"])
+        ),
     )
