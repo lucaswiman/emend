@@ -553,11 +553,9 @@ class TestTypeCacheWarming:
         # parsed once when its imports are first needed for a type identity.
         # Cold index: a.py and b.py.  Identity of the edited b.py: b.py.
         expected = ["a.py", "b.py", "b.py"]
-        if failure == "facts":
-            # The retry after the failed write stores every file's facts.
-            expected += ["a.py", "b.py"]
-        elif not overlay:
-            # The edit reached disk, so its facts are stored afterwards.
+        if failure != "facts" and not overlay:
+            # The edit reached disk, so its facts are stored afterwards.  A
+            # failing fact write stops before any further file is parsed.
             expected += ["b.py"]
         assert sorted(extracted) == sorted(str(proj / name) for name in expected)
 

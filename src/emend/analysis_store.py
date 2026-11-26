@@ -49,6 +49,8 @@ _UNOWNED_GENERATION_AGE = 3600
 # A generation from another host or container shares no process table with
 # this one, so only age can retire it.
 _FOREIGN_GENERATION_AGE = 7 * 24 * 3600
+# Files whose extracted facts are held in memory before they are stored.
+_EXTRACTION_BATCH_FILES = 32
 _LIVE_STORES: "weakref.WeakSet[AnalysisStore]" = weakref.WeakSet()
 _LIVE_STORES_LOCK = threading.Lock()
 
@@ -813,6 +815,20 @@ class AnalysisStore:
         ):
             yield extracted
 
+    def _extract_batches(
+        self, revisions: Iterable[FileRevision], contents: dict[str, str],
+    ) -> Iterable[list[ExtractedFile]]:
+        """Extract revisions a few files at a time.
+
+        A whole project's facts are several times larger in memory than in the
+        database, so a writer stores each batch before the next is parsed.
+        """
+        from itertools import islice
+
+        extracted = iter(self._extract_revisions(revisions, contents))
+        while batch := list(islice(extracted, _EXTRACTION_BATCH_FILES)):
+            yield batch
+
     def _prepare_revisions(
         self,
         revisions: Iterable[FileRevision],
@@ -1047,6 +1063,20 @@ class AnalysisStore:
         from emend.analysis_linking import ModuleCatalog, link_extracted_files
         from emend.fact_graph import FactGraph, prepare_cozo_storage
 
+        def module_inventory(revisions):
+            return {(r.file_path, r.language, r.module_name) for r in revisions}
+
+        # Import targets depend on the module inventory (for example TS index
+        # aliases), so a changed inventory relinks every file, as a changed
+        # analysis context does.  Nothing of the previous generation survives
+        # that: build a new one, which costs a fraction of deleting and
+        # re-inserting every row of a copy.  Ordinary body edits still replace
+        # only the edited file.
+        if previous is not None and (
+            previous.snapshot.analysis_context_id != snapshot.analysis_context_id
+            or module_inventory(previous.snapshot.files) != module_inventory(snapshot.files)
+        ):
+            previous = None
         if previous is None:
             path = self._temporary_db_path("facts-next-")
             graph = FactGraph()
@@ -1054,36 +1084,22 @@ class AnalysisStore:
         else:
             graph, path = self._clone_graph(Path(previous._db_path), snapshot)
             before = {revision.file_path: revision for revision in previous.snapshot.files}
-            if previous.snapshot.analysis_context_id != snapshot.analysis_context_id:
-                before = {}
         graph.bind_snapshot(snapshot)
         after = {revision.file_path: revision for revision in snapshot.files}
         changed = [revision for file_path, revision in after.items()
                    if before.get(file_path) != revision]
-        removed = ({revision.file_path for revision in previous.snapshot.files}
-                   if previous is not None else set()) - after.keys()
+        removed = before.keys() - after.keys()
         try:
             graph.clear_snapshot_marker()
             catalog = ModuleCatalog.from_revisions(snapshot.files)
-            # Import targets depend on module inventory (for example TS index
-            # aliases). Relink cached callers when that inventory changes;
-            # ordinary body edits still replace only the edited file.
-            def module_inventory(revisions):
-                return {(r.file_path, r.language, r.module_name) for r in revisions}
-
-            if module_inventory(before.values()) != module_inventory(snapshot.files):
-                changed = list(snapshot.files)
-            local = (extract or self._extract_revisions)(changed, contents)
+            batches = (extract or self._extract_batches)(changed, contents)
             stored_paths = [graph.stored_path(file_path)
                             for file_path in [*(r.file_path for r in changed), *removed]]
-            if extract is None:
-                graph.replace_extracted(link_extracted_files(local, catalog), stored_paths=stored_paths)
-            else:
-                # This private generation is invisible until publication. Stream
-                # file transactions into it; any failure discards the generation.
-                graph.replace_extracted([], stored_paths=stored_paths)
-                for batch in local:
-                    graph.replace_extracted(link_extracted_files(batch, catalog), stored_paths=[])
+            # This private generation is invisible until publication. Stream
+            # file transactions into it; any failure discards the generation.
+            graph.replace_extracted([], stored_paths=stored_paths)
+            for batch in batches:
+                graph.replace_extracted(link_extracted_files(batch, catalog), stored_paths=[])
             graph.publish_snapshot(snapshot)
             if previous is None:
                 # Bulk-save the cold build once; subsequent edits keep using

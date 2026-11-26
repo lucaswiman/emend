@@ -730,6 +730,31 @@ def test_reopened_store_refreshes_only_the_changed_revision(tmp_path, monkeypatc
     assert extracted == [str(first)]
 
 
+def test_cold_query_stores_facts_a_few_files_at_a_time(tmp_path, monkeypatch):
+    """A query on an unindexed project never holds every file's facts at once."""
+    from emend.fact_graph import FactGraph
+
+    for index in range(70):
+        (tmp_path / f"module_{index}.py").write_text(
+            f"def function_{index}():\n    return {index}\n"
+        )
+    sizes = []
+    replace = FactGraph.replace_extracted
+
+    def tracked(self, extracted_files, *, stored_paths):
+        sizes.append(len(extracted_files))
+        return replace(self, extracted_files, stored_paths=stored_paths)
+
+    monkeypatch.setattr(FactGraph, "replace_extracted", tracked)
+    store = AnalysisStore(tmp_path)
+    try:
+        assert len(store.query_facts().symbols()) == 70
+    finally:
+        store.close()
+    assert sum(sizes) == 70
+    assert max(sizes) <= 32
+
+
 def test_linked_worktrees_share_artifacts_but_not_facts(tmp_path, extracted_files):
     main, linked = _linked_worktrees(tmp_path)
     main, linked = main / "packages" / "pkg", linked / "packages" / "pkg"

@@ -369,3 +369,77 @@ def test_bulk_import_into_an_owned_graph_never_changes_the_published_generation(
     finally:
         store.close()
     assert _generations(tmp_path) == []
+
+
+def _interned_texts(graph) -> set[str]:
+    return {row[0] for row in graph.run_query("?[text] := *intern[text, _]")["rows"]}
+
+
+def _stored_facts(root: Path) -> dict:
+    store = AnalysisStore(root)
+    try:
+        return store.query_facts().to_json()
+    finally:
+        store.close()
+
+
+def test_changed_module_inventory_builds_a_fresh_generation(tmp_path):
+    """Adding or removing a module relinks every file, so nothing stored survives.
+
+    Deleting and re-inserting every row of the copied generation costs several
+    times more than building one, and leaves the removed files' names behind.
+    """
+    (tmp_path / "app.py").write_text(
+        "from extra import only_in_extra\n\ndef original():\n    return only_in_extra()\n"
+    )
+    (tmp_path / "extra.py").write_text(
+        "def only_in_extra():\n    return scratch_value()\n\n"
+        "def scratch_value():\n    return 1\n"
+    )
+    first = AnalysisStore(tmp_path)
+    try:
+        assert "extra.scratch_value" in _interned_texts(first.query_facts())
+    finally:
+        first.close()
+
+    (tmp_path / "extra.py").unlink()
+    second = AnalysisStore(tmp_path)
+    try:
+        graph = second.query_facts()
+        assert _names(graph) == ["original"]
+        assert "extra.scratch_value" not in _interned_texts(graph)
+        assert _generations(tmp_path) == [Path(graph._db_path).name]
+    finally:
+        second.close()
+    assert _generations(tmp_path) == []
+
+    # The generation is what a build from nothing stores.
+    updated = _stored_facts(tmp_path)
+    for name in ("facts.db", "analysis-artifacts.db", "parse.db"):
+        (tmp_path / ".emend" / "cache" / name).unlink(missing_ok=True)
+    assert _stored_facts(tmp_path) == updated
+
+
+def test_an_edit_keeps_the_rest_of_the_generation(tmp_path):
+    """A body edit replaces one file's rows in a copy of the generation."""
+    (tmp_path / "app.py").write_text("def original():\n    return 1\n")
+    (tmp_path / "other.py").write_text("def untouched():\n    return 2\n")
+    first = AnalysisStore(tmp_path)
+    try:
+        before = dict(first.query_facts().run_query(
+            "?[text, id] := *intern[text, id]", decode=False,
+        )["rows"])
+    finally:
+        first.close()
+
+    (tmp_path / "app.py").write_text("def original():\n    return 3\n\ndef added():\n    return 4\n")
+    second = AnalysisStore(tmp_path)
+    try:
+        graph = second.query_facts()
+        assert _names(graph) == ["added", "original", "untouched"]
+        after = dict(graph.run_query("?[text, id] := *intern[text, id]", decode=False)["rows"])
+    finally:
+        second.close()
+    # Texts the generation already held keep their ids.
+    assert before.items() <= after.items()
+    assert "app.added" in after
