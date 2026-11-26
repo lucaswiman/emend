@@ -1451,3 +1451,68 @@ class TestReferenceLookupForSearch:
     def test_reference_count(self):
         assert _reference_graph().reference_count() == 6
         assert FactGraph().reference_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# One read for many files: a query has a fixed cost, so a loop must not make one per file
+# ---------------------------------------------------------------------------
+
+
+class _CountingClient:
+    """Count the scripts a graph runs."""
+
+    def __init__(self, graph):
+        self._client = graph._client
+        self.runs = 0
+        graph._client = self
+
+    def run(self, *args, **kwargs):
+        self.runs += 1
+        return self._client.run(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+def _namespaced_graph() -> FactGraph:
+    from emend.analysis_snapshot import FileNamespaceFact, ImportFact
+
+    graph = FactGraph()
+    for path, namespace in (("pkg/a.py", "python"), ("web/app.ts", "typescript")):
+        graph.add_file_namespace(FileNamespaceFact(path, namespace))
+    graph.add_imports_batch([
+        ImportFact("pkg/a.py", "os", None, None, 1),
+        ImportFact("pkg/a.py", "pkg.b", "run", "go", 2),
+        ImportFact("web/app.ts", "./util", "helper", None, 1),
+    ])
+    return graph
+
+
+def test_namespace_lookup_reads_the_namespaces_once():
+    graph = _namespaced_graph()
+    expected = {
+        path: graph.namespace_for_file(path)
+        for path in ("pkg/a.py", "web/app.ts", "unknown/lib.rs", "unknown/notes.txt")
+    }
+    assert expected == {
+        "pkg/a.py": "python", "web/app.ts": "typescript",
+        "unknown/lib.rs": "rust", "unknown/notes.txt": "",
+    }
+    counting = _CountingClient(graph)
+    namespace_of = graph.namespace_lookup()
+    for _ in range(50):
+        assert {path: namespace_of(path) for path in expected} == expected
+    assert counting.runs == 1
+
+
+def test_imports_by_file_matches_the_per_file_query_in_one_read():
+    graph = _namespaced_graph()
+    per_file = {
+        path: [(fact.imported_module, fact.imported_name) for fact in graph.imports_in(path)]
+        for path in ("pkg/a.py", "web/app.ts", "pkg/none.py")
+    }
+    assert per_file["pkg/a.py"] == [("os", None), ("pkg.b", "run")]
+    counting = _CountingClient(graph)
+    imports = graph.imports_by_file()
+    assert counting.runs == 1
+    assert {path: imports.get(path, []) for path in per_file} == per_file

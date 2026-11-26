@@ -1771,9 +1771,9 @@ class AnalysisStore:
             if not include_overlays and self._disk_graph is not None:
                 graph = self._disk_graph
             snapshot = graph.snapshot
+            stored_imports = graph.imports_by_file()
             imports_by_path = {
-                revision.file_path: [(row.imported_module, row.imported_name)
-                                     for row in graph.imports_in(graph.stored_path(revision.file_path))]
+                revision.file_path: stored_imports.get(self._stored_path(revision), [])
                 for revision in snapshot.files
             }
 

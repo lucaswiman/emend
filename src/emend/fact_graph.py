@@ -918,6 +918,29 @@ class FactGraph:
         from emend.language_registry import detect_language
         return detect_language(file_path) or ""
 
+    def namespace_lookup(self) -> Callable[[str], str]:
+        """Return ``namespace_for_file`` over one read of the namespaces.
+
+        A query has a fixed cost of a millisecond or more, so a loop over
+        files asks this instead.  The answers are as of this call.
+        """
+        namespaces = dict(self._client.run("?[fp, ns] := *file_namespace[fp, ns]")["rows"])
+        answered: dict[str, str] = {}
+
+        def namespace_of(file_path: str) -> str:
+            namespace = answered.get(file_path)
+            if namespace is None:
+                namespace = namespaces.get(file_path)
+                if namespace is None:
+                    namespace = namespaces.get(self.stored_path(file_path))
+                if namespace is None:
+                    from emend.language_registry import detect_language
+                    namespace = detect_language(file_path) or ""
+                answered[file_path] = namespace
+            return namespace
+
+        return namespace_of
+
     def add_file_namespace(self, fact: FileNamespaceFact) -> None:
         self._put_batch("file_namespace", "file_path, namespace", "file_path => namespace",
                         [[fact.file_path, fact.namespace]])
@@ -975,10 +998,11 @@ class FactGraph:
     def require_unambiguous_symbols(self, qnames, *, namespace=None) -> None:
         """Reject ambiguous bare names before building a destructive plan."""
         seen = set()
+        namespace_of = self.namespace_lookup()
         for symbol in self.symbols():
             qn = symbol.qualified_name
             if qn not in qnames or (namespace is not None and
-                                   self.namespace_for_file(symbol.file_path) != namespace):
+                                   namespace_of(symbol.file_path) != namespace):
                 continue
             if qn in seen:
                 raise ValueError(f"Ambiguous symbol {qn!r}; cannot plan a cascade")
@@ -1305,6 +1329,20 @@ class FactGraph:
             TypeFact(symbol_qn=r[0], type_str=r[1], file_path=r[2], line=r[3], binding_kind=r[4])
             for r in result["rows"]
         ]
+
+    def imports_by_file(self) -> dict[str, list[tuple[str, str | None]]]:
+        """Every file's ``(imported_module, imported_name)`` pairs, in one read.
+
+        Each list is what ``imports_in`` gives for that stored path, in the
+        same order; a file that imports nothing has no entry.
+        """
+        rows = self._client.run(
+            "?[f, mod, name, alias, line] := *import[f, mod, name, line, alias]"
+        )["rows"]
+        imports: dict[str, list[tuple[str, str | None]]] = {}
+        for file_path, module, name, _alias, _line in rows:
+            imports.setdefault(file_path, []).append((module, name or None))
+        return imports
 
     def imports_in(self, file_path: str) -> list[ImportFact]:
         """Return all imports declared in *file_path*."""
@@ -1804,7 +1842,17 @@ class FactGraph:
             "reported[qn, roots], eligible[qn, fp, name, kind, line, end_line, parent]"
         )
 
-        result = self._run_namespaced(query, namespace=namespace)
+        # Scoping each relation to a namespace reads all of it, whatever the
+        # namespace holds.  One without a symbol (a stylesheet, markup) has no
+        # dead symbol to find, so it is not asked.
+        if namespace is not None and not self._client.run(
+            "?[fp] := *symbol[_, fp, _, _, _, _, _], *file_namespace[fp, $namespace] "
+            ":limit 1",
+            {"namespace": namespace},
+        )["rows"]:
+            result = {"rows": []}
+        else:
+            result = self._run_namespaced(query, namespace=namespace)
         dead_symbols = [
             DeadSymbolFact(
                 file_path=r[0], name=r[1], qualified_name=r[2],

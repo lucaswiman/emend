@@ -926,8 +926,9 @@ def _typed_decorator_entry_points(
         method for methods in type_methods.values() for method in methods
     }
     decorated_by_file: dict[str, list[tuple[str, str]]] = {}
+    namespace_of = graph.namespace_lookup()
     for qn, file_path, decorator in decorator_rows:
-        if namespace is not None and graph.namespace_for_file(file_path) != namespace:
+        if namespace is not None and namespace_of(file_path) != namespace:
             continue
         if "." not in decorator or decorator.rsplit(".", 1)[-1] not in registered_methods:
             continue
@@ -1194,6 +1195,7 @@ def find_dead_code(
     }
 
     query_options = {}
+    first_pass = {}
     raw_dead, raw_unreachable = [], []
     for (namespace,) in graph.client.run("?[ns] := *file_namespace[_, ns]")["rows"]:
         query_options[namespace] = dict(
@@ -1207,6 +1209,7 @@ def find_dead_code(
             include_transitive=True, namespace=namespace,
         )
         dead, unreachable = graph.dead_code_unified(**query_options[namespace])
+        first_pass[namespace] = dead
         raw_dead.extend(dead)
         raw_unreachable.extend(unreachable)
     local_names = {(fp, qn): local for fp, qn, local in graph.client.run(
@@ -1271,20 +1274,26 @@ def find_dead_code(
             excluded_files,
         )
 
+    namespace_of = graph.namespace_lookup()
+
     def identity(symbol):
-        return graph.namespace_for_file(symbol.file_path), symbol.qualified_name
+        return namespace_of(symbol.file_path), symbol.qualified_name
 
     by_qn = {identity(symbol): symbol for symbol in dead_symbols}
     protected = {identity(symbol) for symbol in raw_dead} - by_qn.keys()
     if protected and any(symbol.root_causes for symbol in raw_dead):
         surviving = {}
         for namespace, options in query_options.items():
-            options = dict(options)
-            options["entry_point_qualified_names"] = sorted(
-                set(options["entry_point_qualified_names"])
-                | {qn for ns, qn in protected if ns == namespace}
-            )
-            remaining, _ = graph.dead_code_unified(**options)
+            kept = {qn for ns, qn in protected if ns == namespace}
+            if kept:
+                options = dict(options)
+                options["entry_point_qualified_names"] = sorted(
+                    set(options["entry_point_qualified_names"]) | kept
+                )
+                remaining, _ = graph.dead_code_unified(**options)
+            else:
+                # Nothing here became an entry point: the answer is unchanged.
+                remaining = first_pass[namespace]
             surviving.update((identity(symbol), symbol) for symbol in remaining)
         by_qn = {key: symbol for key, symbol in by_qn.items() if key in surviving}
         for key, symbol in by_qn.items():
@@ -1543,10 +1552,11 @@ def safe_delete(
                 namespace=namespace,
                 **_project_entry_point_options(graph, str(store.project_root), namespace=namespace)
             )
+            namespace_of = graph.namespace_lookup()
             candidates = [
                 DeadSymbol(s.file_path, s.name, s.kind, s.line, s.qualified_name, "")
                 for s in graph.symbols() if not s.parent
-                and graph.namespace_for_file(s.file_path) == namespace
+                and namespace_of(s.file_path) == namespace
             ]
             # Scan strings once, not once per cascade step; deletion counts all
             # references, including tests and untracked project sources.

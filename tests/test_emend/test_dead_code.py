@@ -2046,3 +2046,63 @@ class TestExports:
         assert "public_alpha" not in dead_names, "__all__ member 'public_alpha' should not be dead"
         assert "public_beta" not in dead_names, "__all__ member 'public_beta' should not be dead"
         assert "hidden_func" in dead_names, "non-exported function should be dead"
+
+
+# ---------------------------------------------------------------------------
+# The Datalog pass runs once per language that could change the answer
+# ---------------------------------------------------------------------------
+
+
+def _count_dead_code_queries(monkeypatch):
+    """Record, per namespace, how the unified query was asked to run."""
+    from collections import Counter
+
+    from emend.fact_graph import FactGraph
+
+    passes, scoped_queries = Counter(), Counter()
+    unified, namespaced = FactGraph.dead_code_unified, FactGraph._run_namespaced
+
+    def counted_unified(self, **options):
+        passes[options["namespace"]] += 1
+        return unified(self, **options)
+
+    def counted_namespaced(self, query, params=None, *, namespace=None):
+        scoped_queries[namespace] += 1
+        return namespaced(self, query, params, namespace=namespace)
+
+    monkeypatch.setattr(FactGraph, "dead_code_unified", counted_unified)
+    monkeypatch.setattr(FactGraph, "_run_namespaced", counted_namespaced)
+    return passes, scoped_queries
+
+
+def test_dead_code_skips_work_that_cannot_change_the_answer(tmp_path, monkeypatch):
+    """A language with no symbols has no dead symbol, and a second pass only
+    matters where the first one's survivors became entry points."""
+    from emend.transform import find_dead_code
+
+    project = make_project(tmp_path, {
+        "app.py": (
+            "def helper():\n"
+            "    pass\n"
+            "\n"
+            "\n"
+            "def kept():  # noqa: emend:deadcode\n"
+            "    helper()\n"
+            "\n"
+            "\n"
+            "def unused():\n"
+            "    pass\n"
+        ),
+        "site.css": "body { color: red; }\n",
+    })
+    passes, scoped_queries = _count_dead_code_queries(monkeypatch)
+
+    names = {item.name for item in find_dead_code(str(project), include_transitive=True)}
+
+    # ``kept`` is suppressed, so ``helper`` is used after all.
+    assert "unused" in names
+    assert not {"helper", "kept"} & names
+    # Python needed the second pass; CSS neither it nor the symbol query.
+    assert passes == {"python": 2, "css": 1}
+    assert scoped_queries["css"] == 1
+    assert scoped_queries["python"] == 4
