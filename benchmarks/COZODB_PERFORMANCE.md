@@ -302,12 +302,18 @@ themselves made indexing worse.
 
 ## Build-Time Parallelism: What Still Looks Worth Doing
 
-The current full-build path in [`transform.py`](/Users/lucaswiman/personal/emend/src/emend/transform.py)
+> Historical note: this section describes `_build_facts_db()` in the former
+> single-file `transform.py`.  Neither exists any more.  Facts are now
+> extracted per file by `AnalysisStore`
+> ([`src/emend/analysis_store.py`](../src/emend/analysis_store.py)), which
+> already fans files out over a thread pool; the analysis below is kept for
+> the record.
+
+The full-build path in `transform.py` (at the time of writing)
 still leaves parallelism on the table.
 
 The high-value serial section is the per-file extraction loop inside
-[`_build_facts_db()`](/Users/lucaswiman/personal/emend/src/emend/transform.py#L637),
-which currently does, per file:
+`_build_facts_db()`, which currently does, per file:
 
 - file read
 - Rust symbol extraction

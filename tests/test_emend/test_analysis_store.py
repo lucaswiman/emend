@@ -637,19 +637,45 @@ def test_scan_ignores_file_deleted_during_snapshot_boundary(
     assert store._observed_files == {}
 
 
-def test_extraction_artifacts_reuse_across_content_revert(tmp_path, extracted_files):
+def test_extracted_facts_are_stored_only_in_the_fact_database(tmp_path, extracted_files):
+    """A second copy of every file's facts cost more to write than it saved."""
     source = tmp_path / "app.py"
     first_content = "def first():\n    return 1\n"
     source.write_text(first_content)
     store = AnalysisStore.open(tmp_path)
-    store.query_facts()
+    assert _names(store.query_facts().symbols()) == ["first"]
     assert len(extracted_files) == 1
     source.write_text("def second_name():\n    return 2\n")
-    store.query_facts()
+    assert _names(store.query_facts().symbols()) == ["second_name"]
     assert len(extracted_files) == 2
     source.write_text(first_content)
-    store.query_facts()
-    assert len(extracted_files) == 2
+    assert _names(store.query_facts().symbols()) == ["first"]
+    assert len(extracted_files) == 3
+    with sqlite3.connect(store.artifact_path) as db:
+        tables = {name for (name,) in db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )}
+    assert "extracted_file_artifact" not in tables
+    assert "source_artifact" in tables
+
+
+def test_fact_cache_left_by_an_earlier_version_is_dropped(tmp_path):
+    source = tmp_path / "app.py"
+    source.write_text("def first():\n    return 1\n")
+    store = AnalysisStore.open(tmp_path)
+    with sqlite3.connect(store.artifact_path) as db:
+        db.execute(
+            "CREATE TABLE extracted_file_artifact ("
+            "artifact_key TEXT PRIMARY KEY, payload BLOB NOT NULL)"
+        )
+        db.execute(
+            "INSERT INTO extracted_file_artifact VALUES ('stale', ?)", (b"x" * 4096,)
+        )
+    assert _names(store.query_facts().symbols()) == ["first"]
+    with sqlite3.connect(store.artifact_path) as db:
+        assert db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'extracted_file_artifact'"
+        ).fetchone() is None
 
 
 def test_exact_project_language_config_invalidates_extracted_facts(
@@ -704,7 +730,32 @@ def test_reopened_store_refreshes_only_the_changed_revision(tmp_path, monkeypatc
     assert extracted == [str(first)]
 
 
-def test_extraction_artifacts_are_shared_by_linked_worktrees(tmp_path, extracted_files):
+def test_cold_query_stores_facts_a_few_files_at_a_time(tmp_path, monkeypatch):
+    """A query on an unindexed project never holds every file's facts at once."""
+    from emend.fact_graph import FactGraph
+
+    for index in range(70):
+        (tmp_path / f"module_{index}.py").write_text(
+            f"def function_{index}():\n    return {index}\n"
+        )
+    sizes = []
+    replace = FactGraph.replace_extracted
+
+    def tracked(self, extracted_files, *, stored_paths):
+        sizes.append(len(extracted_files))
+        return replace(self, extracted_files, stored_paths=stored_paths)
+
+    monkeypatch.setattr(FactGraph, "replace_extracted", tracked)
+    store = AnalysisStore(tmp_path)
+    try:
+        assert len(store.query_facts().symbols()) == 70
+    finally:
+        store.close()
+    assert sum(sizes) == 70
+    assert max(sizes) <= 32
+
+
+def test_linked_worktrees_share_artifacts_but_not_facts(tmp_path, extracted_files):
     main, linked = _linked_worktrees(tmp_path)
     main, linked = main / "packages" / "pkg", linked / "packages" / "pkg"
     content = "def shared():\n    return 1\n"
@@ -718,11 +769,13 @@ def test_extraction_artifacts_are_shared_by_linked_worktrees(tmp_path, extracted
     assert main_store.artifact_path == linked_store.artifact_path
     assert main_store.facts_path != linked_store.facts_path
     assert main_store.facts_path.is_file() and linked_store.facts_path.is_file()
-    assert len(extracted_files) == 1
+    assert len(extracted_files) == 2
+    with sqlite3.connect(main_store.artifact_path) as db:
+        assert db.execute("SELECT count(*) FROM source_artifact").fetchone()[0] == 1
     (linked / "app.py").write_text("def linked_only():\n    return 2\n")
     assert _names(linked_store.query_facts().symbols()) == ["linked_only"]
     assert _names(main_store.query_facts().symbols()) == ["shared"]
-    assert len(extracted_files) == 2
+    assert len(extracted_files) == 3
 
 
 def test_fact_refresh_is_atomic_and_probes_do_not_hide_new_content(tmp_path, monkeypatch):

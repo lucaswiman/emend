@@ -967,10 +967,6 @@ class TestCompileSequenceRule:
     or from pre-populated facts, then delegates to ``_compile_sequence_query``.
     """
 
-    def test_import_available(self):
-        """compile_sequence_rule is importable from fact_graph."""
-        from emend.fact_graph import compile_sequence_rule  # noqa: F401
-
     def test_returns_none_for_empty_graph(self):
         """Empty graph with no facts → no matches → returns None."""
         from emend.fact_graph import compile_sequence_rule

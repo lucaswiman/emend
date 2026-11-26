@@ -225,7 +225,7 @@ def _find_impact_via_fact_graph(
                     "?[mqn] := *search_symbol[fp, mqn, name, local_qn, "
                     "_, _, _, _, _, _, _, _], fp == $fp, name == $name, "
                     "local_qn == $qn",
-                    {"fp": fp, "name": name, "qn": qn},
+                    {"fp": graph._id(fp), "name": name, "qn": qn},
                 )
             except Exception:
                 logger.debug(
@@ -292,7 +292,10 @@ def _find_impact_via_fact_graph(
     )
 
     try:
-        result = fdb.run("".join(rules), {"changed": [list(key) for key in sorted(changed_mqns)]})
+        # The call relation holds names as ids.
+        result = fdb.run("".join(rules), {"changed": [
+            [namespace, graph._id(mqn)] for namespace, mqn in sorted(changed_mqns)
+        ]})
     except Exception:
         logger.debug("facts.db impact query failed", exc_info=True)
         return None

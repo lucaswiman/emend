@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import yaml
 
@@ -57,21 +57,6 @@ class DeadCodeConfig:
     entry_point_decorators: list[str] | None = None
     entry_point_names: list[str] | None = None
     exclude_paths: list[str] | None = None
-
-
-def coerce_optional_str_list(value: object) -> list[str] | None:
-    values = [str(item) for item in as_list(value)]
-    return values or None
-
-
-def parse_deadcode_config(
-    raw: object,
-    *,
-    rule_name: str = "deadcode",
-) -> DeadCodeConfig | None:
-    """Parse the canonical dead-code mapping used by lint and policy."""
-    compiled = _compile_deadcode(raw, rule_name=rule_name)
-    return compiled_deadcode_to_config(compiled) if compiled else None
 
 
 def compiled_deadcode_to_config(config: CompiledDeadCodeRule) -> DeadCodeConfig:
@@ -149,50 +134,6 @@ def load_rules_document(
     if not isinstance(data, dict):
         raise ValueError(f"Config file must contain a YAML mapping: {resolved}")
     return data, resolved
-
-
-def load_yaml_config_with_fallback(
-    config_path: str | Path,
-    *,
-    legacy_names: Iterable[str] = (),
-) -> tuple[dict[str, Any], Path]:
-    """Load a YAML mapping, optionally falling back to ``rules.yaml``.
-
-    If *config_path* does not exist and its filename is one of *legacy_names*,
-    this will look for a sibling ``rules.yaml``.
-    """
-    requested = Path(config_path)
-    resolved = resolve_config_path_with_fallback(
-        requested,
-        legacy_names=legacy_names,
-    )
-    if resolved is None:
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-
-    with open(resolved) as f:
-        data = yaml.safe_load(f) or {}
-
-    if not isinstance(data, dict):
-        raise ValueError(f"Config file must contain a YAML mapping: {resolved}")
-    return data, resolved
-
-
-def resolve_config_path_with_fallback(
-    config_path: str | Path,
-    *,
-    legacy_names: Iterable[str] = (),
-) -> Path | None:
-    """Resolve an existing config path with optional legacy fallback."""
-    path = Path(config_path)
-    if path.exists():
-        return path
-
-    legacy = set(legacy_names)
-    if path.name in legacy:
-        candidate = path.with_name("rules.yaml")
-        if candidate.exists():
-            return candidate
-    return None
 
 
 def resolve_rules_path(

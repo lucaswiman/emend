@@ -130,6 +130,7 @@ def test_trace_basic_source_to_sink(tmp_path):
     assert v.label == "user_input"
     assert "SQL injection" in v.message
     assert v.file_path == str(test_file)
+    assert v.sink_pattern == "cursor.execute($X)"
 
 
 def test_trace_sanitizer_removes_taint(tmp_path):
@@ -414,6 +415,12 @@ def test_trace_empty_config_no_violations(tmp_path):
     config = TraceConfig()
     violations = run_trace_analysis([str(test_file)], config)
     assert len(violations) == 0
+
+    # Sinks without any source cannot report either.
+    sinks_only = TraceConfig(
+        labels=["user_input"], sources=[], sinks=_make_sql_injection_config().sinks,
+    )
+    assert run_trace_analysis([str(test_file)], sinks_only) == []
 
 
 def test_trace_nonexistent_file():
@@ -889,3 +896,200 @@ def test_trace_relative_path_matches_absolute_path(tmp_path, monkeypatch):
 
     assert len(rel_violations) == len(abs_violations)
     assert any("SQL injection" in v.message for v in rel_violations)
+
+
+# ---------------------------------------------------------------------------
+# API / CLI parity (one config expressed as YAML and as a TraceConfig)
+# ---------------------------------------------------------------------------
+
+_PARITY_CONFIG_YAML = """\
+trace:
+  labels: [user_input]
+  sources:
+    - pattern: "request.args.get($X)"
+      label: user_input
+  sinks:
+    - pattern: "cursor.execute($QUERY)"
+      label: user_input
+      message: "SQL injection risk"
+"""
+
+
+def _write_parity_trace_config(tmp_path):
+    """Write the parity trace config YAML and return its path."""
+    config_file = tmp_path / ".emend" / "patterns.yaml"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(_PARITY_CONFIG_YAML)
+    return str(config_file)
+
+
+def _make_parity_trace_config():
+    return TraceConfig(
+        labels=["user_input"],
+        sources=[TraceSource(pattern="request.args.get($X)", label="user_input")],
+        sinks=[
+            TraceSink(
+                pattern="cursor.execute($QUERY)",
+                label="user_input",
+                message="SQL injection risk",
+            )
+        ],
+    )
+
+
+def test_trace_api_and_cli_results_match(tmp_path, run_emend_cmd):
+    """API and CLI violations agree on file, line, label, and message."""
+    test_file = tmp_path / "app.py"
+    test_file.write_text(SQLI_SOURCE)
+    config_path = _write_parity_trace_config(tmp_path)
+
+    # API result
+    config = _make_parity_trace_config()
+    api_violations = run_trace_analysis([str(test_file)], config)
+    assert len(api_violations) >= 1
+    api_v = api_violations[0]
+
+    # CLI result
+    result = run_emend_cmd(
+        ["analyze", "trace", str(test_file), "--config", config_path, "--json"],
+        check=False,
+    )
+    assert result.returncode in (0, 1), f"Unexpected exit code: {result.returncode}\nSTDERR: {result.stderr}"
+    cli_data = json.loads(result.stdout)
+    assert isinstance(cli_data, list)
+    assert len(cli_data) >= 1
+    cli_v = cli_data[0]
+    assert cli_v["label"] == "user_input"
+    assert "SQL injection" in cli_v["message"]
+    assert cli_v["engine"] == "occurrence"
+
+    assert cli_v["file"] == api_v.file_path
+    assert cli_v["line"] == api_v.line
+    assert cli_v["label"] == api_v.label
+    assert cli_v["message"] == api_v.message
+
+
+def test_trace_json_output_includes_engine(tmp_path):
+    """format_violations JSON includes 'engine' for violations from run_trace_analysis."""
+    test_file = tmp_path / "app.py"
+    test_file.write_text(SQLI_SOURCE)
+
+    config = _make_parity_trace_config()
+    violations = run_trace_analysis([str(test_file)], config)
+    assert len(violations) >= 1
+
+    # The canonical occurrence evaluator is used by default.
+    assert all(v.engine == "occurrence" for v in violations)
+
+    output = format_violations(violations, json_output=True)
+    data = json.loads(output)
+    assert len(data) >= 1
+    assert "engine" in data[0], f"'engine' key missing from JSON output: {data[0]}"
+    assert data[0]["engine"] == "occurrence"
+
+
+# ---------------------------------------------------------------------------
+# Line-number regressions in the public occurrence evaluator
+# ---------------------------------------------------------------------------
+
+
+def test_effect_sink_method_call_line_is_one_indexed(tmp_path):
+    """A ``writes($X)`` effect sink resolved from a method call reports the
+    actual 1-indexed source line, not one line above it.
+
+    Code (1-indexed lines):
+        1  def process(flag):
+        2      obj = get_record()
+        3      if flag:
+        4          obj.save()     # effect sink: writes($OBJ) via method call
+
+    The mutation happens on line 4; the violation and its sink TraceStep must
+    point to line 4, not line 3.
+    """
+    f = tmp_path / "app.py"
+    f.write_text(
+        "def process(flag):\n"
+        "    obj = get_record()\n"
+        "    if flag:\n"
+        "        obj.save()\n"
+    )
+    config = TraceConfig(
+        labels=["toctou"],
+        sources=[TraceSource(pattern="$X = get_record()", label="toctou")],
+        sinks=[
+            TraceSink(
+                pattern="",
+                label="toctou",
+                message="mutation on tainted object",
+                effect="writes($OBJ)",
+            )
+        ],
+    )
+    violations = run_trace_analysis([str(f)], config, project_path=None)
+    assert len(violations) == 1
+    v = violations[0]
+    # ``obj.save()`` is on line 4 (1-indexed).
+    assert v.line == 4, f"expected sink line 4, got {v.line}"
+    sink_steps = [s for s in v.trace if s.description.startswith("sink:")]
+    assert sink_steps, "expected a sink TraceStep"
+    assert sink_steps[0].line == 4, (
+        f"expected sink step line 4, got {sink_steps[0].line}"
+    )
+    # The source step is already 1-indexed (find_pattern lines) — sanity check.
+    src_steps = [s for s in v.trace if s.description.startswith("source:")]
+    assert src_steps and src_steps[0].line == 2
+
+
+def test_two_sources_in_one_block_keep_distinct_source_witnesses(tmp_path):
+    """Two same-label sources in the same basic block must not clobber each
+    other's source witness.
+
+    Code (1-indexed lines):
+        1  def process():
+        2      a = tainted()      # source for label 'lbl', var a
+        3      b = tainted()      # source for label 'lbl', var b
+        4      sink_a(a)          # violation: a reaches sink_a
+        5      sink_b(b)          # violation: b reaches sink_b
+
+    Lines 2-5 form a single straight-line basic block, so both sources share
+    the same block id.  The source-line witness lookup is keyed by
+    ``(file, func, label, source_var, block_id)``; without the ``source_var``
+    dimension the two sources collide and the last-recorded line clobbers the
+    other.  This test pins that each source witness resolves to the line that
+    actually defines its variable:
+        - source var 'a' -> line 2 (a = tainted())
+        - source var 'b' -> line 3 (b = tainted())
+    """
+    f = tmp_path / "app.py"
+    f.write_text(
+        "def process():\n"
+        "    a = tainted()\n"
+        "    b = tainted()\n"
+        "    sink_a(a)\n"
+        "    sink_b(b)\n"
+    )
+    config = TraceConfig(
+        labels=["lbl"],
+        sources=[TraceSource(pattern="$X = tainted()", label="lbl")],
+        sinks=[
+            TraceSink(pattern="sink_a($X)", label="lbl", message="a reached sink"),
+            TraceSink(pattern="sink_b($X)", label="lbl", message="b reached sink"),
+        ],
+    )
+    violations = run_trace_analysis([str(f)], config, project_path=None)
+    by_sink = {v.sink_pattern: v for v in violations}
+    assert "sink_a($X)" in by_sink
+    assert "sink_b($X)" in by_sink
+
+    # Expected source line per source variable.  The witness step records the
+    # variable it resolved; assert that variable's line matches its definition,
+    # proving the (label, var, block) key did not collide on the shared block.
+    expected_line = {"a": 2, "b": 3}
+    for v in violations:
+        src_steps = [s for s in v.trace if s.description.startswith("source:")]
+        assert src_steps, f"expected a source step for {v.sink_pattern}"
+        step = src_steps[0]
+        assert step.line == expected_line[step.variable], (
+            f"source witness for var {step.variable!r} should point at line "
+            f"{expected_line[step.variable]}, got {step.line}"
+        )

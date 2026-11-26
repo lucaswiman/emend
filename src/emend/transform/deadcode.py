@@ -1532,7 +1532,7 @@ def safe_delete(
             rows = fdb.run(
                 "?[mqn] := *search_symbol[fp, mqn, _, local_qn, _, _, _, _, _, _, _, _], "
                 "fp == $fp, local_qn == $qn",
-                {"fp": str(Path(file_path).relative_to(store.project_root)),
+                {"fp": graph._id(str(Path(file_path).relative_to(store.project_root))),
                  "qn": ".".join(selector.symbol_path)},
             )["rows"]
             if len(rows) != 1:
@@ -1560,8 +1560,9 @@ def safe_delete(
             changed = True
             while changed:
                 changed = False
-                # Build inline relation for current delete set
-                del_rows = ", ".join(f'["{qn}"]' for qn in delete_qns)
+                # Build inline relation for current delete set.  The graph
+                # stores names as ids; the empty string's id means no parent.
+                del_rows = ", ".join(f"[{qn}]" for qn in graph._known_ids(delete_qns))
                 try:
                     # Find callees of deleted symbols that have no
                     # external references (references not from deleted symbols).
@@ -1587,7 +1588,7 @@ def safe_delete(
                         '?[mqn, name, kind, fp, line] := '
                         '  callee_of_deleted[mqn], not has_ext_ref[mqn], '
                         '  scope_symbol[mqn, fp, name, kind, line, _, parent], '
-                        '  parent == ""\n',
+                        f'  parent == {graph._id("")}\n',
                         namespace=namespace,
                     )
                 except Exception:

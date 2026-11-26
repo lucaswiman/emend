@@ -22,7 +22,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import sys
+import threading
+import time
 from functools import lru_cache
 from pathlib import Path
 
@@ -55,6 +58,30 @@ def _find_languages_dir() -> Path | None:
     return None
 
 
+def _stat_signature(path: str | os.PathLike[str]) -> tuple[int, ...] | None:
+    """Return the metadata identity of *path*, or ``None`` when it is absent."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return (
+        stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
+        getattr(stat, "st_ctime_ns", int(stat.st_ctime * 1_000_000_000)),
+    )
+
+
+# Language lookups run once per source file.  Each cache below is validated by
+# file metadata on every call, so a lookup costs a few ``stat`` calls instead
+# of a scan of every installed distribution plus a read of every config.
+_ENTRY_POINT_CACHE: tuple[tuple, dict[str, Path]] | None = None
+_REGISTRY_INPUT_CACHE: dict[str | None, tuple[tuple, tuple]] = {}
+_REGISTRY_INPUT_CACHE_SIZE = 16
+_REGISTRY_INPUT_CACHE_LOCK = threading.Lock()
+# A file rewritten within the filesystem's timestamp granularity can keep its
+# size and timestamps.  Bytes read from a file that recent are not reused.
+_RACY_WINDOW_NS = 2_000_000_000
+
+
 def _discover_entry_point_languages() -> dict[str, Path]:
     """Discover language configs from installed entry-point plugins.
 
@@ -65,7 +92,23 @@ def _discover_entry_point_languages() -> dict[str, Path]:
 
     The entry point value is a module whose directory must contain a
     ``config.toml`` file.  Returns ``{language_name: config_dir_path}``.
+
+    Installing or removing a distribution changes a directory on ``sys.path``,
+    so one scan is reused until those directories change.
     """
+    global _ENTRY_POINT_CACHE
+
+    signature = tuple((entry, _stat_signature(entry or ".")) for entry in sys.path)
+    cached = _ENTRY_POINT_CACHE
+    if cached is not None and cached[0] == signature:
+        return dict(cached[1])
+    result = _scan_entry_point_languages()
+    _ENTRY_POINT_CACHE = (signature, result)
+    return dict(result)
+
+
+def _scan_entry_point_languages() -> dict[str, Path]:
+    """Scan installed distributions for ``emend.languages`` entry points."""
     import importlib.metadata
 
     result: dict[str, Path] = {}
@@ -139,31 +182,74 @@ def _parse_toml_extensions(
     return None
 
 
+def _language_config_paths(directory: str | os.PathLike[str]) -> list[str]:
+    """Return ``<directory>/*/config.toml`` candidates in sorted order."""
+    try:
+        with os.scandir(directory) as entries:
+            names = sorted(entry.name for entry in entries if entry.is_dir())
+    except OSError:
+        return []
+    return [os.path.join(directory, name, "config.toml") for name in names]
+
+
 def _registry_inputs(
     project_root: str | Path | None = None,
 ) -> tuple[tuple[str, str, bytes], ...]:
-    """Capture the exact language configurations used by one registry view."""
-    inputs: list[tuple[str, str, bytes]] = []
+    """Capture the exact language configurations used by one registry view.
+
+    The captured bytes are reused while every contributing file keeps the same
+    metadata identity, which is rechecked on each call.
+    """
+    candidates: list[tuple[str, str, str]] = []
     if project_root is not None:
-        for path in sorted((Path(project_root) / "languages").glob("*/config.toml")):
-            try:
-                inputs.append(("project", str(path), path.read_bytes()))
-            except OSError:
-                pass
+        candidates.extend(
+            ("project", path, path)
+            for path in _language_config_paths(Path(project_root) / "languages")
+        )
     lang_dir = _find_languages_dir()
     if lang_dir:
-        for path in sorted(lang_dir.glob("*/config.toml")):
-            try:
-                inputs.append(("builtin", str(path), path.read_bytes()))
-            except OSError:
-                pass
-    for name, directory in sorted(_discover_entry_point_languages().items()):
-        path = directory / "config.toml"
+        candidates.extend(
+            ("builtin", path, path) for path in _language_config_paths(lang_dir)
+        )
+    candidates.extend(
+        ("plugin", name, str(directory / "config.toml"))
+        for name, directory in sorted(_discover_entry_point_languages().items())
+    )
+    present = [
+        (source, label, path, signature)
+        for source, label, path in candidates
+        for signature in [_stat_signature(path)]
+        if signature is not None
+    ]
+    signature = tuple(
+        (source, label, path, stat) for source, label, path, stat in present
+    )
+    key = str(project_root) if project_root is not None else None
+    cached = _REGISTRY_INPUT_CACHE.get(key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+
+    read_at = time.time_ns()
+    inputs: list[tuple[str, str, bytes]] = []
+    newest = 0
+    for source, label, path, stat in present:
         try:
-            inputs.append(("plugin", name, path.read_bytes()))
+            inputs.append((source, label, Path(path).read_bytes()))
         except OSError:
-            pass
-    return tuple(inputs)
+            # The file changed since it was listed; do not cache this view.
+            newest = read_at
+            continue
+        newest = max(newest, stat[3], stat[4])
+    result = tuple(inputs)
+    with _REGISTRY_INPUT_CACHE_LOCK:
+        if read_at - newest > _RACY_WINDOW_NS:
+            if (key not in _REGISTRY_INPUT_CACHE
+                    and len(_REGISTRY_INPUT_CACHE) >= _REGISTRY_INPUT_CACHE_SIZE):
+                del _REGISTRY_INPUT_CACHE[next(iter(_REGISTRY_INPUT_CACHE))]
+            _REGISTRY_INPUT_CACHE[key] = (signature, result)
+        else:
+            _REGISTRY_INPUT_CACHE.pop(key, None)
+    return result
 
 
 @lru_cache(maxsize=8)
@@ -219,6 +305,19 @@ def registry_and_config_snapshots(
 ]:
     """Build extension and config views from one immutable byte capture."""
     inputs = _registry_inputs(project_root)
+    snapshots = dict(_config_revisions(inputs))
+    ext_to_lang, lang_to_exts = _build_registry(inputs)
+    registry = dict(ext_to_lang), {
+        language: list(extensions) for language, extensions in lang_to_exts.items()
+    }
+    return registry, snapshots
+
+
+@lru_cache(maxsize=8)
+def _config_revisions(
+    inputs: tuple[tuple[str, str, bytes], ...],
+) -> dict[str, LanguageConfigRevision]:
+    """Parse each effective config once per exact byte capture."""
     snapshots: dict[str, LanguageConfigRevision] = {}
     for _source, label, payload in inputs:
         parsed = _parse_toml_extensions(payload, label)
@@ -229,11 +328,7 @@ def registry_and_config_snapshots(
             language,
             LanguageConfigRevision.create(language, payload.decode()),
         )
-    ext_to_lang, lang_to_exts = _build_registry(inputs)
-    registry = dict(ext_to_lang), {
-        language: list(extensions) for language, extensions in lang_to_exts.items()
-    }
-    return registry, snapshots
+    return snapshots
 
 
 def language_config_snapshots(

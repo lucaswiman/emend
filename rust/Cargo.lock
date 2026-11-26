@@ -411,6 +411,7 @@ version = "0.5.6"
 dependencies = [
  "cozo",
  "memchr",
+ "miniz_oxide 0.8.9",
  "pyo3",
  "rayon",
  "serde",

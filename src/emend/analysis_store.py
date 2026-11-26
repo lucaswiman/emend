@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from functools import cache
@@ -10,15 +11,19 @@ import importlib.util
 import json
 import logging
 import os
-import pickle
 import posixpath
 from pathlib import Path
+import re
+import secrets
+import socket
 import sqlite3
 import threading
-import tempfile
+import time
+import weakref
 import zlib
 from collections.abc import Callable, Iterable
 
+from emend import cache_codec
 from emend.analysis_snapshot import AnalysisSnapshot, ExtractedFile, FileRevision, TypeFact
 from emend.errors import BUG_EXCEPTIONS
 from emend.file_collection import file_stat_identity
@@ -31,6 +36,73 @@ EXTRACTION_ARTIFACT_VERSION = "22"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 TYPE_RESULT_VERSION = 5  # FileTypes now carries failure diagnostics.
 logger = logging.getLogger(__name__)
+
+# Private fact generations are named ``facts-<role>-h<host>p<pid>-<token>.db``
+# so that a later process can tell whether the owner is still running.
+_GENERATION_NAME = re.compile(
+    r"^facts-[a-z]+-(?:h(?P<host>[0-9a-f]{8})p(?P<pid>\d+)-)?[A-Za-z0-9_]+\.db$"
+)
+_GENERATION_SIDECARS = ("-journal", "-wal", "-shm")
+# Names written before owners were recorded cannot be attributed; they are
+# removed once they are old enough that only an abandoned copy remains.
+_UNOWNED_GENERATION_AGE = 3600
+# A generation from another host or container shares no process table with
+# this one, so only age can retire it.
+_FOREIGN_GENERATION_AGE = 7 * 24 * 3600
+# Files whose extracted facts are held in memory before they are stored.
+_EXTRACTION_BATCH_FILES = 32
+_LIVE_STORES: "weakref.WeakSet[AnalysisStore]" = weakref.WeakSet()
+_LIVE_STORES_LOCK = threading.Lock()
+
+
+@cache
+def _host_tag() -> str:
+    """Identify the process table that this process's pid belongs to."""
+    identity = socket.gethostname()
+    try:
+        identity += os.readlink("/proc/self/ns/pid")
+    except OSError:
+        pass
+    return hashlib.sha256(identity.encode()).hexdigest()[:8]
+
+
+def generation_owner_tag() -> str:
+    """Return the owner marker embedded in this process's generation names."""
+    return f"h{_host_tag()}p{os.getpid()}"
+
+
+def _process_is_gone(pid: int) -> bool:
+    """Whether *pid* is known to have exited (never true on Windows)."""
+    if os.name == "nt":
+        # Signal 0 terminates a process there; an open file cannot be removed
+        # anyway, so removal itself is the liveness test.
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _close_live_stores() -> None:
+    """Release every generation this process still owns at interpreter exit."""
+    with _LIVE_STORES_LOCK:
+        stores = list(_LIVE_STORES)
+    for store in stores:
+        # A forked child inherits its parent's stores but owns none of their
+        # files; only the creating process may remove them.
+        if store._owner_pid != os.getpid():
+            continue
+        try:
+            store._release_generations()
+        except Exception:
+            logger.debug("Could not release fact generations", exc_info=True)
+
+
+atexit.register(_close_live_stores)
+
 
 def collect_symbol_info(filepath: Path, source: str) -> list[SymbolInfo]:
     """Project exact source into fresh, caller-owned lookup/index results."""
@@ -92,12 +164,20 @@ class AnalysisStore:
         self._observed_loaded = False
         self._symbols: dict[tuple[str, str], tuple] = {}
         self._external_type_files = {}
+        self._owner_pid = os.getpid()
+        with _LIVE_STORES_LOCK:
+            _LIVE_STORES.add(self)
+        self._sweep_abandoned_generations()
 
     def symbols(self, source: str, ext: str = "py") -> tuple:
         """Return immutable syntax symbols; content identity never includes a path."""
         from emend import emend_core
         from emend.language_registry import detect_language
-        from emend.symbol_projection import project_symbols
+        from emend.symbol_projection import (
+            project_symbols,
+            symbols_from_rows,
+            symbols_to_rows,
+        )
 
         key = (ext, hashlib.sha256(source.encode()).hexdigest())
         with self._symbols_lock:
@@ -107,17 +187,20 @@ class AnalysisStore:
                     conn = self.artifact_connection()
                     from emend.language_registry import config_identity
                     config = config_identity(detect_language(f"file.{ext}") or "python")
-                    identity = repr(("4", EXTRACTION_ARTIFACT_VERSION, key, config))
+                    identity = repr(("5", EXTRACTION_ARTIFACT_VERSION, key, config))
                     row = conn.execute(
                         "SELECT payload FROM symbol_projection WHERE identity = ?", (identity,)
                     ).fetchone()
                     if row is not None:
-                        symbols = pickle.loads(zlib.decompress(row[0]))
-                    else:
+                        try:
+                            symbols = symbols_from_rows(cache_codec.decode(row[0]))
+                        except (ValueError, TypeError):
+                            logger.debug("Unreadable symbol artifact", exc_info=True)
+                    if symbols is None:
                         symbols = project_symbols(emend_core.collect_symbols_from_str(source, ext=ext))
-                        payload = zlib.compress(pickle.dumps(symbols))
+                        payload = cache_codec.encode(symbols_to_rows(symbols))
                         self.write(lambda db: db.execute(
-                            "INSERT OR IGNORE INTO symbol_projection VALUES (?, ?)",
+                            "INSERT OR REPLACE INTO symbol_projection VALUES (?, ?)",
                             (identity, payload),
                         ).close(), artifacts=True)
                 except (OSError, sqlite3.Error):
@@ -227,21 +310,79 @@ class AnalysisStore:
         """Create the owner directory and keep generated data out of VCS."""
         self._prepare_cache_directory(self.cache_dir)
 
+    def _generation_name(self, prefix: str) -> Path:
+        """Return an unused, owner-tagged database name in the owner cache."""
+        self.ensure_cache_directory()
+        return self.cache_dir / (
+            f"{prefix}{generation_owner_tag()}-{secrets.token_hex(6)}.db"
+        )
+
     def _temporary_db_path(self, prefix: str) -> Path:
         """Allocate an empty private database in the owner cache."""
-        self.ensure_cache_directory()
-        fd, name = tempfile.mkstemp(prefix=prefix, suffix=".db", dir=self.cache_dir)
-        os.close(fd)
-        return Path(name)
+        while True:
+            path = self._generation_name(prefix)
+            try:
+                os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            except FileExistsError:
+                continue
+            return path
+
+    def _sweep_abandoned_generations(self) -> None:
+        """Remove private generations whose owning process no longer exists.
+
+        A process that is killed cannot remove its own generations, and each
+        one can be as large as the published database.
+        """
+        try:
+            with os.scandir(self.cache_dir) as entries:
+                names = [entry.name for entry in entries]
+        except OSError:
+            return
+        now = time.time()
+        for name in names:
+            base = name
+            for suffix in _GENERATION_SIDECARS:
+                if name.endswith(suffix):
+                    base = name[: -len(suffix)]
+            match = _GENERATION_NAME.match(base)
+            if match is None:
+                continue
+            path = self.cache_dir / name
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            # Unowned names are always copies, so their write time is their
+            # age.  An owned name can be a link to an old generation; linking
+            # refreshes only the change time.
+            written = now - stat.st_mtime
+            age = now - max(stat.st_mtime, stat.st_ctime)
+            if match["pid"] is None:
+                abandoned = written > _UNOWNED_GENERATION_AGE
+            elif match["host"] != _host_tag():
+                abandoned = age > _FOREIGN_GENERATION_AGE
+            elif os.name == "nt":
+                # Give a live owner time to open what it has just created.
+                abandoned = int(match["pid"]) != os.getpid() and age > 60
+            else:
+                abandoned = (
+                    int(match["pid"]) != os.getpid()
+                    and _process_is_gone(int(match["pid"]))
+                )
+            if abandoned:
+                self._unlink(path)
 
     @staticmethod
     def _unlink(path: Path | None) -> None:
         """Best-effort removal for an obsolete private generation."""
         if path is not None:
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            for candidate in (path, *(
+                path.with_name(path.name + suffix) for suffix in _GENERATION_SIDECARS
+            )):
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     @staticmethod
     def _graph_path(graph: object | None) -> Path | None:
@@ -250,6 +391,21 @@ class AnalysisStore:
 
     _stat_identity = staticmethod(file_stat_identity)
 
+    def _release_generations(self) -> None:
+        """Close every owned graph and remove its private backing file."""
+        self._discard_overlay_graph(close=True)
+        if self._typed_graph is not None:
+            typed_graph = self._typed_graph[1]
+            typed_path = self._graph_path(typed_graph)
+            typed_graph.close()
+            self._unlink(typed_path)
+            self._typed_graph = None
+        if self._disk_graph is not None:
+            disk_path = self._graph_path(self._disk_graph)
+            self._disk_graph.close()
+            self._disk_graph = None
+            self._unlink(disk_path)
+
     def close(self) -> None:
         with self._connection_lock:
             self._closing = True
@@ -257,22 +413,11 @@ class AnalysisStore:
             self._writers.clear()
         for writer in writers:
             writer.close()
-        self._discard_overlay_graph(close=True)
         self._overlays.clear()
-        if self._typed_graph is not None:
-            typed_graph = self._typed_graph[1]
-            typed_path = self._graph_path(typed_graph)
-            typed_graph.close()
-            self._unlink(typed_path)
-            self._typed_graph = None
         if self._type_oracle is not None:
             self._type_oracle[1].close()
             self._type_oracle = None
-        if self._disk_graph is not None:
-            disk_path = self._graph_path(self._disk_graph)
-            self._disk_graph.close()
-            self._disk_graph = None
-            self._unlink(disk_path)
+        self._release_generations()
         with self._connection_lock:
             self._symbols.clear()
             if self._connection is not None:
@@ -417,12 +562,19 @@ class AnalysisStore:
             language: get_module_separator(language, configs.get(language))
             for language in registry[1]
         }
+        from emend.project_config import module_name_under_root, module_resolution_context
+
         files = sorted(
             str(Path(path).resolve())
             for path in collect_all_source_files(
                 str(self.project_root), languages=list(registry[1]), registry=registry
             )
         )
+        # Every path above is canonical and so is the project root; resolving
+        # them again per file costs a system call per directory level.
+        root = self.project_root.resolve()
+        root_text = str(root)
+        module_roots: dict[str, Path] = {}
         contents: dict[str, str] = {}
         revisions: list[FileRevision] = []
         observed: dict[str, tuple[int, int, int, int, int, str, str, str]] = {}
@@ -434,8 +586,14 @@ class AnalysisStore:
                 continue
             old = previous.get(file_path)
             language = detect_language(file_path, registry=registry) or "python"
-            module_name = self._module_name(
-                file_path, language, module_separators.get(language)
+            module_root = module_roots.get(language)
+            if module_root is None:
+                module_root = module_roots[language] = module_resolution_context(
+                    root, language,
+                )[0]
+            module_name = module_name_under_root(
+                Path(file_path), root, module_root, language,
+                module_separators.get(language) or get_module_separator(language),
             )
             identity = self._stat_identity(stat)
             if old is not None and old[:5] == identity:
@@ -465,8 +623,8 @@ class AnalysisStore:
                     continue
                 contents[file_path] = content
                 content_hash = hashlib.sha256(content.encode()).hexdigest()
-            revisions.append(FileRevision.create(
-                self.project_root, file_path, content_hash, language, module_name,
+            revisions.append(FileRevision(
+                root_text, file_path, content_hash, language, module_name,
                 analysis_config=configs.get(language),
             ))
             observed[file_path] = (*identity, content_hash, language, module_name)
@@ -525,54 +683,180 @@ class AnalysisStore:
                 self._artifact_connection = self._read_connection(self.artifact_path)
             return self._artifact_connection
 
+    @staticmethod
+    def _retire_extraction_cache(conn: sqlite3.Connection) -> None:
+        """Drop the per-file fact cache written by earlier versions.
+
+        It duplicated the fact database, cost more to write than extraction
+        saves, and was the largest table in the shared artifact database.
+        """
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'extracted_file_artifact'"
+        ).fetchone() is None:
+            return
+        conn.execute("DROP TABLE IF EXISTS extracted_file_artifact")
+        conn.commit()
+        try:
+            conn.execute("VACUUM")
+        except sqlite3.Error:
+            # Another process is reading; the freed pages are reused instead.
+            logger.debug("Could not compact the artifact database", exc_info=True)
+
+    def _stored_path(self, revision: FileRevision) -> str:
+        try:
+            return str(Path(revision.file_path).relative_to(self.project_root))
+        except ValueError:
+            return revision.file_path
+
+    def _import_artifact_key(self, revision: FileRevision) -> str:
+        """Identify the import list of one exact revision under one config."""
+        from emend.fact_graph import FACT_GRAPH_SCHEMA_VERSION
+
+        if revision.analysis_config is None:
+            raise RuntimeError(
+                f"snapshot lacks language config for {revision.file_path}"
+            )
+        return hashlib.sha256(repr((
+            "imports", FACT_GRAPH_SCHEMA_VERSION, EXTRACTION_ARTIFACT_VERSION,
+            revision.language, revision.module_name, self._stored_path(revision),
+            revision.content_hash, revision.analysis_config.identity,
+        )).encode()).hexdigest()
+
+    @contextmanager
+    def _artifact_writer(self):
+        """Open a short-lived writer on the shared artifact database."""
+        conn = sqlite3.connect(str(self._shared_artifact_path()), timeout=30)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            # Rebuildable artifacts need atomic commits, not a disk sync per file.
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS source_artifact ("
+                "content_hash TEXT PRIMARY KEY, payload BLOB NOT NULL)"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS revision_import_artifact ("
+                "artifact_key TEXT PRIMARY KEY, payload BLOB NOT NULL)"
+            )
+            self._retire_extraction_cache(conn)
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _file_imports(extracted: ExtractedFile) -> list[tuple[str, str | None]]:
+        return [(row[1], row[2] or None) for row in extracted.rows.get("imports", ())]
+
+    def _cached_imports(
+        self, revisions: Iterable[FileRevision],
+    ) -> dict[str, list[tuple[str, str | None]]]:
+        """Return the remembered import list of each revision that has one.
+
+        Dependency identities need only a file's imports.  Remembering those
+        few names lets type inference and warm indexing skip unchanged files
+        without keeping a second copy of every fact.
+        """
+        keys = {self._import_artifact_key(revision): revision.file_path
+                for revision in revisions}
+        if not keys or not self.artifact_path.is_file():
+            return {}
+        found: dict[str, list[tuple[str, str | None]]] = {}
+        try:
+            with closing(sqlite3.connect(
+                f"{self.artifact_path.as_uri()}?mode=ro", uri=True, timeout=30,
+            )) as conn:
+                wanted = list(keys)
+                for offset in range(0, len(wanted), 900):
+                    batch = wanted[offset:offset + 900]
+                    for key, payload in conn.execute(
+                        "SELECT artifact_key, payload FROM revision_import_artifact "
+                        "WHERE artifact_key IN (" + ",".join("?" for _ in batch) + ")",
+                        batch,
+                    ):
+                        try:
+                            found[keys[key]] = [
+                                (str(module), None if name is None else str(name))
+                                for module, name in cache_codec.decode(payload)
+                            ]
+                        except (ValueError, TypeError):
+                            logger.debug("Unreadable import artifact", exc_info=True)
+        except sqlite3.Error:
+            logger.debug("Import artifacts unavailable", exc_info=True)
+        return found
+
+    def _revision_imports(
+        self, revisions: Iterable[FileRevision], contents: dict[str, str],
+    ) -> dict[str, list[tuple[str, str | None]]]:
+        """Return every revision's imports, extracting only unseen revisions."""
+        revisions = list(revisions)
+        imports = self._cached_imports(revisions)
+        missing = [revision for revision in revisions if revision.file_path not in imports]
+        for extracted in self._extract_revisions(missing, contents):
+            imports[extracted.revision.file_path] = self._file_imports(extracted)
+        return imports
+
     def _extract_revisions(
         self,
         revisions: Iterable[FileRevision],
         contents: dict[str, str],
         *, prepare=None, prepared=None, started=None, jobs=None,
     ) -> Iterable[ExtractedFile]:
-        """Load content-addressed revision artifacts or extract them once."""
-        from emend.analysis_extraction import _extract_file_facts
-        from emend.fact_graph import FACT_GRAPH_SCHEMA_VERSION
+        """Extract each revision's facts and retain its exact source text.
 
-        db_path = self._shared_artifact_path()
-        conn = sqlite3.connect(str(db_path), timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        # Rebuildable artifacts need atomic commits, not a disk sync per file.
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS extracted_file_artifact ("
-            "artifact_key TEXT PRIMARY KEY, payload BLOB NOT NULL)"
-        )
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS source_artifact ("
-            "content_hash TEXT PRIMARY KEY, payload BLOB NOT NULL)"
-        )
+        Facts are not persisted here: the fact database is their only store.
+        Two small things are kept.  Source text lets a reader of an older
+        snapshot and type inference load the exact bytes a revision describes,
+        and each revision's import list lets dependency identities skip it.
+        """
+        for _revision, extracted, _imports in self._prepare_revisions(
+            revisions, contents, prepare=prepare, prepared=prepared,
+            started=started, jobs=jobs,
+        ):
+            yield extracted
+
+    def _extract_batches(
+        self, revisions: Iterable[FileRevision], contents: dict[str, str],
+    ) -> Iterable[list[ExtractedFile]]:
+        """Extract revisions a few files at a time.
+
+        A whole project's facts are several times larger in memory than in the
+        database, so a writer stores each batch before the next is parsed.
+        """
+        from itertools import islice
+
+        extracted = iter(self._extract_revisions(revisions, contents))
+        while batch := list(islice(extracted, _EXTRACTION_BATCH_FILES)):
+            yield batch
+
+    def _prepare_revisions(
+        self,
+        revisions: Iterable[FileRevision],
+        contents: dict[str, str],
+        *, prepare=None, prepared=None, started=None, jobs=None, needs_facts=None,
+    ):
+        """Yield ``(revision, extracted, imports)`` for every revision.
+
+        *needs_facts* names the revisions whose facts a consumer will store.
+        Any other revision whose import list is already remembered is not
+        parsed: its ``extracted`` is ``None``.  ``prepare`` still runs for every
+        revision, on the worker that handles it.
+        """
+        from emend.analysis_extraction import _extract_file_facts
+
         revisions = list(revisions)
+        known_imports = (
+            {} if needs_facts is None else self._cached_imports(
+                revision for revision in revisions if not needs_facts(revision)
+            )
+        )
         pending = []
-        try:
+        with self._artifact_writer() as conn:
             for revision in revisions:
                 if revision.analysis_config is None:
                     raise RuntimeError(
                         f"snapshot lacks language config for {revision.file_path}"
                     )
-                try:
-                    stored_path = str(
-                        Path(revision.file_path).relative_to(self.project_root)
-                    )
-                except ValueError:
-                    stored_path = revision.file_path
-                key_payload = (
-                    "facts", FACT_GRAPH_SCHEMA_VERSION,
-                    EXTRACTION_ARTIFACT_VERSION, revision.language,
-                    revision.module_name, stored_path, revision.content_hash,
-                    revision.analysis_config.identity,
-                )
-                key = hashlib.sha256(repr(key_payload).encode()).hexdigest()
-                row = conn.execute(
-                    "SELECT payload FROM extracted_file_artifact WHERE artifact_key = ?",
-                    (key,),
-                ).fetchone()
                 source_row = conn.execute(
                     "SELECT payload FROM source_artifact WHERE content_hash = ?",
                     (revision.content_hash,),
@@ -590,56 +874,63 @@ class AnalysisStore:
                         "(content_hash, payload) VALUES (?, ?)",
                         (revision.content_hash, zlib.compress(content.encode())),
                     )
-                if content is None and (row is None or prepare is not None):
-                    assert source_row is not None
+                elif content is None:
                     content = zlib.decompress(source_row[0]).decode()
+                pending.append((revision, self._stored_path(revision), content))
+            # Source blobs are published before parsing; type inference and
+            # other worktrees must be able to write their own artifacts.
 
-                pending.append((revision, stored_path, key, content, row[0] if row else None))
+        def handle(item):
+            revision, stored_path, content = item
+            preparation = prepare(revision, content) if prepare is not None else None
+            imports = known_imports.get(revision.file_path)
+            extracted = None
+            if imports is None:
+                extracted = _extract_file_facts(revision, stored_path, content)
+                imports = self._file_imports(extracted)
+            return revision, extracted, imports, preparation
 
-            # Publish source blobs before parsing; type inference and other
-            # worktrees must be able to write their independent artifacts.
-            conn.commit()
+        from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+        from itertools import islice
 
-            def extract(item):
-                revision, stored_path, key, content, payload = item
-                preparation = prepare(revision, content) if prepare is not None else None
-                if payload is None:
-                    extracted = _extract_file_facts(revision, stored_path, content)
-                else:
-                    cached = pickle.loads(zlib.decompress(payload))
-                    extracted = ExtractedFile(revision, cached.qnames, cached.rows)
-                return key, extracted, payload is None, preparation
+        learned: list[tuple[str, bytes]] = []
 
-            from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-            from itertools import islice
+        def remember() -> None:
+            if learned:
+                with self._artifact_writer() as conn:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO revision_import_artifact "
+                        "(artifact_key, payload) VALUES (?, ?)", learned,
+                    )
+                learned.clear()
 
+        try:
             with ThreadPoolExecutor(max_workers=jobs) as pool:
-                def completed_files():
-                    items = iter(pending)
-                    def submit(item):
-                        if started is not None:
-                            started(item[0])
-                        return pool.submit(extract, item)
-                    futures = {submit(item) for item in islice(items, jobs or 8)}
-                    while futures:
-                        done, futures = wait(futures, return_when=FIRST_COMPLETED)
-                        for future in done:
-                            yield future.result()
-                        futures.update(submit(item) for item in islice(items, len(done)))
-                extracted_files = completed_files()
-                for key, extracted, fresh, preparation in extracted_files:
-                    if prepared is not None:
-                        prepared(extracted.revision, preparation)
-                    if fresh:
-                        conn.execute(
-                            "INSERT OR REPLACE INTO extracted_file_artifact "
-                            "(artifact_key, payload) VALUES (?, ?)",
-                            (key, zlib.compress(pickle.dumps(extracted))),
-                        )
-                        conn.commit()
-                    yield extracted
+                items = iter(pending)
+
+                def submit(item):
+                    if started is not None:
+                        started(item[0])
+                    return pool.submit(handle, item)
+
+                futures = {submit(item) for item in islice(items, jobs or 8)}
+                while futures:
+                    done, futures = wait(futures, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        revision, extracted, imports, preparation = future.result()
+                        if prepared is not None:
+                            prepared(revision, preparation)
+                        if extracted is not None:
+                            learned.append((
+                                self._import_artifact_key(revision),
+                                cache_codec.encode(imports),
+                            ))
+                            if len(learned) >= 512:
+                                remember()
+                        yield revision, extracted, imports
+                    futures.update(submit(item) for item in islice(items, len(done)))
         finally:
-            conn.close()
+            remember()
 
     def _revision_source(self, revision: FileRevision) -> str | None:
         """Load exact source bytes lazily for a reader of an older snapshot."""
@@ -689,6 +980,78 @@ class AnalysisStore:
             raise
         return path
 
+    def _link_generation(self, source_path: Path, prefix: str) -> Path | None:
+        """Give one generation a second name without copying its contents.
+
+        The engine reopens a database by name, so a reader needs a name that
+        publication never replaces.  Returns ``None`` where another name cannot
+        serve: an open file cannot be replaced on Windows, and some filesystems
+        have no hard links.
+        """
+        if os.name == "nt":
+            return None
+        for _ in range(8):
+            path = self._generation_name(prefix)
+            try:
+                os.link(source_path, path)
+            except FileExistsError:
+                continue
+            except OSError:
+                return None
+            return path
+        return None
+
+    def _privatize_generation(self, current_path: str) -> str:
+        """Copy a shared generation before one of its graphs is written."""
+        current = Path(current_path)
+        private = self._snapshot_copy(current, "facts-private-")
+        if current != self.facts_path:
+            self._unlink(current)
+        return str(private)
+
+    def _open_published(self, source_path: Path):
+        """Open the published generation under a name only this process uses."""
+        from emend.fact_graph import FactGraph
+
+        path = self._link_generation(source_path, "facts-open-")
+        shared = path is not None
+        if path is None:
+            path = self._snapshot_copy(source_path, "facts-open-")
+        try:
+            # The engine aborts on a file that is not a database and would
+            # initialize an empty one in place; reject both before it opens.
+            # A table from before keys were stored once is rebuilt, since
+            # copying it forward would keep its doubled size forever.
+            with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
+                row = db.execute(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'cozo'"
+                ).fetchone()
+                if row is None or "WITHOUT ROWID" not in str(row[0]).upper():
+                    raise sqlite3.DatabaseError(
+                        f"no current fact storage in {source_path}"
+                    )
+            graph = FactGraph(db_path=str(path), initialize_schema=False)
+        except BaseException:
+            self._unlink(path)
+            raise
+        if shared:
+            graph.mark_shared(self._privatize_generation)
+        return graph, path
+
+    def _publish_generation(self, graph, path: Path) -> None:
+        """Atomically make a finished private generation the published one."""
+        publish_path = self._link_generation(path, "facts-publish-")
+        shared = publish_path is not None
+        if publish_path is None:
+            publish_path = self._snapshot_copy(path, "facts-publish-")
+        try:
+            os.replace(publish_path, self.facts_path)
+        finally:
+            self._unlink(publish_path)
+        if shared:
+            # The published name now refers to this graph's own file.
+            graph.mark_shared(self._privatize_generation)
+
     def _set_disk_graph(self, graph: object) -> None:
         previous_path = self._graph_path(self._disk_graph)
         self._disk_graph = graph
@@ -698,8 +1061,22 @@ class AnalysisStore:
     def _updated_graph(self, previous, snapshot: AnalysisSnapshot, contents, extract=None):
         """Apply one revision delta, equally for disk and overlay generations."""
         from emend.analysis_linking import ModuleCatalog, link_extracted_files
-        from emend.fact_graph import FactGraph
+        from emend.fact_graph import FactGraph, prepare_cozo_storage
 
+        def module_inventory(revisions):
+            return {(r.file_path, r.language, r.module_name) for r in revisions}
+
+        # Import targets depend on the module inventory (for example TS index
+        # aliases), so a changed inventory relinks every file, as a changed
+        # analysis context does.  Nothing of the previous generation survives
+        # that: build a new one, which costs a fraction of deleting and
+        # re-inserting every row of a copy.  Ordinary body edits still replace
+        # only the edited file.
+        if previous is not None and (
+            previous.snapshot.analysis_context_id != snapshot.analysis_context_id
+            or module_inventory(previous.snapshot.files) != module_inventory(snapshot.files)
+        ):
+            previous = None
         if previous is None:
             path = self._temporary_db_path("facts-next-")
             graph = FactGraph()
@@ -707,40 +1084,27 @@ class AnalysisStore:
         else:
             graph, path = self._clone_graph(Path(previous._db_path), snapshot)
             before = {revision.file_path: revision for revision in previous.snapshot.files}
-            if previous.snapshot.analysis_context_id != snapshot.analysis_context_id:
-                before = {}
         graph.bind_snapshot(snapshot)
         after = {revision.file_path: revision for revision in snapshot.files}
         changed = [revision for file_path, revision in after.items()
                    if before.get(file_path) != revision]
-        removed = ({revision.file_path for revision in previous.snapshot.files}
-                   if previous is not None else set()) - after.keys()
+        removed = before.keys() - after.keys()
         try:
             graph.clear_snapshot_marker()
             catalog = ModuleCatalog.from_revisions(snapshot.files)
-            # Import targets depend on module inventory (for example TS index
-            # aliases). Relink cached callers when that inventory changes;
-            # ordinary body edits still replace only the edited file.
-            def module_inventory(revisions):
-                return {(r.file_path, r.language, r.module_name) for r in revisions}
-
-            if module_inventory(before.values()) != module_inventory(snapshot.files):
-                changed = list(snapshot.files)
-            local = (extract or self._extract_revisions)(changed, contents)
+            batches = (extract or self._extract_batches)(changed, contents)
             stored_paths = [graph.stored_path(file_path)
                             for file_path in [*(r.file_path for r in changed), *removed]]
-            if extract is None:
-                graph.replace_extracted(link_extracted_files(local, catalog), stored_paths=stored_paths)
-            else:
-                # This private generation is invisible until publication. Stream
-                # file transactions into it; any failure discards the generation.
-                graph.replace_extracted([], stored_paths=stored_paths)
-                for batch in local:
-                    graph.replace_extracted(link_extracted_files(batch, catalog), stored_paths=[])
+            # This private generation is invisible until publication. Stream
+            # file transactions into it; any failure discards the generation.
+            graph.replace_extracted([], stored_paths=stored_paths)
+            for batch in batches:
+                graph.replace_extracted(link_extracted_files(batch, catalog), stored_paths=[])
             graph.publish_snapshot(snapshot)
             if previous is None:
                 # Bulk-save the cold build once; subsequent edits keep using
                 # disk-backed deltas rather than loading the graph into RAM.
+                prepare_cozo_storage(path)
                 graph._client.backup(str(path))
                 graph.close()
                 graph = FactGraph(db_path=str(path))
@@ -756,15 +1120,21 @@ class AnalysisStore:
             self._unlink(path)
             raise
 
-    def _ensure_disk_facts(self, scan: _DiskScan, extract=None):
-        from emend.fact_graph import FactGraph
+    def _adopt_published_facts(self):
+        """Bind the published generation, if this store has none and it is valid.
 
+        Publication is an atomic rename of a finished generation, so this
+        needs no lock: whatever generation is found is complete.
+        """
         graph = self._disk_graph
+        if graph is not None and not self._generation_exists(graph):
+            # Another process retired this generation's name; reopen.
+            graph.close()
+            self._disk_graph = graph = None
         if graph is None and self.facts_path.is_file():
             path = candidate = None
             try:
-                path = self._snapshot_copy(self.facts_path, "facts-open-")
-                candidate = FactGraph(db_path=str(path))
+                candidate, path = self._open_published(self.facts_path)
                 published = candidate.published_snapshot(self.project_root)
                 if published is not None:
                     candidate.bind_snapshot(published, source_loader=self._revision_source)
@@ -777,6 +1147,10 @@ class AnalysisStore:
                     if candidate is not None:
                         candidate.close()
                     self._unlink(path)
+        return graph
+
+    def _ensure_disk_facts(self, scan: _DiskScan, extract=None):
+        graph = self._adopt_published_facts()
         if graph is not None and graph.snapshot.snapshot_id == scan.snapshot.snapshot_id:
             if extract is not None:
                 for _ in extract((), {}):
@@ -784,18 +1158,18 @@ class AnalysisStore:
             graph.bind_snapshot(scan.snapshot, source_loader=self._revision_source)
             return graph
         candidate, path = self._updated_graph(graph, scan.snapshot, scan.contents, extract)
-        publish_path = None
         try:
-            publish_path = self._snapshot_copy(path, "facts-publish-")
-            os.replace(publish_path, self.facts_path)
+            self._publish_generation(candidate, path)
         except BaseException:
             candidate.close()
             self._unlink(path)
             raise
-        finally:
-            self._unlink(publish_path)
         self._set_disk_graph(candidate)
         return candidate
+
+    def _generation_exists(self, graph: object) -> bool:
+        path = self._graph_path(graph)
+        return path is None or path.exists()
 
     def _discard_overlay_graph(self, *, close: bool = False) -> None:
         graph = self._overlay_graph
@@ -1086,8 +1460,13 @@ class AnalysisStore:
     def prepare_index_facts(self, file_paths=None, *, include_overlays=False,
                             include_environment=True, prepare=None, prepared=None,
                             callback=None, jobs=None):
-        """Fan one extraction stream into type inputs and a private fact view."""
-        from concurrent.futures import ThreadPoolExecutor
+        """Fan one pass over the project into type inputs and a private fact view.
+
+        The fact writer decides which revisions it must store; only those, and
+        revisions whose imports were never recorded, are parsed.
+        """
+        from concurrent.futures import Future, ThreadPoolExecutor
+        from concurrent.futures import TimeoutError as FutureTimeout
         from queue import Queue, Full, Empty
 
         scan = self._scan_disk()
@@ -1095,34 +1474,41 @@ class AnalysisStore:
             callback("total", str(len(scan.snapshot.files)))
         queue = Queue(maxsize=8)
         end = object()
+        plan: Future = Future()
 
         def consume(revisions, contents):
             required = {revision.file_path: revision for revision in revisions}
-            while True:
-                items = [queue.get()]
-                for _ in range(7):
-                    try:
-                        items.append(queue.get_nowait())
-                    except Empty:
-                        break
-                batch, finished = [], False
-                for item in items:
-                    if item is end:
-                        finished = True
-                        break
-                    if isinstance(item, BaseException):
-                        raise item
-                    expected = required.pop(item.revision.file_path, None)
-                    if expected is not None:
-                        if expected != item.revision:
-                            raise RuntimeError("extraction stream changed revisions")
-                        batch.append(item)
-                if batch:
-                    yield batch
-                if finished:
-                    if required:
-                        raise RuntimeError("incomplete extraction stream")
-                    return
+            if not plan.done():
+                plan.set_result(frozenset(required))
+
+            def batches():
+                while True:
+                    items = [queue.get()]
+                    for _ in range(7):
+                        try:
+                            items.append(queue.get_nowait())
+                        except Empty:
+                            break
+                    batch, finished = [], False
+                    for item in items:
+                        if item is end:
+                            finished = True
+                            break
+                        if isinstance(item, BaseException):
+                            raise item
+                        expected = required.pop(item.revision.file_path, None)
+                        if expected is not None:
+                            if expected != item.revision:
+                                raise RuntimeError("extraction stream changed revisions")
+                            batch.append(item)
+                    if batch:
+                        yield batch
+                    if finished:
+                        if required:
+                            raise RuntimeError("incomplete extraction stream")
+                        return
+
+            return batches()
 
         def materialize():
             with self._graph_lock, self._facts_write_lock():
@@ -1141,19 +1527,31 @@ class AnalysisStore:
                 writer.result()
                 raise RuntimeError("fact writer ended before extraction")
 
-            def files():
-                for file in self._extract_revisions(
+            def required_paths():
+                while True:
+                    try:
+                        return plan.result(timeout=0.05)
+                    except FutureTimeout:
+                        if writer.done():
+                            writer.result()
+                            raise RuntimeError("fact writer ended before planning")
+
+            def file_imports():
+                required = required_paths()
+                for revision, extracted, imports in self._prepare_revisions(
                     scan.snapshot.files, scan.contents,
                     prepare=prepare, prepared=prepared, jobs=jobs,
+                    needs_facts=lambda revision: revision.file_path in required,
                     started=(lambda revision: callback("start", revision.file_path))
                     if callback is not None else None,
                 ):
-                    send(file)
-                    yield file
+                    if extracted is not None and revision.file_path in required:
+                        send(extracted)
+                    yield revision.file_path, imports
                 send(end)
 
             try:
-                stream = files()
+                stream = file_imports()
                 if file_paths is None:
                     for _ in stream:
                         pass
@@ -1184,7 +1582,9 @@ class AnalysisStore:
         """Return the current facts, optionally with an owner-managed type view."""
         with self._graph_lock:
             scan = self._scan_disk()
-            disk_graph = self._disk_graph
+            # A reader of an up-to-date index neither waits for writers nor
+            # scans again: it adopts the generation that is already published.
+            disk_graph = self._adopt_published_facts()
             if (
                 disk_graph is None
                 or disk_graph.snapshot.snapshot_id != scan.snapshot.snapshot_id
@@ -1293,24 +1693,30 @@ class AnalysisStore:
                 if source_file_identities([path]).get(str(path)) != identity:
                     raise RuntimeError(f"dependency changed while reading: {path}")
                 digest = hashlib.sha256(source.encode()).hexdigest()
-                artifact_key = repr(("2", path.suffix, digest, config.identity))
+                artifact_key = repr(("3", path.suffix, digest, config.identity))
                 row = self.artifact_connection().execute(
                     "SELECT payload FROM dependency_import_artifact WHERE identity = ?",
                     (artifact_key,),
                 ).fetchone()
-                if row is None:
+                imports = None
+                if row is not None:
+                    try:
+                        imports = tuple(
+                            (str(module), name) for module, name in cache_codec.decode(row[0])
+                        )
+                    except (ValueError, TypeError):
+                        logger.debug("Unreadable dependency import artifact", exc_info=True)
+                if imports is None:
                     resolver = emend_core.PyScopeResolver(str(self.project_root), path.suffix.lstrip("."))
                     resolver.index_file(str(path), source)
                     imports = tuple((row[1].strip("'\""), row[2])
                                     for row in resolver.imports_in_file(str(path)))
                     def publish(db):
-                        db.execute("INSERT OR IGNORE INTO dependency_import_artifact VALUES (?, ?)",
-                                   (artifact_key, pickle.dumps(imports)))
+                        db.execute("INSERT OR REPLACE INTO dependency_import_artifact VALUES (?, ?)",
+                                   (artifact_key, cache_codec.encode(imports)))
                         db.execute("INSERT OR IGNORE INTO source_artifact VALUES (?, ?)",
                                    (digest, zlib.compress(source.encode())))
                     self.write(publish, artifacts=True)
-                else:
-                    imports = pickle.loads(row[0])
                 self._external_type_files[observed_key] = (identity, digest, imports)
             return FileRevision.create(root, path, digest, language, module), imports
 
@@ -1328,7 +1734,8 @@ class AnalysisStore:
         _, language_extensions = registry_snapshot()
         if graph is None or local_state is not None:
             if local_state is not None:
-                snapshot, files = local_state
+                snapshot, file_imports = local_state
+                imports_by_path = {path: list(imports) for path, imports in file_imports}
             else:
                 with self._source_lock:
                     scan = self._scan_disk()
@@ -1338,12 +1745,7 @@ class AnalysisStore:
                         {path: value[2] for path, value in self._overlays.items()}
                         if include_overlays else {}
                     )
-                files = self._extract_revisions(snapshot.files, contents)
-            imports_by_path = {
-                file.revision.file_path: [(row[1], row[2] or None)
-                                         for row in file.rows.get("imports", ())]
-                for file in files
-            }
+                imports_by_path = self._revision_imports(snapshot.files, contents)
         else:
             if not include_overlays and self._disk_graph is not None:
                 graph = self._disk_graph

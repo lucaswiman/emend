@@ -11,7 +11,6 @@ from ..pattern import (
     parse_pattern,
     compile_pattern_to_rust_ir,
     compile_constraint_to_rust_ir,
-    Pattern,
 )
 from emend import emend_core as _rust
 from emend.errors import BUG_EXCEPTIONS

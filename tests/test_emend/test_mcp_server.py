@@ -10,7 +10,7 @@ import pytest
 # Skip the entire module if the mcp package isn't usable (e.g. on Python
 # 3.14t where Pydantic has compatibility issues with the mcp SDK).
 try:
-    from emend.mcp_server import (
+    from emend.mcp import (
         mcp_app,
         dump_schema,
         configure_profile,
@@ -284,7 +284,6 @@ def test_run_server_starts_v2_transport(monkeypatch, transport, expected):
     run = Mock()
     monkeypatch.setattr(dispatch.mcp_app, "run", run)
 
-    assert not hasattr(dispatch, "_warm_caches_background")
     dispatch.run_server(transport=transport, port=8765)
 
     run.assert_called_once_with(**expected)
@@ -568,3 +567,62 @@ def test_mcp_help():
     )
     assert result.returncode == 0
     assert "MCP" in result.stdout or "mcp" in result.stdout.lower()
+
+
+class TestMapReadWriteTools:
+    """``map_read`` / ``map_write`` MCP tools over the mapping store."""
+
+    def test_map_write_add_and_read_mapping(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".emend" / "cache").mkdir(parents=True)
+
+        from emend.mcp import map_read, map_write
+
+        result = map_write(
+            kind="mapping", op="add",
+            entry={
+                "source_project": "user-svc",
+                "source_identifier": "UserService.create_user",
+                "target_project": "gateway",
+                "target_identifier": "POST /users",
+                "relationship": "implements",
+                "evidence": "The create_user method handles POST /users requests.",
+            },
+        )
+        data = json.loads(result)
+        assert data["source_identifier"] == "UserService.create_user"
+
+        search_result = map_read(kind="mapping", query="create_user")
+        results = json.loads(search_result)
+        assert len(results) >= 1
+
+        # Exact identifier lookup via query (no spaces → exact lookup)
+        lookup_result = map_read(kind="mapping", query="UserService.create_user")
+        results = json.loads(lookup_result)
+        assert len(results) >= 1
+
+    def test_map_write_delete(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".emend" / "cache").mkdir(parents=True)
+
+        from emend.mcp import map_read, map_write
+
+        map_write(
+            kind="mapping", op="add",
+            entry={
+                "source_project": "svc",
+                "source_identifier": "Foo.bar",
+                "target_project": "gw",
+                "target_identifier": "POST /foo",
+            },
+        )
+
+        result = map_write(
+            kind="mapping", op="delete",
+            entry={"source_identifier": "Foo.bar"},
+        )
+        data = json.loads(result)
+        assert data["deleted"] is True
+
+        results = json.loads(map_read(kind="mapping", query="Foo"))
+        assert len(results) == 0

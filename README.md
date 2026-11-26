@@ -557,10 +557,10 @@ uv pip install maturin
 make test
 
 # Run specific test file
-make test TESTS=tests/test_emend/test_add_parameter.py
+make test TESTS=tests/test_emend/test_lint.py
 
 # Run specific test
-make test TESTS="tests/test_emend/test_add_parameter.py::test_add_parameter_with_default"
+make test TESTS="tests/test_emend/test_lint.py::test_lint_basic_rule"
 ```
 
 Use separate environments to test other interpreters. `PYTHON_VERSION` selects
@@ -583,14 +583,14 @@ emend/
 │   ├── cli_tooling.py        # `tool` and `mcp`
 │   ├── cli_checks.py         # `check`, `lint`, `policy`
 │   ├── cli_map.py            # `map`
-│   ├── transform.py          # Core search/edit/analysis engine
+│   ├── transform/            # Core search/edit/analysis engine (package)
 │   ├── pattern.py            # Pattern parsing and compilation
 │   ├── query.py              # Symbol querying with filters
 │   ├── ast_commands.py       # AST-based command implementations
 │   ├── ast_utils.py          # AST traversal utilities
 │   ├── component_selector.py # Extended selector parsing
 │   ├── lint.py               # Pattern-based linter engine
-│   ├── mcp_server.py         # MCP server (optional, requires emend[mcp])
+│   ├── mcp/                  # MCP server package (optional, requires emend[mcp])
 │   └── grammars/
 │       ├── selector.lark     # Extended selector grammar
 │       └── pattern.lark      # Pattern grammar

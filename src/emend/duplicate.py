@@ -38,7 +38,7 @@ from emend.duplicate_heuristics import (
 # Cached payloads include the containing function/class symbol. Bump this whenever
 # the payload shape or canonicalization changes so stale rows cannot differ from
 # the cold (fresh-parse) path.
-DUP_CACHE_VERSION = "8"
+DUP_CACHE_VERSION = "9"
 
 def _duplicate_cache_key(file_path, content):
     """Content addressing includes the grammar, not the worktree path."""
@@ -877,10 +877,9 @@ def _load_cached_payloads(
     Returns ``{file_path: {"subtrees": [...], "sequences": [...]}}`` for
     files that have a cache hit, or ``None`` if the cache is unavailable.
     """
-    import pickle
     import sqlite3
-    import zlib
 
+    from emend import cache_codec
     from emend.transform import _cache_db_dir
 
     try:
@@ -918,9 +917,15 @@ def _load_cached_payloads(
         blob = cached_rows.get(content_hash)
         if blob is not None:
             try:
-                result[file_path] = pickle.loads(zlib.decompress(blob))
-            except Exception:
+                payload = cache_codec.decode(blob)
+            except ValueError:
                 logger.debug("Corrupt dup_cache entry for %s", file_path, exc_info=True)
+                continue
+            if isinstance(payload, dict) and all(
+                isinstance(payload.get(view, []), list)
+                for view in ("subtrees", "sequences")
+            ):
+                result[file_path] = payload
     return result if result else None
 
 

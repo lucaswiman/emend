@@ -483,7 +483,7 @@ search config --scope-local
 
 ## 8. Lint Rules
 
-Define pattern-based lint rules in `.emend/patterns.yaml`:
+Define pattern-based lint rules in `.emend/rules.yaml`:
 
 ```yaml
 macros:

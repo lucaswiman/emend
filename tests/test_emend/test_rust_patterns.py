@@ -347,14 +347,6 @@ class TestRustSubscriptMatching:
         matches = find_pattern("Optional[int]", str(f))
         assert len(matches) == 1
 
-    def test_subscript_parity(self, tmp_path):
-        n = _assert_rust_python_parity(
-            tmp_path,
-            "x: Optional[int] = None\ny: list[str] = []\n",
-            "Optional[$X]",
-        )
-        assert n == 1
-
 
 # ============================================================================
 # Assignment matching
@@ -386,14 +378,6 @@ class TestRustAssignMatching:
         assert len(matches) == 1
         assert matches[0].line == 1
 
-    def test_assign_parity(self, tmp_path):
-        n = _assert_rust_python_parity(
-            tmp_path,
-            "x = None\ny = 1\nz = None\n",
-            "$X = None",
-        )
-        assert n == 2
-
 
 # ============================================================================
 # Binary operation matching
@@ -423,13 +407,6 @@ class TestRustBinaryOpMatching:
         f.write_text(source)
         assert len(find_pattern(pattern, str(f))) == expected
 
-    def test_binary_parity(self, tmp_path):
-        _assert_rust_python_parity(
-            tmp_path,
-            "x = a + b\ny = c - d\nz = e + f\n",
-            "$X + $Y",
-        )
-
 
 # ============================================================================
 # Comparison matching
@@ -455,13 +432,6 @@ class TestRustCompareMatching:
         f = tmp_path / "test.py"
         f.write_text(source)
         assert len(find_pattern(pattern, str(f))) == expected
-
-    def test_compare_parity(self, tmp_path):
-        _assert_rust_python_parity(
-            tmp_path,
-            "if x == 1:\n    pass\nif y != 2:\n    pass\n",
-            "$X == $Y",
-        )
 
 
 # ============================================================================
@@ -490,13 +460,6 @@ class TestRustUnaryOpMatching:
         f.write_text("x = -1\ny = -x\nz = +1\n")
         matches = find_pattern("-$X", str(f))
         assert len(matches) == 2
-
-    def test_unary_parity(self, tmp_path):
-        _assert_rust_python_parity(
-            tmp_path,
-            "if not x:\n    pass\nif y:\n    pass\n",
-            "not $X",
-        )
 
 
 # ============================================================================

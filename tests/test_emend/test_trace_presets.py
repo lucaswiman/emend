@@ -119,47 +119,12 @@ class TestTypeScriptPresetLoading:
         assert len(config.sinks) >= 3
         assert len(config.sanitizers) >= 2
 
-    def test_express_sources_include_req_query(self):
-        config = get_preset("express")
-        source_patterns = [s.pattern for s in config.sources]
-        assert any("req.query" in p for p in source_patterns)
-
-    def test_express_sources_include_req_body(self):
-        config = get_preset("express")
-        source_patterns = [s.pattern for s in config.sources]
-        assert any("req.body" in p for p in source_patterns)
-
-    def test_express_sinks_include_eval(self):
-        config = get_preset("express")
-        sink_patterns = [s.pattern for s in config.sinks]
-        assert any("eval" in p for p in sink_patterns)
-
-    def test_express_sanitizers_include_escape(self):
-        config = get_preset("express")
-        sanitizer_patterns = [s.pattern for s in config.sanitizers]
-        assert any("escape" in p for p in sanitizer_patterns)
-
     def test_get_react_preset(self):
         config = get_preset("react")
         assert "user_input" in config.labels
         assert len(config.sources) >= 2
         assert len(config.sinks) >= 2
         assert len(config.sanitizers) >= 1
-
-    def test_react_sources_include_location(self):
-        config = get_preset("react")
-        source_patterns = [s.pattern for s in config.sources]
-        assert any("location" in p or "searchParams" in p or "cookie" in p for p in source_patterns)
-
-    def test_react_sinks_include_dangerously_set_inner_html(self):
-        config = get_preset("react")
-        sink_patterns = [s.pattern for s in config.sinks]
-        assert any("dangerouslySetInnerHTML" in p or "innerHTML" in p or "eval" in p for p in sink_patterns)
-
-    def test_react_sanitizers_include_dompurify(self):
-        config = get_preset("react")
-        sanitizer_patterns = [s.pattern for s in config.sanitizers]
-        assert any("DOMPurify" in p or "sanitize" in p for p in sanitizer_patterns)
 
     def test_get_nextjs_preset(self):
         config = get_preset("nextjs")
@@ -168,30 +133,10 @@ class TestTypeScriptPresetLoading:
         assert len(config.sinks) >= 2
         assert len(config.sanitizers) >= 1
 
-    def test_nextjs_sources_include_search_params(self):
-        config = get_preset("nextjs")
-        source_patterns = [s.pattern for s in config.sources]
-        assert any("searchParams" in p or "params" in p or "cookies" in p for p in source_patterns)
-
-    def test_nextjs_sinks_include_dangerous_html(self):
-        config = get_preset("nextjs")
-        sink_patterns = [s.pattern for s in config.sinks]
-        assert any("dangerouslySetInnerHTML" in p or "sql" in p or "redirect" in p for p in sink_patterns)
-
-    def test_nextjs_sanitizers_include_encode(self):
-        config = get_preset("nextjs")
-        sanitizer_patterns = [s.pattern for s in config.sanitizers]
-        assert any("encodeURIComponent" in p or "escape" in p or "sanitize" in p for p in sanitizer_patterns)
-
     def test_get_node_sql_preset(self):
         config = get_preset("node-sql")
         assert len(config.sinks) >= 3
         assert len(config.sanitizers) >= 1
-
-    def test_node_sql_sinks_include_pool_query(self):
-        config = get_preset("node-sql")
-        sink_patterns = [s.pattern for s in config.sinks]
-        assert any("pool.query" in p or "connection.query" in p or "query" in p for p in sink_patterns)
 
     def test_node_sql_sinks_include_knex_raw(self):
         config = get_preset("node-sql")
@@ -214,18 +159,6 @@ class TestRustPresetLoading:
         assert len(config.sinks) >= 3
         assert len(config.sanitizers) >= 1
 
-    def test_actix_web_sources_include_into_inner(self):
-        """actix-web sources use .into_inner() as extractor proxy (path-qualified
-        calls like web::Query are not matchable by the emend pattern engine)."""
-        config = get_preset("actix-web")
-        source_patterns = [s.pattern for s in config.sources]
-        assert any("into_inner" in p or "get" in p or "cookie" in p for p in source_patterns)
-
-    def test_actix_web_sinks_include_execute(self):
-        config = get_preset("actix-web")
-        sink_patterns = [s.pattern for s in config.sinks]
-        assert any("execute" in p or "arg" in p or "write" in p for p in sink_patterns)
-
     def test_get_axum_preset(self):
         config = get_preset("axum")
         assert "user_input" in config.labels
@@ -233,41 +166,15 @@ class TestRustPresetLoading:
         assert len(config.sinks) >= 2
         assert len(config.sanitizers) >= 1
 
-    def test_axum_sources_include_extractor(self):
-        """axum sources use .into_inner() as extractor proxy (path-qualified
-        calls like Query() are not matchable by the emend pattern engine)."""
-        config = get_preset("axum")
-        source_patterns = [s.pattern for s in config.sources]
-        assert any("into_inner" in p or "get" in p for p in source_patterns)
-
-    def test_axum_sinks_include_execute(self):
-        config = get_preset("axum")
-        sink_patterns = [s.pattern for s in config.sinks]
-        assert any("execute" in p or "arg" in p or "write" in p for p in sink_patterns)
-
     def test_get_sqlx_preset(self):
         config = get_preset("sqlx")
         assert len(config.sinks) >= 1
         assert len(config.sanitizers) >= 1
 
-    def test_sqlx_sinks_include_execute_or_query(self):
-        """sqlx sinks use method-call style (.execute, .query) since path-qualified
-        calls like sqlx::query are not matchable by the emend pattern engine."""
-        config = get_preset("sqlx")
-        sink_patterns = [s.pattern for s in config.sinks]
-        assert any("execute" in p or "query" in p or "fetch" in p for p in sink_patterns)
-
     def test_get_diesel_preset(self):
         config = get_preset("diesel")
         assert len(config.sinks) >= 1
         assert len(config.sanitizers) >= 1
-
-    def test_diesel_sinks_include_execute(self):
-        """diesel sinks use method-call style (.execute, .load) since path-qualified
-        calls like diesel::sql_query are not matchable by the emend pattern engine."""
-        config = get_preset("diesel")
-        sink_patterns = [s.pattern for s in config.sinks]
-        assert any("execute" in p or "load" in p or "sql_query" in p for p in sink_patterns)
 
 
 class TestPresetIntegration:

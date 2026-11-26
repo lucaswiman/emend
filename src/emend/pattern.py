@@ -99,9 +99,6 @@ class PatternTransformer(Transformer):
     def METAVAR_NAME(self, token):
         return str(token)
 
-    def TYPE_NAME(self, token):
-        return str(token)
-
 
 # Load grammar from package
 _grammar_text = importlib.resources.read_text("emend.grammars", "pattern.lark")

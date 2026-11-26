@@ -1,8 +1,8 @@
 """Transform engine for extended selectors.
 
-This package re-exports the complete public surface from the 10 submodules
-so that all existing ``from emend.transform import X`` imports continue to
-work unchanged.
+This package re-exports the names that callers import as
+``from emend.transform import X``.  Anything else lives in, and should be
+imported from, the submodule that defines it.
 """
 from __future__ import annotations
 
@@ -10,10 +10,8 @@ from __future__ import annotations
 # cache.py
 # ---------------------------------------------------------------------------
 from .cache import (
-    _SCHEMA_VERSION,
     _cache_db_dir,
     _knowledge_db_dir,
-    _get_disk_cache,
     _get_worktree_id,
     _init_cache_schema,
 )
@@ -27,10 +25,7 @@ from .index import (
     _ensure_index_fresh,
     _get_cached_qnames,
     _index_batch,
-    _lookup_via_modmap,
-    _query_symbol_index_cozo,
     _scan_manifest,
-    ManifestScanResult,
     get_index_status,
     query_import_graph,
     query_reference_index,
@@ -38,7 +33,6 @@ from .index import (
     warm_caches,
 )
 from .venv_index import (
-    _ensure_venv_index,
     _venv_db_path,
     lookup_venv_symbol,
 )
@@ -47,42 +41,24 @@ from .venv_index import (
 # project_iter.py
 # ---------------------------------------------------------------------------
 from .project_iter import (
-    _METAVAR_RE as _METAVAR_RE_proj,  # noqa: F401 (re-exported as alias)
-    _SKIP_DIRS,
-    _add_import_text,
-    _collect_source_files,
-    _collect_source_files_scandir,
-    _ext_from_path,
     _file_to_module,
-    _files_importing_module,
     _find_project_root,
     _find_source_root,
-    _get_imports,
     _normalize_module_qn,
-    _read_and_filter_py,
     detect_project_languages,
     extract_pattern_literals,
     find_pattern_in_project,
-    ProjectPatternMatch,
     visit_project_ts,
 )
 
-# Also export the file collection functions that project_iter re-imports
 from emend.file_collection import (
-    collect_source_files as _collect_source_files_impl,
-    collect_source_files_scandir as _collect_source_files_scandir_impl,
     collect_all_source_files as _collect_all_source_files,
-    collect_git_tracked_source_files as _collect_git_tracked_source_files,
 )
 
 # ---------------------------------------------------------------------------
 # components.py
 # ---------------------------------------------------------------------------
 from .components import (
-    _CONTENT_REF_RE,
-    _extract_string_content_from_text,
-    _generate_diff,
-    _raise_component_not_found,
     add_to_component,
     get_component,
     remove_component,
@@ -94,11 +70,6 @@ from .components import (
 # ---------------------------------------------------------------------------
 from .patterns import (
     PatternMatch,
-    _collect_name_contexts,
-    _filter_matches_by_import,
-    _filter_matches_by_scope_local,
-    _filter_matches_by_type_oracle,
-    _is_valid_replacement,
     _resolve_relative_module,
     _substitute_metavars,
     analyze_imports,
@@ -113,10 +84,7 @@ from .patterns import (
 # refs.py
 # ---------------------------------------------------------------------------
 from .refs import (
-    Callee,
-    Reference,
     _get_or_build_fact_graph,
-    _rename_in_docstrings,
     find_callees,
     find_callers,
     find_references,
@@ -132,14 +100,7 @@ from .deadcode import (
     DeadSymbol,
     dead_code_result_details,
     dead_code_result_to_dict,
-    DeletePlan,
-    _ENTRY_POINT_DECORATOR_BASENAMES,
-    _ENTRY_POINT_DECORATORS,
-    _ENTRY_POINT_NAMES,
     _get_entry_point_config,
-    _get_last_reference_commit,
-    _parse_decorator_name,
-    _string_literal_filter,
     find_dead_code,
     safe_delete,
     semantic_context,
@@ -151,11 +112,8 @@ from .deadcode import (
 from .impact import (
     ImpactEdge,
     ImpactResult,
-    _find_impact_via_fact_graph,
     _is_test_file,
     _is_test_symbol,
-    _parse_diff_to_selectors,
-    _try_relative,
     find_impact,
 )
 
@@ -163,12 +121,6 @@ from .impact import (
 # rename_move.py
 # ---------------------------------------------------------------------------
 from .rename_move import (
-    _replace_module_in_strings,
-    _rename_module_references,
-    _resolve_relative_import_qn,
-    _source_has_remaining_refs,
-    _split_or_retarget_import,
-    _update_imports_for_move,
     move_module,
     move_symbol,
     rename_module,
@@ -180,12 +132,6 @@ from .rename_move import (
 # ---------------------------------------------------------------------------
 from .dispatch import (
     _apply_matching_filter,
-    _cmd_add_single,
-    _cmd_edit_single,
-    _cmd_lookup_single_selector,
-    _dispatch_with_returns_filter,
-    _expand_selector_with_returns_filter,
-    _merge_type_filter,
     cmd_add,
     cmd_edit,
     cmd_lookup,
@@ -199,56 +145,40 @@ from emend import emend_core as _rust
 
 __all__ = [
     # cache
-    "_SCHEMA_VERSION", "_cache_db_dir", "_knowledge_db_dir",
-    "_get_disk_cache", "_get_worktree_id", "_init_cache_schema",
+    "_cache_db_dir", "_knowledge_db_dir", "_get_worktree_id", "_init_cache_schema",
     # index
     "_compute_duplicate_payloads", "_ensure_cache_ignore_files",
-    "_ensure_index_fresh", "_ensure_venv_index",
-    "_get_cached_qnames", "_index_batch", "_lookup_via_modmap",
-    "_query_symbol_index_cozo", "_scan_manifest", "_venv_db_path", "ManifestScanResult",
+    "_ensure_index_fresh", "_get_cached_qnames", "_index_batch",
+    "_scan_manifest", "_venv_db_path",
     "get_index_status", "lookup_venv_symbol", "query_import_graph", "query_reference_index",
     "query_symbol_index", "warm_caches",
     # project_iter
-    "_SKIP_DIRS", "_add_import_text", "_collect_source_files", "_collect_source_files_scandir",
-    "_ext_from_path", "_file_to_module", "_files_importing_module",
-    "_find_project_root", "_find_source_root", "_get_imports",
-    "_normalize_module_qn", "_read_and_filter_py", "detect_project_languages",
-    "extract_pattern_literals", "find_pattern_in_project", "ProjectPatternMatch",
+    "_file_to_module", "_find_project_root", "_find_source_root",
+    "_normalize_module_qn", "detect_project_languages",
+    "extract_pattern_literals", "find_pattern_in_project",
     "visit_project_ts",
+    # file_collection
+    "_collect_all_source_files",
     # components
-    "_CONTENT_REF_RE", "_extract_string_content_from_text", "_generate_diff",
-    "_raise_component_not_found", "add_to_component", "get_component", "remove_component",
-    "set_component",
+    "add_to_component", "get_component", "remove_component", "set_component",
     # patterns
-    "PatternMatch", "_collect_name_contexts", "_filter_matches_by_import",
-    "_filter_matches_by_scope_local", "_filter_matches_by_type_oracle",
-    "_is_valid_replacement", "_resolve_relative_module", "_substitute_metavars",
+    "PatternMatch", "_resolve_relative_module", "_substitute_metavars",
     "analyze_imports", "copy_symbol", "find_pattern", "get_symbol_source", "remove_symbol",
     "replace_pattern",
     # refs
-    "Callee", "Reference", "_get_or_build_fact_graph",
-    "_rename_in_docstrings", "find_callees", "find_callers", "find_references",
+    "_get_or_build_fact_graph", "find_callees", "find_callers", "find_references",
     "generate_graph",
     # deadcode
-    "DeadBlock", "DeadModule", "DeadSymbol", "DeletePlan",
+    "DeadBlock", "DeadModule", "DeadSymbol",
     "dead_code_result_details", "dead_code_result_to_dict",
-    "_ENTRY_POINT_DECORATOR_BASENAMES", "_ENTRY_POINT_DECORATORS", "_ENTRY_POINT_NAMES",
-    "_get_entry_point_config", "_get_last_reference_commit",
-    "_parse_decorator_name", "_string_literal_filter",
+    "_get_entry_point_config",
     "find_dead_code", "safe_delete", "semantic_context",
     # impact
-    "ImpactEdge", "ImpactResult", "_find_impact_via_fact_graph", "_is_test_file",
-    "_is_test_symbol", "_parse_diff_to_selectors",
-    "_try_relative", "find_impact",
+    "ImpactEdge", "ImpactResult", "_is_test_file", "_is_test_symbol", "find_impact",
     # rename_move
-    "_replace_module_in_strings", "_rename_module_references", "_resolve_relative_import_qn",
-    "_source_has_remaining_refs", "_split_or_retarget_import", "_update_imports_for_move",
     "move_module", "move_symbol", "rename_module", "rename_symbol",
     # dispatch
-    "_apply_matching_filter", "_cmd_add_single", "_cmd_edit_single",
-    "_cmd_lookup_single_selector", "_dispatch_with_returns_filter",
-    "_expand_selector_with_returns_filter", "_merge_type_filter", "cmd_add", "cmd_edit",
-    "cmd_lookup",
+    "_apply_matching_filter", "cmd_add", "cmd_edit", "cmd_lookup",
     # rust
     "_rust",
 ]

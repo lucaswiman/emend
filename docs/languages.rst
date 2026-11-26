@@ -75,8 +75,14 @@ Create ``src/emend/languages/<lang>/`` with three files:
    src/emend/languages/
      <lang>/
        config.toml    # Required: language configuration
-       plugin.py      # Required: plugin handler composition
+       plugin.py      # Optional: plugin handler composition
        symbols.scm    # Optional: tree-sitter query (documentation only)
+
+Without a ``plugin.py``, ``load_plugin()`` falls back to a generic plugin: a
+no-op import handler, a line-comment ``noqa`` handler using the configured
+comment prefix, and the tree-sitter pattern compiler.  Of the built-in
+languages only ``rust`` and ``typescript`` ship a ``plugin.py``; Python's
+plugin lives in ``src/emend/python_plugin.py``.
 
 Step 2: Write ``config.toml``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -496,8 +502,6 @@ Each language plugin composes three handler objects:
 .. code-block:: python
 
    class CommentHandler(ABC):
-       @property
-       def line_comment_prefix(self) -> str: ...
        def find_docstrings(self, source: str, symbol_byte_range: tuple[int, int]) -> list: ...
        def find_noqa_comments(self, source: str) -> dict: ...
        def rename_in_docstrings(self, content: str, old_name: str, new_name: str) -> str | None: ...

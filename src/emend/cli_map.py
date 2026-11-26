@@ -12,7 +12,6 @@ from emend.knowledge import (
     IdentifierMapping,
     MappingStore,
     ModuleMapping,
-    make_resolve_module_cb,
     mapping_to_dict,
     module_mapping_to_dict,
 )

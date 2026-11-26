@@ -10,8 +10,6 @@ if TYPE_CHECKING:
     from ..component_selector import ExtendedSelector
     from ..fact_graph import FactGraph
 
-from emend.errors import BUG_EXCEPTIONS
-
 logger = logging.getLogger(__name__)
 
 @dataclass

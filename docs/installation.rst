@@ -162,6 +162,7 @@ Runtime dependencies (all installed automatically):
 - `Typer <https://typer.tiangolo.com/>`_ -- CLI framework
 - `Lark <https://github.com/lark-parser/lark>`_ -- Grammar-based parsing for selectors and patterns
 - `PyYAML <https://pyyaml.org/>`_ -- YAML parsing for batch operations and lint rules
+- `msgspec <https://jcristharif.com/msgspec/>`_ -- Native JSON codec for cache rows
 
 The ``emend_core`` extension (tree-sitter, rayon, PyO3) is compiled into the wheel
 and requires no separate installation.

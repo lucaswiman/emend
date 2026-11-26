@@ -10,6 +10,8 @@ from ..component_selector import ExtendedSelector, parse_extended_selector
 from ..query import QueryFilter, format_query_results, query_symbols
 
 if TYPE_CHECKING:
+    from typing import IO
+
     from ..type_oracle import TypeOracle
 
 logger = logging.getLogger(__name__)
@@ -27,7 +29,7 @@ def _cmd_lookup_single_selector(  # noqa: C901
 ) -> str:
     """Lookup logic for a single (non-glob) selector."""
     from .components import get_component
-    from .patterns import get_symbol_source, find_pattern
+    from .patterns import get_symbol_source
     # Handle line-based selectors with metadata - find containing symbol
     if selector.line_start is not None and metadata:
         from emend.ast_utils import find_nested_definitions, find_symbol_by_line

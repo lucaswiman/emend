@@ -651,3 +651,61 @@ class Processor:
 
         # Should not show Processor
         assert not any(p and p['signature'] == 'Processor' for p in parsed_lines), "Processor should not appear with Calculator selector"
+
+
+class TestListSymbolsTreeSitter:
+    def test_basic_output(self, emend_cmd, tmp_path):
+        """list-symbols produces correct output after tree-sitter migration."""
+        code = '''\
+def foo(x: int) -> str:
+    return str(x)
+
+class Bar:
+    def method(self):
+        pass
+'''
+        filepath = tmp_path / "test.py"
+        filepath.write_text(code)
+
+        result = subprocess.run(
+            [emend_cmd, "search", str(filepath), "--output", "summary"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert "foo(x: int) -> str" in result.stdout
+        assert "Bar" in result.stdout
+        assert "method(self)" in result.stdout
+
+    def test_variables_in_tree(self, emend_cmd, tmp_path):
+        """Variables appear in tree mode with correct type annotations."""
+        code = '''\
+def func():
+    x: int = 42
+    y = "hello"
+'''
+        filepath = tmp_path / "test.py"
+        filepath.write_text(code)
+
+        result = subprocess.run(
+            [emend_cmd, "search", str(filepath), "--output", "summary", "--depth", "2"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert "var x: int" in result.stdout
+        assert "var y" in result.stdout
+
+    def test_async_function_signature(self, emend_cmd, tmp_path):
+        """Async functions show correct signatures."""
+        code = '''\
+async def handler(request: Request, *, timeout: int = 30) -> Response:
+    pass
+'''
+        filepath = tmp_path / "test.py"
+        filepath.write_text(code)
+
+        result = subprocess.run(
+            [emend_cmd, "search", str(filepath), "--output", "summary"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert "async def handler(request: Request, *, timeout: int = 30) -> Response" in result.stdout

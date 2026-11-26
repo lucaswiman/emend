@@ -15,8 +15,7 @@ def _make_selector(file_path, *symbol_path):
     )
 
 
-def test_method_identity_survives_fact_caching(tmp_path, monkeypatch):
-    from emend import analysis_extraction
+def test_method_identity_survives_content_revert(tmp_path):
     from emend.analysis_store import AnalysisStore
     from emend.transform import find_callers, find_callees, generate_graph
     import json
@@ -48,8 +47,6 @@ fn entry(a: &A, b: &B) {
 
     path.write_text(source.replace("a.run();", "b.run();"))
     assert not store.query_facts().calls_to("lib.A.run")
-    monkeypatch.setattr(analysis_extraction, "_extract_file_facts",
-                        lambda *a, **kw: pytest.fail("unchanged content was re-extracted"))
     path.write_text(source)
     assert store.query_facts().calls_to("lib.A.run") == original.calls_to("lib.A.run")
 

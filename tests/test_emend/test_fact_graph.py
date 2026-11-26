@@ -35,29 +35,6 @@ from emend.fact_graph import (
 )
 
 
-def _native_imports(file_path: str, source: str) -> list[ImportFact]:
-    """Read import rows from the canonical per-file fact batch."""
-    from emend.analysis_extraction import _extract_file_facts
-    from emend.analysis_snapshot import FileRevision
-    from emend.language_registry import detect_language, language_config_snapshot
-
-    language = detect_language(file_path) or "python"
-    revision = FileRevision.create(
-        Path.cwd(), Path(file_path).resolve(), "test", language,
-        Path(file_path).stem, analysis_config=language_config_snapshot(language),
-    )
-    extracted = _extract_file_facts(
-        revision, file_path, source,
-    )
-    return [
-        ImportFact(
-            importing_file=row[0], imported_module=row[1],
-            imported_name=row[2] or None, alias=row[4] or None, line=row[3],
-        )
-        for row in extracted.rows["imports"]
-    ]
-
-
 @pytest.mark.parametrize("persistent", [False, True])
 def test_batched_fact_mutations_abort_as_one_transaction(tmp_path, request, persistent):
     graph = FactGraph(db_path=str(tmp_path / "facts.db") if persistent else None)
@@ -71,7 +48,9 @@ def test_batched_fact_mutations_abort_as_one_transaction(tmp_path, request, pers
     with pytest.raises(RuntimeError, match="CozoDB query error"):
         graph._run_mutations(
             [
-                (put, {"rows": [["a.after", "a.py", "after", "function", 2, 2, ""]]}),
+                # The cells at positions 0, 1 and 6 are stored as ids.
+                (put, {"rows": [["a.after", "a.py", "after", "function", 2, 2, ""]]},
+                 {"rows": (0, 1, 6)}),
                 ("?[x] := *missing_relation[x]", {}),
             ]
         )
@@ -297,56 +276,6 @@ class TestImportQueries:
         assert g.imports_in("lib.py") == []
 
 
-class TestRustImportExtraction:
-    """Tests for Rust import extraction via tree-sitter (Phase 4 migration)."""
-
-    def _extract(self, content: str) -> list[ImportFact]:
-        return _native_imports("test.rs", content)
-
-    @pytest.mark.parametrize(("source", "module", "name", "alias"), [
-        pytest.param("use std::io;\n", "std", "io", None, id="simple-use"),
-        pytest.param("pub use crate::foo::Bar;\n", "crate::foo", "Bar", None, id="reexport"),
-        pytest.param("use std::collections::HashMap as HM;\n", "std::collections", "HashMap", "HM", id="alias"),
-        pytest.param("use std::io::*;\n", "std::io", "*", None, id="glob"),
-        pytest.param("mod sub_module;\n", "sub_module", None, None, id="external-module"),
-        pytest.param("use super::baz as b;\n", "super", "baz", "b", id="relative-alias"),
-        pytest.param("pub(crate) use std::sync::Arc;\n", "std::sync", "Arc", None, id="crate-visibility"),
-    ])
-    def test_single_import_contract(self, source, module, name, alias):
-        assert self._extract(source) == [ImportFact("test.rs", module, name, alias, 1)]
-
-    def test_nested_use_tree(self):
-        """``use std::{io, fmt::{self, Display}}`` — nested use tree."""
-        src = "use std::{io, fmt::{self, Display}};\n"
-        facts = self._extract(src)
-        by_name = {f.imported_name: f for f in facts}
-        # io from std
-        assert "io" in by_name
-        assert by_name["io"].imported_module == "std"
-        # fmt (self) from std::fmt
-        assert "fmt" in by_name
-        assert by_name["fmt"].imported_module == "std"
-        # Display from std::fmt
-        assert "Display" in by_name
-        assert by_name["Display"].imported_module == "std::fmt"
-
-    def test_line_numbers(self):
-        """Line numbers are correctly reported for each import."""
-        src = "use std::io;\nuse std::fmt;\nmod helper;\n"
-        facts = self._extract(src)
-        lines = {f.imported_module: f.line for f in facts}
-        assert lines["std"] == 1 or lines.get("std") in (1, 2)
-        # Check at least two different lines appear
-        line_vals = [f.line for f in facts]
-        assert len(set(line_vals)) >= 2
-
-    def test_inline_mod_not_extracted(self):
-        """``mod name { ... }`` inline modules are NOT extracted as imports."""
-        src = "mod inner {\n    pub fn foo() {}\n}\n"
-        facts = self._extract(src)
-        assert len(facts) == 0
-
-
 class TestSerialization:
     def test_roundtrip(self):
         g = _make_graph()
@@ -508,7 +437,8 @@ class TestCozoScriptQueries:
     def test_raw_query_transitive_closure(self):
         g = _make_graph()
         result = g.run_query(
-            'reaches[b] := *call["app.main", b, _, _, _, _, _]\n'
+            # Names are stored as ids: look the id of the text up first.
+            'reaches[b] := *intern["app.main", main], *call[main, b, _, _, _, _, _]\n'
             'reaches[b] := *call[mid, b, _, _, _, _, _], reaches[mid]\n'
             '?[b] := reaches[b]'
         )
@@ -1290,146 +1220,6 @@ class TestDeadCodeExcludePathsWithFp:
         )
 
 
-class TestMultiLineImportExtraction:
-    """Verify that multi-line parenthesised imports are correctly extracted.
-
-    The old hand-rolled regex matched only single-line imports and missed
-    multi-line statements such as ``from foo import (\\n    bar,\\n    baz\\n)``.
-    The canonical native batch must handle all such cases.
-    """
-
-    def _imports(self, source: str) -> list[str]:
-        """Return a sorted list of (module, imported_name) string pairs."""
-        facts = _native_imports("test_module.py", source)
-        return sorted(
-            f"{f.imported_module}:{f.imported_name or ''}"
-            for f in facts
-        )
-
-    def test_single_line_from_import(self):
-        src = "from foo import bar\n"
-        pairs = self._imports(src)
-        assert "foo:bar" in pairs
-
-    def test_multi_line_parenthesised_import(self):
-        src = "from foo import (\n    bar,\n    baz\n)\n"
-        pairs = self._imports(src)
-        assert "foo:bar" in pairs, f"Expected foo:bar in {pairs}"
-        assert "foo:baz" in pairs, f"Expected foo:baz in {pairs}"
-
-    def test_plain_import(self):
-        src = "import os\n"
-        pairs = self._imports(src)
-        assert "os:" in pairs
-
-    def test_mixed_imports(self):
-        src = (
-            "import sys\n"
-            "from foo import (\n"
-            "    bar,\n"
-            "    baz,\n"
-            ")\n"
-            "from qux import quux\n"
-        )
-        pairs = self._imports(src)
-        assert "sys:" in pairs
-        assert "foo:bar" in pairs
-        assert "foo:baz" in pairs
-        assert "qux:quux" in pairs
-
-
-# ---------------------------------------------------------------------------
-# Phase 3: TypeScript import extraction via PyScopeResolver
-# ---------------------------------------------------------------------------
-
-
-class TestTypescriptImportExtraction:
-    """Verify that TypeScript/JavaScript imports are extracted via the
-    tree-sitter-backed PyScopeResolver (no hand-rolled regexes).
-    """
-
-    def _imports(self, filename: str, source: str):
-        """Return ImportFact objects from the canonical native batch."""
-        return _native_imports(filename, source)
-
-    def _modules(self, source: str) -> set[str]:
-        """Return the set of imported module paths from a TypeScript snippet."""
-        return {f.imported_module for f in self._imports("/tmp/app.ts", source)}
-
-    def _names(self, source: str) -> set[str]:
-        """Return the set of imported name values (imported_name field)."""
-        return {f.imported_name for f in self._imports("/tmp/app.ts", source)
-                if f.imported_name is not None}
-
-    def test_named_imports_extract_module_and_names(self):
-        """import { Foo, Bar } from './foo' should produce two facts."""
-        source = 'import { Foo, Bar } from "./foo";'
-        facts = self._imports("/tmp/app.ts", source)
-        modules = {f.imported_module for f in facts}
-        names = {f.imported_name for f in facts}
-        assert "./foo" in modules
-        assert "Foo" in names
-        assert "Bar" in names
-
-    def test_type_only_import_produces_fact(self):
-        """import type { Foo } from './foo' should be handled like a regular import."""
-        source = 'import type { Foo } from "./foo";'
-        facts = self._imports("/tmp/app.ts", source)
-        assert len(facts) == 1
-        assert facts[0].imported_module == "./foo"
-        assert facts[0].imported_name == "Foo"
-
-    def test_multi_line_import_extracts_all_names(self):
-        """Multi-line import { foo,\\n  bar } from 'baz' should produce two facts."""
-        source = 'import {\n  foo,\n  bar\n} from "baz";'
-        names = self._names(source)
-        assert "foo" in names, f"'foo' not found in {names}"
-        assert "bar" in names, f"'bar' not found in {names}"
-
-    def test_module_path_quotes_are_stripped(self):
-        """Module paths should not include surrounding quote characters."""
-        source = 'import { X } from "./mymodule";'
-        facts = self._imports("/tmp/app.ts", source)
-        assert len(facts) >= 1
-        for f in facts:
-            assert not f.imported_module.startswith('"'), (
-                f"Module path should not have leading quote: {f.imported_module!r}"
-            )
-            assert not f.imported_module.endswith('"'), (
-                f"Module path should not have trailing quote: {f.imported_module!r}"
-            )
-
-    def test_line_numbers_are_zero(self):
-        """PyScopeResolver.imports_in_file() does not return line numbers; line=0."""
-        source = 'import { A } from "./a";'
-        facts = self._imports("/tmp/app.ts", source)
-        for f in facts:
-            assert f.line == 0, f"Expected line=0, got line={f.line}"
-
-    def test_tsx_extension_works(self):
-        """TSX files (.tsx) should also be handled."""
-        source = 'import React from "react";'
-        facts = self._imports("/tmp/Component.tsx", source)
-        assert any(f.imported_module == "react" for f in facts), (
-            f"Expected 'react' in facts, got: {facts}"
-        )
-
-    def test_js_extension_works(self):
-        """JS files (.js) should also be handled."""
-        source = 'import { helper } from "./utils";'
-        facts = self._imports("/tmp/app.js", source)
-        modules = {f.imported_module for f in facts}
-        assert "./utils" in modules, f"Expected './utils' in {modules}"
-
-    @pytest.mark.parametrize("source", [
-        'import "./side-effect";',
-        'export { X } from "./bar";',
-        'const { a, b } = require("./c");',
-    ])
-    def test_unsupported_import_forms_are_omitted(self, source):
-        assert self._imports("/tmp/app.ts", source) == []
-
-
 class TestFactsCliTaintFlowsAlias:
     """``emend analyze facts --type taint_flows`` is documented as an alias of
     ``trace_flows`` in the ``--type`` help text; it must not error out."""
@@ -1461,3 +1251,69 @@ class TestFactsCliTaintFlowsAlias:
         result = CliRunner().invoke(app, ["analyze", "facts", str(tmp_path), "--json"])
         assert result.exit_code == 0, result.output
         assert json.loads(result.output) == []
+
+
+class TestBuildFromFiles:
+    """FactGraph.build_from_files() populates facts from explicit file lists."""
+
+    def test_single_file_has_symbols(self, tmp_path):
+        """A single Python file yields symbol facts."""
+        src = tmp_path / "app.py"
+        src.write_text("def handler():\n    pass\n")
+        graph = FactGraph.build_from_files([str(src)])
+        symbols = graph.symbols()
+        names = [s.name for s in symbols]
+        assert "handler" in names
+
+    def test_single_file_has_cfg_blocks(self, tmp_path):
+        """A single Python file yields CFG block facts."""
+        src = tmp_path / "app.py"
+        src.write_text("def handler():\n    x = 1\n    return x\n")
+        graph = FactGraph.build_from_files([str(src)])
+        blocks = graph.cfg_blocks()
+        assert len(blocks) > 0, "Should have at least one CFG block"
+
+    def test_single_file_has_def_use_facts(self, tmp_path):
+        """A single Python file with assignment yields def-use facts."""
+        src = tmp_path / "app.py"
+        src.write_text("def handler():\n    x = 1\n    return x\n")
+        graph = FactGraph.build_from_files([str(src)])
+        du = graph.def_uses()
+        var_names = [d.var_name for d in du]
+        assert "x" in var_names, f"Expected 'x' in def-use facts, got {var_names}"
+
+    def test_single_file_has_cfg_edges(self, tmp_path):
+        """A single Python file with branching yields CFG edge facts."""
+        src = tmp_path / "app.py"
+        src.write_text(
+            "def handler(cond):\n"
+            "    if cond:\n"
+            "        x = 1\n"
+            "    else:\n"
+            "        x = 2\n"
+            "    return x\n"
+        )
+        graph = FactGraph.build_from_files([str(src)])
+        edges = graph.cfg_edges()
+        assert len(edges) > 0, "Should have CFG edges for branching code"
+
+    def test_multiple_files(self, tmp_path):
+        """Multiple files are all indexed."""
+        f1 = tmp_path / "a.py"
+        f1.write_text("def foo():\n    pass\n")
+        f2 = tmp_path / "b.py"
+        f2.write_text("def bar():\n    pass\n")
+        graph = FactGraph.build_from_files([str(f1), str(f2)])
+        names = [s.name for s in graph.symbols()]
+        assert "foo" in names
+        assert "bar" in names
+
+    def test_paths_are_absolute(self, tmp_path):
+        """File paths in facts are absolute so callers can look up by abs path."""
+        src = tmp_path / "app.py"
+        src.write_text("def handler():\n    pass\n")
+        graph = FactGraph.build_from_files([str(src)])
+        symbols = graph.symbols()
+        file_paths = {s.file_path for s in symbols}
+        # Should contain the resolved absolute path
+        assert str(src.resolve()) in file_paths

@@ -38,3 +38,17 @@ def test_accessor_and_pseudo_class(component, accessor, pseudo_class):
     assert parse_extended_selector(query) == ExtendedSelector(
         "file.py", ["func"], component, accessor, pseudo_class,
     )
+
+
+def test_extended_selector_line_range():
+    """ExtendedSelector has line_range property."""
+    sel = ExtendedSelector(
+        file_path="test.py", symbol_path=[], line_start=10, line_end=20,
+    )
+    assert sel.line_range == (10, 20)
+
+
+def test_extended_selector_line_range_none():
+    """line_range is None when line_start/end not set."""
+    sel = ExtendedSelector(file_path="test.py", symbol_path=["func"])
+    assert sel.line_range is None

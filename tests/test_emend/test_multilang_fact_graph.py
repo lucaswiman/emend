@@ -120,12 +120,6 @@ class TestDetectProjectLanguages:
         langs = detect_project_languages(str(tmp_path))
         assert isinstance(langs, list)
 
-    def test_returns_list(self, tmp_path):
-        """Result is always a list."""
-        (tmp_path / "app.py").write_text(_PY_SOURCE)
-        langs = detect_project_languages(str(tmp_path))
-        assert isinstance(langs, list)
-
 
 # ---------------------------------------------------------------------------
 # Test: _collect_all_source_files()

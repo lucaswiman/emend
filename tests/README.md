@@ -32,13 +32,24 @@ the MCP extra when changing its adapters; a module-level skip is not validation.
 | Contract | Scenario inventory |
 | --- | --- |
 | `test_trace_{typescript,rust}.py` | Direct and alternate sources, assignments, branches, loops, sanitization, TS arrows/subscripts/try-catch, Rust match arms; container propagation remains explicitly best-effort. |
-| `test_interprocedural_trace_{typescript,rust}.py` | Arguments, returned taint, transitive summaries, late sanitizers, TS delegation/async, Rust method/closure analogues. |
+| `test_interprocedural_trace_{typescript,rust}.py` | Arguments, returned taint, transitive summaries and three-hop chains, late sanitizers, TS async (best effort). Cases that only renamed identifiers were dropped. |
 | `test_transform.py` | Seven literal/node-kind constraints and six quote-stripping interpolation forms; statement captures, invalid interpolation and dry runs stay separate. |
 | `test_type_oracle.py`, `test_typeoracle_integration.py` | Language type structure, balanced delimiters, oracle constraints, engine selection and precedence. |
-| `test_fact_graph.py` | Symbol filters (including combined filters), trace-flow filters and seven single-import Rust forms. Nested imports and multiple source lines remain separate. |
+| `test_fact_graph.py` | Symbol filters (including combined filters), trace-flow filters and `build_from_files`. |
+| `test_import_extraction.py` | Per-language import rows: seven single-import Rust forms (exact rows), nested use trees, multi-line Python imports, and TS forms that produce no facts. Multiple source lines remain separate. |
 | `test_multi_language.py` | Extension detection, config sections, TypeScript/Rust symbol discovery and pattern matching; Rust integer matching retains a separate best-effort smoke test. |
+| `test_language_registry.py` | Registry freshness, `resolve_files`, exported names, DSL extension detection, and one parse smoke case per DSL extension (`parse_source` returns `None` without a grammar). |
 | `test_dead_code.py`, `test_cfg_{typescript,rust}.py` | Shared warm-index setup and def-use collection; scenario assertions and source fixtures remain explicit. |
-| CLI/MCP/Vim adapters | Named help groups and both trace routes; exact trace output, duplicate defaults and asynchronous indexing responses. |
+| `test_trace.py`, `test_interprocedural_trace.py`, `test_policy.py` | Engine scenarios plus the CLI routes: `trace --json` API/CLI parity, `trace --interprocedural` JSON schema and text summary, `engine == "occurrence"`, summaries/iterations, flow-policy API/CLI parity. |
+| `test_refs.py` | `refs` write/read filters, nested-symbol qualified names, callers and callees, with their CLI commands. |
+| `test_graph.py` | Python call graph in plain/JSON/DOT and through the CLI (`test_graph_{rust,typescript}.py` are the language companions). |
+| `test_show.py` | `search` code output, `--output metadata`, line selectors and lookup dispatch. |
+| `test_ast_utils.py`, `test_project_iter.py` | Symbol-tree helpers (`find_nested_definitions`, path/line lookup, wildcards); `visit_project_ts` and `_file_to_module`. |
+| CLI/MCP/Vim adapters | Named help groups, top-level aliases (`test_cli_surface_consolidation.py`) and both trace routes; exact trace output, duplicate defaults and asynchronous indexing responses. All MCP tool tests live in `test_mcp_server.py`, which skips as a module without the `mcp` SDK. |
 
 Cache identity, edits/reverts, worktree reuse, overlays, concurrent publication,
 and incremental/full-rebuild parity retain their dedicated stateful tests.
+
+There are no `test_phaseN*.py` suites: their surviving cases live in the topical
+files above (completion ranking in `test_completion_ranking.py`, the duplicate
+cache in `test_duplicate.py`).

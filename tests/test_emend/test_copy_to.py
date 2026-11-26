@@ -574,3 +574,39 @@ def wrapper_function():
         assert decorator_names[0] == "decorator_one", f"First decorator should be decorator_one, got {decorator_names[0]}"
         assert decorator_names[1] == "decorator_two", f"Second decorator should be decorator_two, got {decorator_names[1]}"
         assert decorator_names[2] == "decorator_three", f"Third decorator should be decorator_three, got {decorator_names[2]}"
+
+
+def test_copy_to_single_line(run_emend_cmd):
+    """Test copy-to with single line selector."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        f.write("""
+def outer():
+    def inner():
+        # Line 4
+        return "inner"
+    return inner()
+""")
+        f.flush()
+        temp_file = f.name
+
+    dest_file = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False)
+    dest_file.close()
+
+    try:
+        # copy-to for line 4 should extract the inner function
+        result = run_emend_cmd([
+            "copy-to",
+            f"{temp_file}:4",
+            dest_file.name,
+            "--dedent"
+        ])
+
+        assert result.returncode == 0, f"Command failed: {result.stderr}"
+
+        # Preview should show the symbol name being copied
+        output = result.stdout
+        assert "inner" in output, \
+            f"Expected symbol name 'inner' in output, got: {output}"
+    finally:
+        Path(temp_file).unlink()
+        Path(dest_file.name).unlink()

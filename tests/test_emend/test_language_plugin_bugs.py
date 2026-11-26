@@ -405,76 +405,6 @@ class TestFindSourceRootLanguageThreading:
             "warm_caches() is missing a 'language' keyword parameter"
         )
 
-    def test_ensure_index_fresh_passes_language_to_find_source_root(self, tmp_path):
-        """When language='rust' is passed to _ensure_index_fresh(), it should
-        forward it to _find_source_root() so Rust source root detection is used."""
-        from unittest.mock import patch, MagicMock
-        from emend.transform import _ensure_index_fresh
-
-        # Patch _find_source_root to track what language arg it receives
-        with patch("emend.transform._find_source_root", return_value=str(tmp_path)) as mock_fsr:
-            # _ensure_index_fresh will fail early (no DB), but we can still
-            # check whether _find_source_root was called with the right language.
-            # We also need to patch enough to reach the _find_source_root call.
-            # The function calls _find_project_root first, then opens DB, etc.
-            # We'll patch to get past early checks.
-            with patch("emend.transform._find_project_root", return_value=str(tmp_path)):
-                with patch("emend.transform._cache_db_dir", return_value=tmp_path):
-                    with patch("emend.transform._get_worktree_id", return_value="test"):
-                        # Create a minimal DB so the function progresses
-                        import sqlite3
-                        db = tmp_path / "parse.db"
-                        conn = sqlite3.connect(str(db))
-                        conn.execute("CREATE TABLE IF NOT EXISTS file_manifest "
-                                     "(worktree_id TEXT, path TEXT, mtime_ns INTEGER, "
-                                     "size INTEGER, content_hash BLOB, indexed_at REAL, "
-                                     "PRIMARY KEY (worktree_id, path))")
-                        conn.commit()
-                        conn.close()
-
-                        try:
-                            _ensure_index_fresh(str(tmp_path), language="rust")
-                        except Exception:
-                            pass  # We don't care if it fails; we just need the call
-
-                        # If _find_source_root was called, check it got language="rust"
-                        if mock_fsr.called:
-                            call_args = mock_fsr.call_args
-                            # It should have been called with language="rust"
-                            lang_arg = call_args.kwargs.get("language") or (
-                                call_args.args[1] if len(call_args.args) > 1 else None
-                            )
-                            assert lang_arg == "rust", (
-                                f"_find_source_root() was called with language={lang_arg!r}, "
-                                f"expected 'rust'"
-                            )
-
-    def test_warm_caches_passes_language_to_find_source_root(self, tmp_path):
-        """When language='typescript' is passed to warm_caches(), it should
-        forward it to _find_source_root()."""
-        from unittest.mock import patch
-        from emend.transform import warm_caches
-
-        with patch("emend.transform._find_source_root", return_value=str(tmp_path)) as mock_fsr:
-            with patch("emend.transform._find_project_root", return_value=str(tmp_path)):
-                with patch("emend.transform._cache_db_dir", return_value=tmp_path):
-                    with patch("emend.transform._ensure_cache_ignore_files"):
-                        with patch("emend.transform.visit_project_ts", return_value=[]):
-                            try:
-                                warm_caches(str(tmp_path), language="typescript")
-                            except Exception:
-                                pass
-
-                            if mock_fsr.called:
-                                call_args = mock_fsr.call_args
-                                lang_arg = call_args.kwargs.get("language") or (
-                                    call_args.args[1] if len(call_args.args) > 1 else None
-                                )
-                                assert lang_arg == "typescript", (
-                                    f"_find_source_root() was called with language={lang_arg!r}, "
-                                    f"expected 'typescript'"
-                                )
-
     def test_query_symbol_index_accepts_language(self):
         """query_symbol_index() should accept a language parameter so it can
         forward it to _ensure_index_fresh()."""
@@ -493,15 +423,6 @@ class TestFindSourceRootLanguageThreading:
         sig = inspect.signature(query_reference_index)
         assert "language" in sig.parameters, (
             "query_reference_index() is missing a 'language' keyword parameter"
-        )
-
-    def test_find_dead_code_uses_fact_graph(self):
-        """find_dead_code() should use FactGraph.dead_code_unified() for detection."""
-        import inspect
-        from emend.transform import find_dead_code
-        sig = inspect.signature(find_dead_code)
-        assert "project_path" in sig.parameters, (
-            "find_dead_code() is missing a 'project_path' parameter"
         )
 
     def test_find_dead_code_uses_datalog_backend(self, tmp_path):

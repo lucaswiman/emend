@@ -16,8 +16,7 @@ SOURCE = "def hello():\n    return 42\n"
 
 
 def test_warm_skip_revalidates_module_context_after_parent_cache_probe(tmp_path, monkeypatch):
-    import pickle
-    import zlib
+    from emend import cache_codec
     from emend.analysis_store import AnalysisStore
     from emend.transform.index import warm_caches
 
@@ -34,15 +33,13 @@ def test_warm_skip_revalidates_module_context_after_parent_cache_probe(tmp_path,
     monkeypatch.setattr(AnalysisStore, "prepare_index_facts", change_context)
     warm_caches(str(tmp_path), type_engine="none", jobs=1)
     with sqlite3.connect(tmp_path / ".emend/cache/parse.db") as conn:
-        payload = conn.execute("SELECT qnames FROM qn_index").fetchone()[0]
-        assert pickle.loads(zlib.decompress(payload)) == {"hello.hello"}
+        payload = conn.execute("SELECT names FROM qn_index").fetchone()[0]
+        assert cache_codec.decode(payload) == ["hello.hello"]
 
 
 def test_source_root_change_refreshes_editor_projection_without_content_edits(tmp_path, monkeypatch):
-    import pickle
-    import zlib
     from unittest.mock import Mock
-    from emend import emend_core
+    from emend import cache_codec, emend_core
     from emend.transform import index
     from emend.transform.index import warm_caches, _ensure_index_fresh
 
@@ -56,7 +53,7 @@ def test_source_root_change_refreshes_editor_projection_without_content_edits(tm
     monkeypatch.setattr(emend_core, "collect_symbols_from_str", symbols)
     with sqlite3.connect(tmp_path / ".emend/cache/parse.db") as conn:
         def names():
-            return pickle.loads(zlib.decompress(conn.execute("SELECT qnames FROM qn_index").fetchone()[0]))
+            return set(cache_codec.decode(conn.execute("SELECT names FROM qn_index").fetchone()[0]))
 
         assert names() == {"app.hello.hello"}
         config = tmp_path / "setup.cfg"
@@ -552,7 +549,15 @@ class TestTypeCacheWarming:
             assert run()["type_cached"] == 2
         assert callback_threads == {get_ident()}
         assert written.is_set()
-        assert sorted(extracted) == sorted(str(proj / name) for name in ("a.py", "b.py", "b.py"))
+        # Facts are parsed when they are stored; an unseen revision is also
+        # parsed once when its imports are first needed for a type identity.
+        # Cold index: a.py and b.py.  Identity of the edited b.py: b.py.
+        expected = ["a.py", "b.py", "b.py"]
+        if failure != "facts" and not overlay:
+            # The edit reached disk, so its facts are stored afterwards.  A
+            # failing fact write stops before any further file is parsed.
+            expected += ["b.py"]
+        assert sorted(extracted) == sorted(str(proj / name) for name in expected)
 
     @pytest.mark.parametrize("edit", [None, "source", "config"])
     def test_pyrefly_starts_before_extraction(self, tmp_path, monkeypatch, edit):
@@ -1054,4 +1059,25 @@ def test_owned_cache_initializer_configures_and_commits_migration(tmp_path):
 
     with sqlite3.connect(path) as conn:
         columns = [row[1] for row in conn.execute("PRAGMA table_info(qn_index)")]
-        assert columns == ["file_path", "hash", "qnames"]
+        assert columns == ["file_path", "hash", "names"]
+
+
+def test_cache_initializer_drops_qualified_name_rows_in_the_old_row_format(tmp_path):
+    from contextlib import closing
+    from emend.transform.cache import _initialize_cache_connection
+
+    path = tmp_path / "parse.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE qn_index (file_path TEXT NOT NULL, hash BLOB NOT NULL, "
+            "qnames BLOB, PRIMARY KEY (file_path, hash))"
+        )
+        conn.execute("INSERT INTO qn_index VALUES ('a.py', X'01', X'02')")
+
+    with closing(sqlite3.connect(path)) as conn:
+        _initialize_cache_connection(conn)
+
+    with sqlite3.connect(path) as conn:
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(qn_index)")]
+        assert columns == ["file_path", "hash", "names"]
+        assert conn.execute("SELECT count(*) FROM qn_index").fetchone() == (0,)

@@ -166,25 +166,3 @@ result = helper()
     # Files should be unchanged
     assert module.read_text() == module_original
     assert user.read_text() == user_original
-
-
-def test_rename_dry_run(tmp_path, run_emend_cmd):
-    """Test that dry-run doesn't modify files."""
-    test_file = tmp_path / "test.py"
-    original_content = """\
-def old_name():
-    pass
-"""
-    test_file.write_text(original_content)
-
-    # Dry-run (no --apply)
-    result = run_emend_cmd([
-        "rename", f"{test_file}::old_name", "--to", "new_name",
-        "--project", str(tmp_path)
-    ])
-    assert result.returncode == 0
-    assert "-def old_name():" in result.stdout
-    assert "+def new_name():" in result.stdout
-
-    # File should be unchanged
-    assert test_file.read_text() == original_content

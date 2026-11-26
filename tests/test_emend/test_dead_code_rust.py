@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import textwrap
+
 import pytest
 
 
@@ -167,3 +169,93 @@ class TestDeadCodeRust:
         # do_thing inside the impl satisfies the trait contract and should not
         # be flagged.
         assert "do_thing" not in dead_names
+
+
+class TestUnreachableBlocksRust:
+    """Unreachable block detection for Rust source files."""
+
+    def _build_index(self, project_path: str) -> None:
+        from emend.transform import warm_caches
+
+        warm_caches(project_path, type_engine="none")
+
+    def test_unreachable_after_return_rs(self, tmp_path):
+        """Code after a return statement in a Rust function is unreachable."""
+        from emend.transform import DeadBlock, DeadSymbol, find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.rs").write_text(textwrap.dedent("""\
+            fn f() -> i32 {
+                return 1;
+                let x = 2;
+                x
+            }
+        """))
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        blocks = [d for d in dead if isinstance(d, DeadBlock)]
+        assert len(blocks) >= 1
+        assert any(b.start_line >= 3 for b in blocks)
+
+    def test_unreachable_after_break_rs(self, tmp_path):
+        """Code after a break statement in a Rust loop is unreachable."""
+        from emend.transform import DeadBlock, DeadSymbol, find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.rs").write_text(textwrap.dedent("""\
+            fn f() -> i32 {
+                loop {
+                    break;
+                    let x = 2;
+                }
+                1
+            }
+        """))
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        blocks = [d for d in dead if isinstance(d, DeadBlock)]
+        assert len(blocks) >= 1
+        assert any(b.start_line >= 4 for b in blocks)
+
+    def test_reachable_after_if_return_rs(self, tmp_path):
+        """Code after a conditional return in Rust IS reachable - should not be flagged."""
+        from emend.transform import DeadBlock, DeadSymbol, find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.rs").write_text(textwrap.dedent("""\
+            fn f(x: i32) -> i32 {
+                if x > 0 {
+                    return x;
+                }
+                -x
+            }
+        """))
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        blocks = [d for d in dead if isinstance(d, DeadBlock)]
+        assert len(blocks) == 0
+
+    def test_unreachable_after_match_all_return_rs(self, tmp_path):
+        """Code after a match expression where all arms return is unreachable."""
+        from emend.transform import DeadBlock, DeadSymbol, find_dead_code
+
+        project = tmp_path / "project"
+        project.mkdir()
+        (project / "mod.rs").write_text(textwrap.dedent("""\
+            fn f(x: i32) -> i32 {
+                match x {
+                    0 => return 0,
+                    _ => return 1,
+                }
+                let dead = 2;
+                dead
+            }
+        """))
+        self._build_index(str(project))
+        dead = list(find_dead_code(str(project), show_last_reference=False))
+        blocks = [d for d in dead if isinstance(d, DeadBlock)]
+        assert len(blocks) >= 1
+        assert any(b.start_line >= 6 for b in blocks)

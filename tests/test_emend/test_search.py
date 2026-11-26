@@ -6,9 +6,11 @@ Covered elsewhere:
 - Filter combinations (--kind, --name, etc.): test_query.py
 """
 
+import pytest
 from typer.testing import CliRunner
 
 from emend.cli import app
+from emend.transform import find_pattern
 
 runner = CliRunner()
 
@@ -369,3 +371,99 @@ class TestPatternModeLimit:
         )
         assert result.exit_code == 0
         assert result.stdout.strip() == "6"
+
+
+class TestScopeLocal:
+    """Tests for --scope-local flag that filters to locally-defined names."""
+
+    def test_scope_local_excludes_imported(self, tmp_path):
+        """--scope-local excludes matches where the name is imported."""
+        f = tmp_path / "test.py"
+        f.write_text(
+            "from os.path import join\n"
+            "\n"
+            "def join_local(a, b):\n"
+            "    return a + b\n"
+            "\n"
+            "result1 = join('a', 'b')\n"
+            "result2 = join_local('a', 'b')\n"
+        )
+        # Without scope_local: both calls match
+        all_matches = find_pattern("$FUNC($A, $B)", str(f))
+        all_names = {m.captures["FUNC"] for m in all_matches}
+        assert "join" in all_names
+        assert "join_local" in all_names
+
+        # With scope_local: only locally-defined join_local matches
+        local_matches = find_pattern("$FUNC($A, $B)", str(f), scope_local=True)
+        local_names = {m.captures["FUNC"] for m in local_matches}
+        assert "join_local" in local_names
+        assert "join" not in local_names
+
+    def test_scope_local_keeps_local_definitions(self, tmp_path):
+        """--scope-local keeps matches for locally-defined names."""
+        f = tmp_path / "test.py"
+        f.write_text(
+            "def process(x):\n"
+            "    return x + 1\n"
+            "\n"
+            "result = process(42)\n"
+        )
+        matches = find_pattern("process($X)", str(f), scope_local=True)
+        assert len(matches) == 1
+
+    @pytest.mark.parametrize(
+        "filename,source,pattern,expected_lines",
+        [
+            ("alias.py", "from os.path import join as j\nj('a', 'b')\n", "j($A, $B)", []),
+            (
+                "nested.py",
+                "from os.path import join as j\ndef outer():\n"
+                "    def j(a, b): return a + b\n    return j('a', 'b')\n",
+                "j($A, $B)", [4],
+            ),
+            ("module.py", "import os.path as p\np.join('a', 'b')\n", "p.join($A, $B)", []),
+            (
+                "shadow.py", "import os\ndef use(os):\n    return os.path.join('a', 'b')\n",
+                "os.path.join($A, $B)", [3],
+            ),
+            (
+                "test.ts",
+                "import { join as j } from 'node:path';\nconst x = j('a', 'b');\n",
+                "j($A, $B)", [],
+            ),
+            (
+                "test.rs",
+                'use std::path::Path as P;\nfn f() { P::new("x"); }\n',
+                "P::new($X)", [],
+            ),
+        ],
+        ids=["alias", "nested-shadow", "module-alias", "parameter-shadow", "typescript", "rust"],
+    )
+    def test_scope_local_respects_import_and_scope_boundaries(
+        self, tmp_path, filename, source, pattern, expected_lines,
+    ):
+        f = tmp_path / filename
+        f.write_text(source)
+
+        matches = find_pattern(pattern, str(f), scope_local=True)
+        assert [match.line for match in matches] == expected_lines
+
+    def test_scope_local_cli(self, tmp_path, run_emend_cmd):
+        """CLI --scope-local flag works."""
+        f = tmp_path / "test.py"
+        f.write_text(
+            "from os.path import join\n"
+            "\n"
+            "def my_join(a, b):\n"
+            "    return a + b\n"
+            "\n"
+            "x = join('a', 'b')\n"
+            "y = my_join('a', 'b')\n"
+        )
+        result = run_emend_cmd([
+            "search", "$FUNC($A, $B)", str(f), "--scope-local", "--output", "count"
+        ])
+        # Should only count locally-defined calls (my_join), not join
+        count = int(result.stdout.strip())
+        assert count >= 1

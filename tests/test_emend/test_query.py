@@ -10,6 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from emend.cli import app
+from emend.query import query_symbols, QueryFilter
 
 runner = CliRunner()
 
@@ -756,3 +757,99 @@ def test_collect_symbols_cache_key_includes_language(tmp_path):
     assert [s.name for s in py_syms] == ["foo"]
     # Parsed as TypeScript, ``def foo(): pass`` yields no function symbol.
     assert [s.name for s in ts_syms] == []
+
+
+# ---------------------------------------------------------------------------
+# query_symbols() API: symbol collection and filters
+# ---------------------------------------------------------------------------
+
+API_SAMPLE_CODE = '''\
+import os
+from typing import Optional
+
+@staticmethod
+def standalone(x: int, /, y: str = "default", *args, kw_only: bool = True, **kwargs) -> list[str]:
+    """A standalone function."""
+    return [str(x)]
+
+async def async_func(data: list) -> None:
+    pass
+
+class MyClass:
+    """A sample class."""
+
+    @property
+    def name(self) -> str:
+        return "test"
+
+    def method(self, request):
+        def closure():
+            return request
+        return closure()
+
+    async def async_method(self, ctx) -> Optional[str]:
+        return None
+'''
+
+
+@pytest.fixture
+def api_sample_file(tmp_path):
+    p = tmp_path / "sample.py"
+    p.write_text(API_SAMPLE_CODE)
+    return p
+
+
+class TestQuerySymbolCollection:
+    def test_collect_functions(self, api_sample_file):
+        filters = QueryFilter(kinds=["function"])
+        results = query_symbols(api_sample_file, filters)
+        names = [s.name for s in results]
+        assert "standalone" in names
+        assert "method" not in names
+
+    def test_collect_methods(self, api_sample_file):
+        filters = QueryFilter(kinds=["method"])
+        results = query_symbols(api_sample_file, filters)
+        names = [s.name for s in results]
+        assert "method" in names
+        assert "standalone" not in names
+
+    def test_collect_async(self, api_sample_file):
+        filters = QueryFilter(kinds=["async_function"])
+        results = query_symbols(api_sample_file, filters)
+        names = [s.name for s in results]
+        assert "async_func" in names
+        assert "async_method" not in names
+
+    def test_decorator_filter(self, api_sample_file):
+        filters = QueryFilter(decorators=["property"])
+        results = query_symbols(api_sample_file, filters)
+        names = [s.name for s in results]
+        assert "name" in names
+
+    def test_returns_filter(self, api_sample_file):
+        filters = QueryFilter(returns_patterns=["None"])
+        results = query_symbols(api_sample_file, filters)
+        names = [s.name for s in results]
+        assert "async_func" in names
+
+    def test_depth_filter(self, api_sample_file):
+        filters = QueryFilter(depths=["1"])
+        results = query_symbols(api_sample_file, filters)
+        names = [s.name for s in results]
+        assert "standalone" in names
+        assert "MyClass" in names
+        assert "method" not in names
+
+    def test_parameter_info(self, api_sample_file):
+        filters = QueryFilter(names=["standalone"])
+        results = query_symbols(api_sample_file, filters)
+        assert len(results) == 1
+        params = results[0].parameters
+        assert any("x: int" in p for p in params)
+
+    def test_return_type_info(self, api_sample_file):
+        filters = QueryFilter(names=["standalone"])
+        results = query_symbols(api_sample_file, filters)
+        assert len(results) == 1
+        assert results[0].returns == "list[str]"

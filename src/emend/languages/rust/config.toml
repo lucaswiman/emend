@@ -304,8 +304,9 @@ value = "value"
 # Trace / taint analysis configuration
 # ---------------------------------------------------------------------------
 [trace]
-# Rust keywords — identifiers matching these are excluded from
-# _extract_identifiers() to avoid false taint propagation.
+# Rust keywords.  Duplicate detection ignores these tokens when judging
+# whether a fragment is trivial, and emend.trace._extract_identifiers() drops
+# them from the identifiers it returns.
 keywords = [
     "Self", "abstract", "as", "async", "await", "become", "box",
     "break", "const", "continue", "crate", "do", "dyn", "else",

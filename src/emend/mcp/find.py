@@ -129,7 +129,6 @@ def search(
         from pathlib import Path
 
         file_path_obj = Path(file_for_summary)
-        lines: list[str] = []
         if file_path_obj.is_dir() or "*" in file_for_summary or "?" in file_for_summary:
             files, _ = resolve_files(file_for_summary, language=None)
             from emend import emend_core

@@ -203,7 +203,6 @@ class FunctionSummary:
     file_path: str
     param_to_return: dict[str, set[str]] = field(default_factory=dict)
     param_to_sink: dict[str, list[tuple[str, str, int]]] = field(default_factory=dict)
-    param_to_param: dict[str, set[str]] = field(default_factory=dict)
 
 
 @dataclass

@@ -20,6 +20,7 @@ mod cfg;
 mod cfg_py;
 mod tree_py;
 mod fact_rows;
+mod flow_blob;
 
 /// A match result returned to Python.
 #[pyclass(from_py_object)]
@@ -66,31 +67,6 @@ fn collect_files(
     Ok(files.into_iter().map(|p| p.to_string_lossy().into_owned()).collect())
 }
 
-/// Return the list of non-dot directory names that are skipped during scanning.
-///
-/// All directories starting with '.' are also skipped automatically.
-#[pyfunction]
-fn skip_dirs() -> Vec<&'static str> {
-    scanner::SKIP_DIRS.to_vec()
-}
-
-/// Pre-filter files: return only those whose content contains `name_hint`.
-///
-/// Reads files in parallel using rayon.
-#[pyfunction]
-fn filter_files_by_content(files: Vec<String>, name_hint: &str) -> PyResult<Vec<String>> {
-    let hint = name_hint.to_string();
-    let result: Vec<String> = files
-        .into_par_iter()
-        .filter(|path| {
-            std::fs::read_to_string(path)
-                .map(|content| content.contains(&hint))
-                .unwrap_or(false)
-        })
-        .collect();
-    Ok(result)
-}
-
 /// Find all occurrences of a literal name in Python files using tree-sitter.
 ///
 /// This is the fast path for simple patterns (no metavariables). It parses
@@ -108,56 +84,6 @@ fn find_name_in_files(files: Vec<String>, name: &str) -> PyResult<Vec<Match>> {
                 return None;
             }
             let matches = pattern::find_identifiers(&content, &target, &path);
-            if matches.is_empty() {
-                None
-            } else {
-                Some(matches)
-            }
-        })
-        .collect();
-    Ok(results.into_iter().flatten().collect())
-}
-
-/// Find all function/method call sites of `name` in Python files using tree-sitter.
-///
-/// Returns matches where `name` appears as the function in a call expression.
-/// Files are processed in parallel.
-#[pyfunction]
-fn find_calls_in_files(files: Vec<String>, name: &str) -> PyResult<Vec<Match>> {
-    let target = name.to_string();
-    let results: Vec<Vec<Match>> = files
-        .into_par_iter()
-        .filter_map(|path| {
-            let content = std::fs::read_to_string(&path).ok()?;
-            if !content.contains(&target) {
-                return None;
-            }
-            let matches = pattern::find_calls(&content, &target, &path);
-            if matches.is_empty() {
-                None
-            } else {
-                Some(matches)
-            }
-        })
-        .collect();
-    Ok(results.into_iter().flatten().collect())
-}
-
-/// Find attribute access patterns like `$X.<name>(...)` in files.
-///
-/// Matches method calls where the method name matches `name`.
-/// Returns the full `obj.method(args)` text.
-#[pyfunction]
-fn find_method_calls_in_files(files: Vec<String>, method_name: &str) -> PyResult<Vec<Match>> {
-    let target = method_name.to_string();
-    let results: Vec<Vec<Match>> = files
-        .into_par_iter()
-        .filter_map(|path| {
-            let content = std::fs::read_to_string(&path).ok()?;
-            if !content.contains(&target) {
-                return None;
-            }
-            let matches = pattern::find_method_calls(&content, &target, &path);
             if matches.is_empty() {
                 None
             } else {
@@ -187,15 +113,6 @@ fn read_and_filter_files(files: Vec<String>, hints: Vec<String>) -> PyResult<Vec
         })
         .collect();
     Ok(results)
-}
-
-/// Collect callees for all top-level symbols in a Python source file.
-///
-/// Returns a list of (symbol_name, [callee_names]) tuples.
-/// Callee names are bare function/method names (deduplicated).
-#[pyfunction]
-fn collect_callees(source: &str) -> PyResult<Vec<(String, Vec<String>)>> {
-    Ok(pattern::collect_callees_from_source(source))
 }
 
 /// Extract all import statements from Python files in parallel.
@@ -293,13 +210,6 @@ fn collect_identifier_positions(source: &str, ext: &str, project_root: &str) -> 
 fn collect_string_literals(source: &str, ext: &str) -> PyResult<Vec<(u32, u32, u32, u32, u32, u32, String)>> {
     Ok(pattern::collect_string_literals(source, ext))
 }
-
-/// Direct string elements of module-level Python ``__all__`` list/tuple assignments.
-#[pyfunction]
-fn python_all_names(source: &str) -> Vec<String> {
-    pattern::python_all_names(source)
-}
-
 
 /// Collect all comment nodes from source code.
 ///
@@ -429,45 +339,15 @@ fn has_error_or_missing(node: tree_sitter::Node, block_nodes: &[String]) -> bool
     false
 }
 
-/// Extract all call sites from source code using tree-sitter.
-///
-/// Returns a list of (callee, [arg1, arg2, ...], line, col, is_method) tuples.
-/// Each argument is the exact text of a single argument node, correctly handling
-/// nested expressions like tuples, dicts, and function calls.
-///
-/// Parameters:
-/// - source: the source code text
-/// - lang_name: tree-sitter language name ("python", "typescript", "rust")
-/// - call_node_type: the tree-sitter node type for calls (e.g. "call", "call_expression")
-/// - args_field_name: the field name for the arguments node (e.g. "arguments")
-#[pyfunction]
-fn extract_call_sites(
-    source: &str,
-    lang_name: &str,
-    call_node_type: &str,
-    args_field_name: &str,
-) -> PyResult<Vec<(String, Vec<String>, usize, usize, bool)>> {
-    let sites = pattern::extract_call_sites(source, lang_name, call_node_type, args_field_name);
-    Ok(sites
-        .into_iter()
-        .map(|s| (s.callee, s.args, s.line, s.col, s.is_method))
-        .collect())
-}
-
 /// Python module definition.
 #[pymodule(gil_used = false)]
 fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Match>()?;
     m.add_function(wrap_pyfunction!(collect_python_files, m)?)?;
     m.add_function(wrap_pyfunction!(collect_files, m)?)?;
-    m.add_function(wrap_pyfunction!(skip_dirs, m)?)?;
-    m.add_function(wrap_pyfunction!(filter_files_by_content, m)?)?;
     m.add_function(wrap_pyfunction!(find_name_in_files, m)?)?;
-    m.add_function(wrap_pyfunction!(find_calls_in_files, m)?)?;
-    m.add_function(wrap_pyfunction!(find_method_calls_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(read_and_filter_files, m)?)?;
     m.add_function(wrap_pyfunction!(extract_imports, m)?)?;
-    m.add_function(wrap_pyfunction!(collect_callees, m)?)?;
     m.add_function(wrap_pyfunction!(files_importing_module, m)?)?;
     m.add_function(wrap_pyfunction!(scope::resolve_node_import, m)?)?;
     m.add_function(wrap_pyfunction!(symbols::collect_symbols_batch, m)?)?;
@@ -477,11 +357,9 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(symbols::get_statement_ranges, m)?)?;
     m.add_function(wrap_pyfunction!(collect_identifier_positions, m)?)?;
     m.add_function(wrap_pyfunction!(collect_string_literals, m)?)?;
-    m.add_function(wrap_pyfunction!(python_all_names, m)?)?;
     m.add_function(wrap_pyfunction!(collect_comments, m)?)?;
     m.add_function(wrap_pyfunction!(parse_string_literal, m)?)?;
     m.add_function(wrap_pyfunction!(validate_syntax, m)?)?;
-    m.add_function(wrap_pyfunction!(extract_call_sites, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_pattern_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_pattern_spans_in_files, m)?)?;
     m.add_function(wrap_pyfunction!(matcher::find_multi_patterns_in_files, m)?)?;
@@ -494,6 +372,9 @@ fn emend_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cfg_py::build_flow_facts, m)?)?;
     m.add_function(wrap_pyfunction!(fact_rows::extract_file_fact_rows, m)?)?;
     m.add_function(wrap_pyfunction!(fact_rows::extract_exported_names, m)?)?;
+    m.add_function(wrap_pyfunction!(flow_blob::encode_flow_facts, m)?)?;
+    m.add_function(wrap_pyfunction!(flow_blob::decode_flow_events, m)?)?;
+    m.add_function(wrap_pyfunction!(flow_blob::decode_flow_edges, m)?)?;
     m.add_class::<tree_py::PyTree>()?;
     m.add_class::<tree_py::PyNode>()?;
     m.add_function(wrap_pyfunction!(tree_py::parse_source, m)?)?;

@@ -228,14 +228,6 @@ class FlowEdgeFact:
     to_event: int
     edge_kind: str
 
-    @property
-    def from_id(self) -> int:
-        return self.from_event
-
-    @property
-    def to_id(self) -> int:
-        return self.to_event
-
 
 @dataclass(frozen=True)
 class DefUseFact:

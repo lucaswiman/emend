@@ -173,7 +173,7 @@ def _yaml_to_module_mapping(d: dict) -> ModuleMapping:
 
 
 # ---------------------------------------------------------------------------
-# MappingStore (replaces KnowledgeBase)
+# MappingStore
 # ---------------------------------------------------------------------------
 
 
@@ -735,10 +735,6 @@ class MappingStore:
         ref = mm.branch or _default_branch(contents_dir) or "main"
         _maybe_fetch_branch(contents_dir, Path(local_root), ref, force=True)
         return local_root
-
-
-# Backward compatibility alias
-KnowledgeBase = MappingStore
 
 
 # ---------------------------------------------------------------------------

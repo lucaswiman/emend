@@ -1698,29 +1698,6 @@ impl ScopeResolver {
         self.build_file_scope(path, source, tree, content_hash(source), module_path)
     }
 
-    #[allow(dead_code)]
-    pub fn qualified_names(&self, path: &Path) -> Vec<(QualifiedName, Location)> {
-        let _ = path;
-        Vec::new() // TODO
-    }
-
-    #[allow(dead_code)]
-    pub fn find_references(&self, qn: &str) -> Vec<Reference> {
-        let _ = qn;
-        Vec::new() // TODO
-    }
-
-    #[allow(dead_code)]
-    pub fn goto_definition(&self, path: &Path, line: usize, column: usize) -> Option<Location> {
-        let _ = (path, line, column);
-        None // TODO
-    }
-
-    #[allow(dead_code)]
-    pub fn find_dead_code(&self) -> Vec<(QualifiedName, Location)> {
-        Vec::new() // TODO
-    }
-
     // -----------------------------------------------------------------------
     // Internal methods
     // -----------------------------------------------------------------------
@@ -2682,22 +2659,6 @@ impl ScopeResolver {
         let name = node.child_by_field_name(cfg.receiver_constructor_name_field())?;
         if cfg.receiver_type_node() != Some(name.kind()) { return None; }
         Some(node_text(name, source).to_string())
-    }
-
-    /// Find the innermost scope containing a byte offset.
-    #[allow(dead_code)]
-    fn find_enclosing_scope(&self, byte_offset: usize, scopes: &[Scope]) -> Option<ScopeId> {
-        // Search from the end (innermost scopes are added last)
-        let mut best: Option<(ScopeId, usize)> = None; // (id, byte_range_size)
-        for scope in scopes {
-            if byte_offset >= scope.start_byte && byte_offset <= scope.end_byte {
-                let size = scope.end_byte - scope.start_byte;
-                if best.is_none() || size < best.unwrap().1 {
-                    best = Some((scope.id, size));
-                }
-            }
-        }
-        best.map(|(id, _)| id)
     }
 
     /// Walk up the scope chain to resolve a name, respecting closure boundaries.

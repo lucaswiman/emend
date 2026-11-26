@@ -240,10 +240,6 @@ def _find_docstring_ranges(source: str) -> list[tuple[int, int]]:
 class PythonCommentHandler(CommentHandler):
     """Comment and docstring handler for Python source files."""
 
-    @property
-    def line_comment_prefix(self) -> str:
-        return "#"
-
     def find_docstrings(
         self, source: str, symbol_byte_range: tuple[int, int]
     ) -> list[tuple[int, int, str]]:

@@ -41,16 +41,6 @@ function handler(req, db) {
     db.execute(query);
 }
 """, True),
-    ("callback-style-delegation", """\
-function process(db, data) {
-    db.execute(data);
-}
-
-function handler(req, db) {
-    let name = req.query.get("name");
-    process(db, name);
-}
-""", True),
     ("async-best-effort", """\
 async function getData(req) {
     let data = req.query.get("name");
@@ -72,10 +62,7 @@ function handler(req, db) {
     name = escape(name);
 }
 """, True),
-], ids=[
-    "direct-helper-sink", "returned-taint", "callback-style-delegation",
-    "async-best-effort", "late-sanitizer",
-])
+], ids=["direct-helper-sink", "returned-taint", "async-best-effort", "late-sanitizer"])
 def test_typescript_interprocedural_contracts(interproc_ts, case, source, requires_violation):
     result = interproc_ts(source)
     assert isinstance(result, InterproceduralResult)

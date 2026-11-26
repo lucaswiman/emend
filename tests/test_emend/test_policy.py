@@ -671,3 +671,104 @@ class TestRunChecksEngine:
         from emend.checks.engine import run_checks
         violations = run_checks([str(test_file)], config=config_file, mode="lint")
         assert violations[0].severity == "error"
+
+
+class TestFlowPolicyParity:
+    """A flow policy reports the same violation through the API, the CLI and trace."""
+
+    SOURCE = (
+        "def handle_request(request, cursor):\n"
+        "    name = request.args.get('name')\n"
+        "    cursor.execute(name)\n"
+    )
+    POLICY_YAML = """\
+policies:
+  - name: no-sql-injection
+    description: Prevent SQL injection
+    severity: error
+    checks:
+      - name: sqli-flow
+        type: flow
+        flows-from: "request.args.get($X)"
+        flows-to: "cursor.execute($QUERY)"
+        label: user_input
+        message: "SQL injection via flow policy"
+"""
+
+    def _write_policy_config(self, tmp_path):
+        """Write the policy YAML and return path to it."""
+        config_dir = tmp_path / ".emend"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "policies.yaml"
+        config_file.write_text(self.POLICY_YAML)
+        return str(config_file)
+
+    @staticmethod
+    def _make_trace_config():
+        from emend.trace import TraceConfig, TraceSink, TraceSource
+
+        return TraceConfig(
+            labels=["user_input"],
+            sources=[TraceSource(pattern="request.args.get($X)", label="user_input")],
+            sinks=[
+                TraceSink(
+                    pattern="cursor.execute($QUERY)",
+                    label="user_input",
+                    message="SQL injection risk",
+                )
+            ],
+        )
+
+    def test_policy_api_finds_violation(self, tmp_path):
+        """Policy API run_policy_checks detects the SQL injection via flow check."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(self.SOURCE)
+        config_path = self._write_policy_config(tmp_path)
+
+        policies = load_policies(config_path)
+        violations = run_policy_checks([str(test_file)], policies)
+
+        assert len(violations) >= 1
+        v = violations[0]
+        assert v.policy_name == "no-sql-injection"
+        assert v.severity == "error"
+
+    def test_policy_cli_finds_violation(self, tmp_path, run_emend_cmd):
+        """CLI `emend policy --json` detects the SQL injection via flow check."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(self.SOURCE)
+        config_path = self._write_policy_config(tmp_path)
+
+        result = run_emend_cmd(
+            ["policy", str(test_file), "--config", config_path, "--json"],
+            check=False,
+        )
+        assert result.returncode in (0, 1), f"Unexpected exit: {result.returncode}\nSTDERR: {result.stderr}"
+
+        data = json.loads(result.stdout)
+        assert isinstance(data, list)
+        assert len(data) >= 1
+        assert data[0]["policy"] == "no-sql-injection"
+
+    def test_trace_and_policy_agree_on_location(self, tmp_path):
+        """Both trace API and policy API flag the same line."""
+        test_file = tmp_path / "app.py"
+        test_file.write_text(self.SOURCE)
+        config_path = self._write_policy_config(tmp_path)
+
+        # Trace API
+        trace_config = self._make_trace_config()
+        from emend.trace import run_trace_analysis
+
+        trace_violations = run_trace_analysis([str(test_file)], trace_config)
+        assert len(trace_violations) >= 1
+        trace_line = trace_violations[0].line
+
+        # Policy API
+        policies = load_policies(config_path)
+        policy_violations = run_policy_checks([str(test_file)], policies)
+        assert len(policy_violations) >= 1
+        policy_line = policy_violations[0].line
+
+        # Both should flag the same sink line (cursor.execute on line 3)
+        assert trace_line == policy_line

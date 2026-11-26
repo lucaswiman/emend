@@ -1,8 +1,8 @@
-"""Tests for flow_ir.py — shared IR, witness model, and execute_flow_spec."""
+"""Tests for the flow spec IR in ``emend.checks.flow``: witness model and execute_flow_spec."""
 
 import pytest
 
-from emend.flow_ir import (
+from emend.checks.flow import (
     FlowSpec,
     FlowViolation,
     WitnessStep,
@@ -96,8 +96,6 @@ class TestFormatWitness:
         ]
         lines = format_witness(steps)
         assert lines == ["step L1"]
-
-
 
 
 # ---------------------------------------------------------------------------

@@ -57,14 +57,13 @@ $(MCP_VENV)/lib/emend_core: Makefile pyproject.toml $(RUST_SOURCES) $(LANGUAGE_C
 
 test-mcp: $(MCP_VENV)/lib/emend_core
 	$(MCP_VENV)/bin/pytest --tb=short tests/test_emend/test_mcp_server.py
-	$(MCP_VENV)/bin/pytest --tb=short -k TestMCPTools tests/test_emend/test_knowledge.py
 
 deadcode: $(VENV)/bin/activate $(VENV)/lib/emend_core
 	$(VENV)/bin/emend deadcode src/emend/ --exclude-references-from tests/ --no-last-reference
 
 docs: docs-html
 
-docs/_static/mcp_schema.json: src/emend/mcp_server.py | $(MCP_VENV)/lib/emend_core
+docs/_static/mcp_schema.json: $(wildcard src/emend/mcp/*.py) | $(MCP_VENV)/lib/emend_core
 	@mkdir -p docs/_static
 	$(MCP_VENV)/bin/emend mcp --schema > $@
 
