@@ -203,3 +203,74 @@ def test_detect_exported_names_python_all(code, expected):
 ])
 def test_detect_exported_names_rust(code, expected):
     assert detect_exported_names(code, "rust") == expected
+
+
+def test_language_detection_does_not_rescan_plugins_or_reread_configs_per_file(monkeypatch):
+    """Per-file detection must not repeat whole-environment discovery.
+
+    Lint and fact extraction ask for a file's language once per file.  Scanning
+    installed distributions and re-reading every language config for each of
+    those calls made the lookup dominate pattern linting.
+    """
+    import importlib.metadata
+    from pathlib import Path
+
+    import emend.language_registry as registry
+
+    registry.detect_language("warm.py")
+    scans = reads = 0
+    entry_points = importlib.metadata.entry_points
+    read_bytes = Path.read_bytes
+
+    def counting_entry_points(*args, **kwargs):
+        nonlocal scans
+        scans += 1
+        return entry_points(*args, **kwargs)
+
+    def counting_read_bytes(self):
+        nonlocal reads
+        reads += self.name == "config.toml"
+        return read_bytes(self)
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", counting_entry_points)
+    monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+
+    for index in range(50):
+        assert registry.detect_language(f"module_{index}.py") == "python"
+        assert registry.detect_language(f"module_{index}.ts") == "typescript"
+
+    assert scans == 0
+    assert reads == 0
+
+
+def test_registry_sees_same_size_config_rewrite_with_restored_timestamps(tmp_path, monkeypatch):
+    """A cached registry view must not hide an edit that preserves size and mtime."""
+    import os
+
+    import emend.language_registry as registry
+
+    config = tmp_path / "scratch" / "config.toml"
+    config.parent.mkdir()
+    monkeypatch.setattr(registry, "_find_languages_dir", lambda: tmp_path)
+    config.write_text('[language]\nname = "scratch"\nfile_extensions = ["aaa"]\n')
+    before = config.stat()
+    assert registry.detect_language("file.aaa") == "scratch"
+
+    config.write_text('[language]\nname = "scratch"\nfile_extensions = ["bbb"]\n')
+    os.utime(config, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    assert registry.detect_language("file.bbb") == "scratch"
+    assert registry.detect_language("file.aaa") is None
+
+
+def test_registry_discovers_a_language_added_after_the_first_lookup(tmp_path, monkeypatch):
+    import emend.language_registry as registry
+
+    monkeypatch.setattr(registry, "_find_languages_dir", lambda: tmp_path)
+    assert registry.detect_language("file.fresh") is None
+
+    config = tmp_path / "fresh" / "config.toml"
+    config.parent.mkdir()
+    config.write_text('[language]\nname = "fresh"\nfile_extensions = ["fresh"]\n')
+
+    assert registry.detect_language("file.fresh") == "fresh"
