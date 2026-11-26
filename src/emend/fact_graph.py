@@ -2030,7 +2030,6 @@ class FactGraph:
         """Generate call graph edges via Datalog query.
 
         Returns list of (caller_qn, callee_qn) pairs.
-        Replaces Rust collect_callees() in generate_graph().
         """
         if file_path is not None:
             result = self._client.run(

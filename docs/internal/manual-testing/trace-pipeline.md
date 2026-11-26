@@ -6,9 +6,11 @@ Use it when changing:
 
 - intraprocedural trace semantics
 - interprocedural trace semantics
-- Datalog/Python engine selection
 - flow-rule to trace compilation
-- trace CLI output or engine-reporting behavior
+- trace CLI output
+
+There is one evaluator (`emend.checks.flow`); `emend trace` has no engine
+selection flag.  JSON rows carry `"engine": "occurrence"`.
 
 ## Goals
 
@@ -33,8 +35,7 @@ and poor at isolating regressions.
 ## Self-Hosted Baseline
 
 Start with a temporary rules file that tracks `Path(...)` values into
-`.read_text()` and `.write_text()` calls. This is useful because `emend`
-contains real instances of those shapes in production code.
+`.read_text()` and `.write_text()` calls.
 
 Example temporary config:
 
@@ -52,6 +53,13 @@ rules:
     message: 'Path-derived value reaches write_text()'
 ```
 
+Note, verified when this page was last trimmed: these two rules report no
+findings, even on a two-line fixture, because a sink that binds the tracked
+value as a method *receiver* (`$P.read_text()`) does not currently fire.
+Rules whose sink binds a call argument (for example `to: 'open($F)'`) do.
+This page therefore no longer lists expected findings; record what you see
+before a change and compare after it.
+
 ### File-Level Commands
 
 Run both intraprocedural and interprocedural modes on a targeted file first:
@@ -59,21 +67,7 @@ Run both intraprocedural and interprocedural modes on a targeted file first:
 ```bash
 uv run emend trace src/emend/lint.py --config /tmp/manual-trace-rules.yaml --json
 uv run emend trace src/emend/lint.py --config /tmp/manual-trace-rules.yaml --interprocedural --json
-uv run emend trace src/emend/lint.py --config /tmp/manual-trace-rules.yaml --interprocedural --engine python --json
 ```
-
-Current known-good observations from the self-hosted baseline:
-
-- both commands report findings in `src/emend/lint.py`
-- current findings include:
-  - `src/emend/lint.py:720` for `$P.read_text()`
-  - `src/emend/lint.py:728` for `$P.write_text($DATA)`
-- `--engine datalog` (the default since Phase 12) reports `engine: "datalog"`
-- `--engine python` reports `engine: "python"`
-- both engines should produce the same findings for these simple flows
-
-Those exact findings are not a contract forever, but major unexpected changes
-should be investigated.
 
 ### Directory-Level Commands
 
@@ -82,17 +76,10 @@ After the file-level check is stable, try a directory slice:
 ```bash
 uv run emend trace src/emend --config /tmp/manual-trace-rules.yaml --json
 uv run emend trace src/emend --config /tmp/manual-trace-rules.yaml --interprocedural --json
-uv run emend trace src/emend --config /tmp/manual-trace-rules.yaml --interprocedural --engine python --json
 ```
 
-Current caveat:
-
-- repo-wide self-hosted trace can be slow enough that it should be treated as a
-  soak/manual check rather than a tight development loop
-- a timed run over `src/emend` with the simple `Path(...)` rules did not finish
-  within 20 seconds during initial manual probing
-
-That makes targeted-file runs the preferred first-line manual check.
+Directory runs are slower than targeted-file runs, so targeted-file runs are
+the preferred first-line manual check.
 
 ## External Comparison Targets
 
@@ -124,7 +111,6 @@ For an external target:
    - command
    - runtime
    - finding count
-   - engine used
    - any obvious false positives or false negatives
 
 Example shape:
@@ -134,55 +120,17 @@ uv run emend trace path/to/project/package --config /tmp/manual-trace-rules.yaml
 uv run emend trace path/to/project/package --config /tmp/manual-trace-rules.yaml --interprocedural --json
 ```
 
-## Stage Expectations
+## After Changing the Evaluator
 
-### During Parity Work
-
-Before broader CLI/manual runs, execute the focused parity corpus:
-
-```bash
-make test TESTS='tests/test_emend/test_phase11_differential.py tests/test_emend/test_phase11_cli_parity.py tests/test_emend/test_phase11_divergence.py tests/test_emend/test_interprocedural_trace.py -k "phase11 or interprocedural_datalog or callee_return_taint_reaches_caller_sink or cross_function_violation or nested_same_named_helpers_are_scoped_to_their_owner or late_sanitizer_does_not_erase_earlier_interprocedural_violation"'
-```
-
-That corpus compares the Python engine against the Datalog engine on curated
-interprocedural fixtures. The CLI parity tests also verify that `--engine python`
-and `--engine datalog` route correctly and that JSON output includes the
-`engine` field. Since Phase 12, the default engine is Datalog.
-
-When two engines are expected to match, compare:
-
-- finding count
-- finding locations
-- labels
-- sink patterns
-- engine metadata
-
-Also manually inspect a few traces/witnesses, not just counts.
-
-### Divergence Status
-
-No accepted divergences remain as of Phase 11 completion.  Cases originally
-expected to diverge (iteration count, trace step descriptions) were tested and
-confirmed at full parity.  See `tests/test_emend/test_phase11_divergence.py`
-for the regression guards.
-
-### After Phase 12 Cutover
-
-The cutover is complete. When making further changes, verify:
-
-- the default engine reports `engine: "datalog"` without `--engine` flag
-- `--engine python` still produces `engine: "python"` violations
-- finding locations do not drift unexpectedly between engines
-- trace/witness formatting remains usable
-- performance is not materially worse on the targeted manual corpus
-
-### During Legacy Cleanup
-
-After removing the old path, rerun:
+Rerun:
 
 - one self-hosted file-level command
 - one self-hosted directory slice
 - one external project targeted command
 
-The goal is to confirm that cleanup did not silently remove functionality that
-had only been covered by real CLI execution.
+and compare finding count, finding locations, labels and sink patterns with
+the run before the change.  Also manually inspect a few traces (`--trace`),
+not just counts.
+
+The goal is to confirm that the change did not silently remove functionality
+that had only been covered by real CLI execution.

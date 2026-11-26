@@ -679,17 +679,20 @@ def run_saturation(
     rules: list[RewriteRule],
     max_iterations: int = 30,
 ) -> list[SaturationResult]:
-    """Run equality saturation on expressions in a source file.
+    """Apply rewrite rules to a source file, one line at a time.
 
-    For each expression in the file, attempts to match LHS patterns
-    from the rules. When a match is found, the RHS template is
-    instantiated with captured metavars. The e-graph is used to
-    find the optimal rewrite.
+    Each non-blank, non-comment line is matched against every rule's LHS
+    pattern, first as a whole and then, for a simple assignment, against its
+    right-hand side.  When a rule matches, its RHS template is instantiated
+    with the captured metavars and reported as a rewrite.  Each rule is
+    applied once per line; this function does not build an e-graph or
+    iterate to a fixed point (``EGraph`` in this module is not used here).
 
     Args:
         file_path: Path to the source file.
         rules: List of rewrite rules.
-        max_iterations: Maximum saturation iterations per expression.
+        max_iterations: Currently unused; accepted for the ``saturate``
+            command's ``--max-iterations`` option.
 
     Returns:
         List of ``SaturationResult`` objects for expressions that were rewritten.

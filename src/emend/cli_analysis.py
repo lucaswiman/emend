@@ -299,8 +299,8 @@ def refs_cmd(
     With --calls-only, only returns actual call sites (not mere references or imports).
 
     Examples:
-        emend refs src/emend/transform.py::get_component
-        emend refs src/emend/transform.py::get_component --json
+        emend refs src/emend/transform/components.py::get_component
+        emend refs src/emend/transform/components.py::get_component --json
         emend refs file.py::MyClass --exclude-imports
         emend refs file.py::config --writes-only
         emend refs file.py::config --reads-only
@@ -1119,7 +1119,7 @@ def dupes_cmd(
         emend analyze dupes src/ --mode exact --min-lines 5
         emend analyze dupes --json --limit 20
         emend dupes src/ --near --json
-        emend analyze dupes --file src/emend/transform.py
+        emend analyze dupes --file src/emend/transform/patterns.py
         emend analyze dupes --check-file src/emend/foo.py  # post-write hook
     """
     from emend.duplicate import (

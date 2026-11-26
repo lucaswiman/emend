@@ -2,7 +2,8 @@
 """Benchmark CozoDB index building and query performance on the Django codebase.
 
 Measures:
-1. Index building time (full _build_facts_db pipeline)
+1. Index building time (cold ``warm_caches()``: search rows and facts.db,
+   no type engine, no full-text index)
 2. Individual query times for common Datalog operations
 3. Relation sizes and statistics
 
@@ -110,18 +111,20 @@ def collect_relation_stats(client) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 def benchmark_index_build(django_dir: Path, iterations: int) -> dict:
-    """Benchmark full _build_facts_db pipeline."""
-    from emend.transform import _build_facts_db, _find_project_root
+    """Benchmark a cold ``warm_caches()`` build (search rows and facts.db)."""
+    from emend.analysis_store import AnalysisStore
+    from emend.transform import warm_caches
 
     cache_dir = Path(django_dir) / ".emend" / "cache"
 
     def _build():
-        # Remove existing facts.db so we measure a fresh build
-        facts_db = cache_dir / "facts.db"
-        if facts_db.exists():
-            facts_db.unlink()
-        _build_facts_db(str(django_dir))
-        return str(facts_db)
+        # Drop the whole cache so every iteration measures a cold build.  The
+        # project's AnalysisStore is cached per process; close it first so it
+        # holds no generation of the cache being removed.
+        AnalysisStore.open(django_dir).close()
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        warm_caches(str(django_dir), type_engine=None, build_fts=False)
+        return str(cache_dir / "facts.db")
 
     median, times, facts_path = _timeit(_build, iterations=iterations, label="index_build")
 

@@ -323,8 +323,9 @@ value = "value"
 # Trace / taint analysis configuration
 # ---------------------------------------------------------------------------
 [trace]
-# TypeScript/JavaScript keywords — identifiers matching these are excluded
-# from _extract_identifiers() to avoid false taint propagation.
+# TypeScript/JavaScript keywords.  Duplicate detection ignores these tokens
+# when judging whether a fragment is trivial, and
+# emend.trace._extract_identifiers() drops them from the identifiers it returns.
 keywords = [
     "abstract", "any", "as", "async", "await", "bigint", "boolean",
     "break", "case", "catch", "class", "const", "continue", "debugger",

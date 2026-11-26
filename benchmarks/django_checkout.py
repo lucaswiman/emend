@@ -13,7 +13,7 @@ ensure_scaled_checkout(django_dir: Path) -> Path
     Build a 50x-duplicated copy of the Django source for throughput tests.
 
 setup_lint_rules(django_dir: Path) -> None
-    Write a minimal .emend/patterns.yaml into the checkout for lint benchmarks.
+    Write a minimal .emend/rules.yaml into the checkout for lint benchmarks.
 """
 from __future__ import annotations
 
@@ -188,9 +188,9 @@ def ensure_scaled_checkout(django_dir: Path) -> Path:
 
 
 def setup_lint_rules(django_dir: Path) -> None:
-    """Create .emend/patterns.yaml in the Django checkout for lint benchmarks."""
+    """Create .emend/rules.yaml in the Django checkout for lint benchmarks."""
     emend_dir = django_dir / ".emend"
     emend_dir.mkdir(exist_ok=True)
-    rules_file = emend_dir / "patterns.yaml"
+    rules_file = emend_dir / "rules.yaml"
     rules_file.write_text(LINT_RULES_YAML)
     _log(f"  Lint rules written to {rules_file}")

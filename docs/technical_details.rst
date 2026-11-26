@@ -198,7 +198,7 @@ Overview of cache tables
    * - ``qn_index``
      - (absolute path, content/module-context hash)
      - Compressed JSON list of every qualified name in the file.
-       Used by ``visit_project()`` to skip files that cannot reference a target
+       Used by ``visit_project_ts()`` to skip files that cannot reference a target
        symbol.
    * - ``type_cache``
      - content MD5 (TEXT)
@@ -241,9 +241,15 @@ worker derives and caches a file's search projections:
 
 All analysis is handled by the Rust tree-sitter backend.
 
-Workers also produce content-addressed native facts.  A bounded queue feeds
-these directly to one fact builder while subsequent files are still being
-processed, without reloading their extraction results.  Cold fact graphs are
+Workers also extract native facts for the files the fact database must store:
+every file on a cold build, afterwards only files whose revision changed (a
+change to the set of modules re-extracts every file).  A bounded queue feeds
+these directly to one fact writer while subsequent files are still being
+processed.  Extraction results are not cached per file: ``facts.db`` is the
+only store of facts.  The shared artifact database keeps two small things per
+revision, the exact source text (``source_artifact``) and the import list
+(``revision_import_artifact``), so a file whose facts are already stored and
+whose imports are remembered is not parsed again.  Cold fact graphs are
 built in memory and bulk-saved to SQLite before atomic publication; incremental
 updates use disk-backed private generations.  Cold builds therefore trade
 higher temporary memory use for fewer disk writes.
@@ -261,7 +267,8 @@ publication.  It stores its results in ``type_cache``.  Indexing also updates:
 
 Workers write per-file search rows through their own SQLite connections.
 WAL mode allows readers alongside a writer; SQLite still serializes writers.
-Unchanged extraction and search results are reused.  Ordinary indexing does
+Search rows of unchanged files are reused and their facts stay in ``facts.db``
+untouched.  Ordinary indexing does
 not precompute duplicate analysis; duplicate detection prepares it on demand.
 
 How caches are invalidated
@@ -383,12 +390,14 @@ filtering) and the ``analyze types`` command.
 Abstract interface: ``TypeOracle``
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``TypeOracle`` is an abstract base class with four abstract methods:
+``TypeOracle`` is an abstract base class with three abstract methods:
 
 - ``infer_file(path, project_root) → FileTypes`` — return all type bindings for a file
-- ``type_at(path, line, col) → TypeBinding | None`` — return the binding at a position
 - ``clear_cache()`` — evict cached results
 - ``is_available() → bool`` — check if the backing tool is installed
+
+``type_at(path, line, col) → TypeBinding | None`` is a concrete convenience
+method that looks the position up in ``infer_file()``'s result.
 
 Results are returned as ``FileTypes`` (a list of ``TypeBinding`` objects with
 positional and name indexes built by ``FileTypes.build_index()``).  ``TypeBinding``
@@ -429,10 +438,10 @@ base name, and union types match if any member satisfies the constraint.
 Integration with pattern matching
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``:type[X]`` and ``:returns[X]`` constraint tokens are matched syntactically by
-``m.DoNotCare()`` (any node passes) and then *post-filtered* by
-``_filter_matches_by_type_oracle()`` in ``transform.py``.  This keeps the Rust
-fast-path bypass simple: any oracle constraint is post-filtered after the Rust
+``:type[X]`` and ``:returns[X]`` constraints do not restrict the structural
+match (any node passes); the matches are then *post-filtered* by
+``_filter_matches_by_type_oracle()`` in ``transform/patterns.py``.  This keeps
+the Rust matcher simple: any oracle constraint is post-filtered after the Rust
 structural matcher returns positional match data.
 
 Engine autodetection
@@ -447,8 +456,8 @@ detection and instantiation in one call.
 Lint engine
 -----------
 
-``lint.py`` loads rules from ``.emend/rules.yaml`` (with legacy fallback to
-``.emend/patterns.yaml``).  Each rule specifies a ``match`` pattern, a
+``lint.py`` loads rules from ``.emend/rules.yaml`` (or the file given with
+``--config``).  Each rule specifies a ``match`` pattern, a
 ``message``, an optional ``not-within`` constraint, and an optional ``fix``
 pattern for ``--fix`` mode.
 
@@ -475,9 +484,13 @@ take full advantage:
 
 - ``emend_core`` is registered ``gil_used = false``, so all Rust functions
   release the GIL immediately and can run on multiple OS threads simultaneously.
-- Cross-file operations (``rename``, ``refs``) use a ``ThreadPoolExecutor`` on
-  free-threaded Python, with the Rust extension performing GIL-free analysis
-  across threads.
+- Multi-file pattern search (``find_pattern_in_project``) and fact extraction
+  (``AnalysisStore``, used by indexing and by ``refs`` when files are stale)
+  fan files out over a ``ThreadPoolExecutor``; on free-threaded Python those
+  workers run the Rust extension in parallel.
+- ``rename`` does not use a Python thread pool.  Its file pre-filters
+  (``find_name_in_files``, ``read_and_filter_files``) are parallelised inside
+  the Rust extension with rayon.
 
 To enable free-threaded speedups, install emend with a free-threaded Python:
 
@@ -490,7 +503,7 @@ Fact identities and language boundaries
 
 Qualified names remain human-readable (for example, ``api.common``), but are
 not globally unique: Python and TypeScript can both define that name.
-FactGraph schema 11 stores symbols by ``(qualified_name, file_path)`` and
+The FactGraph schema stores symbols by ``(qualified_name, file_path)`` and
 records each file's effective configured language in ``file_namespace``.
 JavaScript and TypeScript share a namespace; Rust and Python do not.
 This metadata survives incremental updates and JSON serialization, including

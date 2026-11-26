@@ -480,8 +480,9 @@ value = "right"
 # Trace / taint analysis configuration
 # ---------------------------------------------------------------------------
 [trace]
-# All Python keywords — identifiers matching these are excluded from
-# _extract_identifiers() to avoid false taint propagation through keywords.
+# All Python keywords.  Duplicate detection ignores these tokens when judging
+# whether a fragment is trivial, and emend.trace._extract_identifiers() drops
+# them from the identifiers it returns.
 keywords = [
     "False", "None", "True", "and", "as", "assert", "async", "await",
     "break", "class", "continue", "def", "del", "elif", "else",
