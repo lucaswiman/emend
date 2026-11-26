@@ -24,7 +24,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from emend.errors import BUG_EXCEPTIONS
 from emend.analysis_extraction import _extract_file_facts, _normalize_qn
 from emend.analysis_snapshot import (
     AnalysisSnapshot,

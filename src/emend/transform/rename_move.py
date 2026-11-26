@@ -562,7 +562,6 @@ def _replace_module_in_strings(
     This avoids false positives when scanning files that have no import
     relationship with the module (e.g. an unrelated ``TABLE = "models"``).
     """
-    import re as _re
     from emend import emend_core as _rust
     from emend.language_registry import get_extensions
 

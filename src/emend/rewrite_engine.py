@@ -8,12 +8,11 @@ Explicitly experimental.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 import yaml
 
@@ -581,7 +580,7 @@ def _match_expr_pattern(
 
     Returns a dict of metavar -> captured text, or None if no match.
     """
-    from emend.transform import find_pattern, PatternMatch
+    from emend.transform import find_pattern
 
     try:
         # Use a temp approach: check if pattern matches the expression

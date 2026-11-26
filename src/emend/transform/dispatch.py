@@ -10,6 +10,8 @@ from ..component_selector import ExtendedSelector, parse_extended_selector
 from ..query import QueryFilter, format_query_results, query_symbols
 
 if TYPE_CHECKING:
+    from typing import IO
+
     from ..type_oracle import TypeOracle
 
 logger = logging.getLogger(__name__)

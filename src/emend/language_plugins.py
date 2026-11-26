@@ -19,8 +19,14 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from emend.errors import BUG_EXCEPTIONS
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from emend.pattern import MetaVar
 
 logger = logging.getLogger(__name__)
 

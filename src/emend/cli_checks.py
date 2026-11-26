@@ -100,7 +100,6 @@ def policy_cmd(
     """
     try:
         from emend.checks import run_checks
-        from emend.policy import format_policy_violations, PolicyViolation
 
         config_path = resolve_rules_path(config)
         if not config_path.exists():

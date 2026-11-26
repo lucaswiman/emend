@@ -246,7 +246,7 @@ def search(
                         break
             else:
                 # Literal search: find DSL regions containing the term
-                from emend.dsl import detect_dsl_regions as _dsl_detect, DslKind as _DslK
+                from emend.dsl import detect_dsl_regions as _dsl_detect
                 regions = _dsl_detect(str(dsl_f))
                 for region in regions:
                     if region.dsl.value != dsl.lower():

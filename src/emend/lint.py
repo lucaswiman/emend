@@ -20,7 +20,7 @@ from emend.rules_config import (
     compiled_duplicate_to_config,
     deadcode_engine_kwargs,
     load_compiled_rules,
-    expand_macros,
+    expand_macros,  # noqa: F401  (part of this module's public surface)
 )
 
 # Import shared types from checks/ submodules.

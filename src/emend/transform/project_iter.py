@@ -1,7 +1,6 @@
 """Project file iteration, pattern search, and module utilities."""
 from __future__ import annotations
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -10,13 +9,13 @@ import logging
 import re
 import time
 
-from ..language_plugins import NOQA_PATTERN as _NOQA_PATTERN
 from emend import emend_core as _rust
 from emend.errors import BUG_EXCEPTIONS
 from emend.edit_session import current_edit_session, read_source, write_source
 
 if TYPE_CHECKING:
     from ..type_oracle import TypeOracle
+    from .patterns import PatternMatch
 
 logger = logging.getLogger(__name__)
 
@@ -297,8 +296,6 @@ _SKIP_DIRS = frozenset(_rust.skip_dirs())
 from emend.file_collection import (
     collect_source_files as _collect_source_files,
     collect_source_files_scandir as _collect_source_files_scandir,
-    collect_all_source_files as _collect_all_source_files,
-    collect_git_tracked_source_files as _collect_git_tracked_source_files,
     detect_project_languages,
 )
 

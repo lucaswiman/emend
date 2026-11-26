@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from emend.lint import LintViolation, LintRule
-    from emend.policy import PolicyViolation, Policy, FlowCheck, StructuralCheck, TypeCheck, DeadCodeCheck, DatalogCheck, CustomCheck, SequenceCheck
+    from emend.policy import PolicyViolation, Policy
     from emend.checks.rules_config import DeadCodeConfig
     from emend.checks.duplicates import DuplicateCodeConfig
 
