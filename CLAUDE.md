@@ -278,6 +278,19 @@ Path-sensitivity, per-variable sanitisation, scope-bounded sanitisers
 `build_flow_facts` (`rust/src/cfg.rs`) emits; the `FactGraph` stores them
 per file in the `flow_blob` relation. They are not Datalog rules.
 
+Taint is tracked per attribute. Flow facts keep the receiver (`self`, `cls`,
+`this`: `receiver_names` under `[cfg]`) as the root of an access path. A
+`store` edge links a write below an object (`b.raw = x`) to later reads of the
+object, `param_out` and `arg_out` occurrences mark an object at the end of a
+callee and after a call, and an `arg_return` edge carries the callee's stores
+back to the caller. Both walks in `checks/flow.py` carry the tainted *part* of
+an occurrence (`""` for the whole value, `.raw` for one attribute); the rules
+are in `_field_step`. Where the part cannot be seen (an opaque call, an
+unresolved constructor) the whole value is tainted. Calls on the receiver are
+resolved by class in `build_analysis_from_tree` (`rust/src/cfg.rs`);
+constructors resolve to `constructor_methods` under `[trace]` in
+`_add_cross_file_calls`.
+
 ### Impact analysis
 
 `find_impact()` in `transform/impact.py`:

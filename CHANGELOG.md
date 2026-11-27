@@ -80,6 +80,34 @@
 - A sink or sanitizer may capture the value a method is called on.
   `flows-to: "$QUERY.execute()"` never fired, and `not-through:
   "$TEXT.escaped()"` never sanitized.
+- Flow analysis tracks taint per attribute. `box.raw = tainted` taints
+  `box.raw`, not `box` or `box.other`, and the attribute keeps its taint when
+  the object crosses a resolved call: as the value a method is called on, as an
+  argument, as a return value, and back out of a method that stored into it.
+  A resolved constructor taints only the attributes it stores into. Where the
+  analysis cannot see which part of an object is read or written (an opaque
+  call, a base class outside the project) it falls back to the whole object.
+  See "Attributes and containers" in the linting guide. **Findings change in
+  both directions.** New: taint that crosses a call inside an attribute, a read
+  below a tainted attribute (`box.raw.strip()`), and a container read whole
+  after an element store (`params["q"] = tainted; execute(sql % params)`).
+  Gone: `Box(tainted).untouched_attribute`, a store into the object a name
+  held before it was rebound, and `box.other` after `box.items.append(tainted)`.
+- Instance attributes are no longer confused with locals. In Python `self.raw`
+  was recorded as the variable `raw`, so a clean store to the attribute cleaned
+  a tainted local of the same name and the reverse. In TypeScript and Rust
+  `this.raw` and `self.raw` were not recorded at all; they are now.
+- A call on `self` resolves to a method of the same class or of a base class
+  in the same file, and `super().method()` to the base class's method. Two
+  classes that each define `get` or `__init__` used to leave every such call
+  unresolved.
+- Flow rules checked along control paths (a rule whose sanitizer is called
+  somewhere, or a source in code connected to a `finally`) finish on a large
+  project. The check covered every function call-connected to the source,
+  which is most of a project, and kept a liveness set per occurrence: one
+  narrow rule over Django did not finish in seven minutes, and a run of six
+  rules passed 11 GB of memory. It now covers the functions the value reaches
+  (four whole-project flow rules over Django: 30 s, 3.3 GB).
 - `analyze facts --transitive` no longer crashes with a `TypeError`, and its
   depth bound counts the shortest call chain.
 - A rules file whose `rules` is a list, or whose rule is not a mapping, is an

@@ -718,6 +718,8 @@ def _sanitized_nodes(
 # correlation can grow exponentially at joins; exhaustion retains a warning
 # without claiming a witness. Recursive re-entry uses the same fallback.
 _VALUE_STATE_LIMIT = 10_000
+# Sources that taint the same functions share one control-path walker.
+_WALKER_CACHE = 32
 
 
 class _CallComponents:
@@ -727,6 +729,9 @@ class _CallComponents:
         self.members = defaultdict(dict)
         self.neighbors = defaultdict(set)
         self.components = {}
+        # The functions a resolved call may run, by the call's occurrence.
+        self.callees = defaultdict(set)
+        self._returns = {}
         for node, event in events.items():
             function = (event.file_path, event.func_id)
             self.members[function][node] = event
@@ -736,6 +741,50 @@ class _CallComponents:
                         other = (events[target].file_path, events[target].func_id)
                         self.neighbors[function].add(other)
                         self.neighbors[other].add(function)
+                        if kind == "call_return":
+                            result = events[target]
+                            self.callees[(result.file_path, result.call_id)].add(function)
+
+    def returns_normally(self, function, control_adjacency, active=frozenset()):
+        """Whether control can get from a function's entry to its exit.
+
+        A function that always raises, or always calls one that does, never
+        hands control back.  The walk must know that about a function it does
+        not enter.
+        """
+        if function in self._returns:
+            return self._returns[function]
+        if function in active:
+            return True  # Recursion: assume the other branch returns.
+        members = self.members[function]
+        pending = [node for node, event in members.items() if event.role == "function_entry"]
+        seen = set(pending)
+        found = False
+        while pending and not found:
+            node = pending.pop()
+            event = members[node]
+            if event.role == "function_exit":
+                found = True
+                break
+            callees = self.callees.get((event.file_path, event.event_id), ()) \
+                if event.role == "call" else ()
+            stuck = bool(callees) and not any(
+                self.returns_normally(callee, control_adjacency, active | {function})
+                for callee in callees
+            )
+            for target, kind in control_adjacency.get(node, ()):
+                if not _is_control_edge(kind) or target in seen or target not in members:
+                    continue
+                # A call that never returns still leaves by its handlers; only
+                # the step to its own result is closed.
+                if stuck and members[target].role == "call_result" \
+                        and members[target].call_id == event.event_id:
+                    continue
+                seen.add(target)
+                pending.append(target)
+        if not active:
+            self._returns[function] = found
+        return found
 
     def connected(self, function):
         if function not in self.components:
@@ -756,24 +805,45 @@ def _value_path_walker(sanitizers, scope_sanitizers, return_sanitizers,
                        interprocedural, max_call_depth, components):
     walkers = {}
 
-    def walk(source, sinks):
+    def walk(source, sinks, reached=()):
+        """``reached`` is every occurrence the value graph lets the source taint."""
         event = events[source.node]
-        component = components.connected((event.file_path, event.func_id))
-        if component not in walkers:
-            local_events = {node: event for member in component
+        home = (event.file_path, event.func_id)
+        scope = components.connected(home)
+        if not scope_sanitizers:
+            # Only a function the value reaches can change what is tainted, so
+            # only those are walked; a call into any other is one step.  The
+            # call-connected component can be most of a project, and the walk
+            # keeps a liveness set per occurrence.  A scope sanitizer clears
+            # every value wherever control meets it, so it needs the whole.
+            scope = frozenset({home, *(
+                (events[node].file_path, events[node].func_id) for node in reached
+            )}) & scope
+        if scope not in walkers:
+            if len(walkers) >= _WALKER_CACHE:
+                del walkers[next(iter(walkers))]
+            local_events = {node: event for member in scope
                             for node, event in components.members[member].items()}
-            walkers[component] = _component_value_path_walker(
+
+            def completes(call):
+                """Whether a call into functions outside the walk can return."""
+                outside = components.callees.get((call.file_path, call.event_id), set()) - scope
+                return any(components.returns_normally(callee, control_adjacency)
+                           for callee in outside)
+
+            walkers[scope] = _component_value_path_walker(
                 sanitizers, scope_sanitizers, return_sanitizers,
                 value_adjacency, control_adjacency, local_events,
-                interprocedural, max_call_depth,
+                interprocedural, max_call_depth, events, components.callees, completes,
             )
-        return walkers[component](source, sinks)
+        return walkers[scope](source, sinks)
     return walk
 
 
 def _component_value_path_walker(sanitizers, scope_sanitizers,
                            return_sanitizers, value_adjacency,
-                           control_adjacency, events, interprocedural, max_call_depth):
+                           control_adjacency, events, interprocedural, max_call_depth,
+                           all_events, callees, completes):
     """Follow live value identities along occurrence-level control paths.
 
     Copies share identity; evaluations create derived values. Distinct states
@@ -806,7 +876,7 @@ def _component_value_path_walker(sanitizers, scope_sanitizers,
         if event.role in {"def", "param_in", "mutation"}:
             bindings[(function[index], event.access_path or event.var)] |= 1 << index
         for target, kind in value_adjacency.get(node, ()):
-            if kind in _CALL_EDGES and not interprocedural:
+            if (kind in _CALL_EDGES and not interprocedural) or target not in indices:
                 continue
             incoming[indices[target]].add(index)
             edge_kinds[index, indices[target]].add(kind)
@@ -825,10 +895,18 @@ def _component_value_path_walker(sanitizers, scope_sanitizers,
             if _is_control_edge(kind):
                 successors[index].add(indices[target])
                 final_actions[index, indices[target]].add(kind)
+    for marker, result in call_results.items():
+        # A resolved call into functions that are not walked is one step, and
+        # no step at all when none of them can return.
+        event = events[nodes[marker]]
+        if marker not in call_targets and callees.get((event.file_path, event.event_id)) \
+                and not completes(event):
+            successors[marker].discard(result)
     for marker, targets in call_targets.items():
         result = call_results[marker]
         resolved_results.add(result)
-        successors[marker].discard(result)
+        if not completes(events[nodes[marker]]):
+            successors[marker].discard(result)
         for target in targets:
             members = functions[target]
             entry = min(members, key=lambda i: events[nodes[i]].ordinal)
@@ -922,7 +1000,7 @@ def _component_value_path_walker(sanitizers, scope_sanitizers,
             return values, parents
 
         if indices[source.node] in outputs or _source_starts_clean(
-            source, sanitizers, value_adjacency, events,
+            source, sanitizers, value_adjacency, all_events,
             _INTRA_VALUE_EDGES | {_OPAQUE_CALL_EDGE} | (
                 _CALL_EDGES if interprocedural else frozenset()
             ), max_call_depth,
@@ -1630,7 +1708,8 @@ def evaluate_compiled_flow(
                         value_adjacency, control_adjacency, all_events,
                         interprocedural, max_call_depth, components,
                     )
-                surviving = value_walker(source, reachable_sinks)
+                surviving = value_walker(
+                    source, reachable_sinks, {state[0] for state in states})
             clean_nodes = frozenset()
             if not correlate or rule.quantifier == "some_path":
                 clean_nodes = _sanitized_nodes(
