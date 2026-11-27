@@ -463,6 +463,8 @@ class TypeOracle(ABC):
     # Indexing can deliberately omit installed environment sources. Direct
     # type queries retain the historical environment-aware default.
     _include_environment = True
+    # The registry languages whose files this checker can be asked about.
+    languages: frozenset[str] = frozenset({"python"})
 
     @property
     def supports_source_overrides(self) -> bool:
@@ -2016,6 +2018,8 @@ class TypeScriptAdapter(TypeOracle):
     ``node_modules`` or globally.
     """
 
+    languages = frozenset({"typescript", "javascript"})
+
     _uses_overlay_source = False
 
     def __init__(
@@ -2121,6 +2125,8 @@ class RustAnalyzerAdapter(_LSPTypeOracle):
     Starts a rust-analyzer instance and queries individual symbols
     via textDocument/hover to build a type index for Rust source files.
     """
+
+    languages = frozenset({"rust"})
 
     _tool_name = "rust-analyzer"
     _language_id = "rust"

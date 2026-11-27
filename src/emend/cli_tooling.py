@@ -39,8 +39,9 @@ def index_cmd(
 ):
     """Pre-build caches for faster cross-project operations.
 
-    Builds project facts for all supported source languages, plus Python search
-    and type caches. Dependency and generated-output directories (venv,
+    Builds project facts and search caches for all supported source languages,
+    plus type caches for the language the type engine checks. Dependency and
+    generated-output directories (venv,
     node_modules, static, build, dist, target, and dot-directories) are skipped.
 
     Caches include:

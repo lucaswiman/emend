@@ -1452,3 +1452,68 @@ class TestSymbolStorage:
             assert conn.execute("SELECT COUNT(*) FROM symbol_fts").fetchone() == (4,)
         assert "symbol_fts_data" in objects
         assert "symbol_fts_content" not in objects
+
+
+# ---------------------------------------------------------------------------
+# `tool index` covers every language; the type engine only its own
+# ---------------------------------------------------------------------------
+
+
+def _mixed_project(tmp_path) -> Path:
+    project = make_project_dir(tmp_path)
+    (project / "app.py").write_text(SOURCE)
+    (project / "widget.ts").write_text("export function render(target: string): void {}\n")
+    (project / "engine.rs").write_text("pub fn start(key: &str) -> bool { true }\n")
+    return project
+
+
+def test_tool_index_makes_every_language_searchable(tmp_path):
+    """The command indexed Python only, so a TypeScript project had facts but
+    nothing for symbol search to find."""
+    from typer.testing import CliRunner
+
+    from emend.cli import app
+    from emend.editor_search import EditorSearchEngine
+
+    project = _mixed_project(tmp_path)
+    result = CliRunner().invoke(app, ["tool", "index", str(project), "--type-engine", "none"])
+    assert result.exit_code == 0, result.output
+
+    with sqlite3.connect(project / ".emend" / "cache" / "parse.db") as conn:
+        indexed = dict(conn.execute("SELECT name, file_path FROM symbol_index"))
+    assert {name: Path(path).name for name, path in indexed.items()} == {
+        "hello": "app.py", "render": "widget.ts", "start": "engine.rs",
+    }
+    engine = EditorSearchEngine(str(project))
+    try:
+        assert [item["name"] for item in engine.search_symbols("render").items] == ["render"]
+    finally:
+        engine.close()
+
+
+def test_type_engine_is_given_only_files_of_its_language(tmp_path, monkeypatch):
+    from emend import type_oracle
+    from emend.transform import warm_caches
+
+    project = _mixed_project(tmp_path)
+    given: dict[str, list[str]] = {}
+
+    class Oracle(type_oracle.TypeOracle):
+        def is_available(self):
+            return True
+
+        def infer_file(self, path, project_root=None):
+            raise AssertionError("expected batch inference")
+
+        def clear_cache(self):
+            pass
+
+        def infer_batch(self, paths, project_root, *, inputs=None):
+            given["inferred"] = sorted(Path(path).name for path in paths)
+            return dict.fromkeys(paths)
+
+    monkeypatch.setattr(type_oracle, "create_type_oracle", lambda **kw: Oracle())
+    stats = warm_caches(str(project), type_engine="pyrefly")
+
+    assert given["inferred"] == ["app.py"]
+    assert stats["files"] == 3 and stats["sym_cached"] == 3
