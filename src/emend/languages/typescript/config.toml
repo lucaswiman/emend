@@ -304,6 +304,7 @@ skip_identifiers = ["undefined", "null", "true", "false"]
 # The value a method is called on.  Flow facts keep it as the root of an
 # access path (`self.raw`) and bind it at a resolved call.
 receiver_names = ["this"]
+parent_receiver = "super"
 implicit_receiver = "this"
 destructure_nodes = ["array_pattern", "object_pattern"]
 attribute_access_nodes = ["subscript_expression", "member_expression"]

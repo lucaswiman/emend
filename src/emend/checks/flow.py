@@ -501,7 +501,8 @@ def _field_step(kind: str, source: "FlowEventFact", target: "FlowEventFact",
 
     ``""`` is the whole value and ``.raw`` the attribute ``raw`` of the object
     the occurrence denotes.  None means the edge carries no taint: the part
-    that is tainted is not the part that is read.
+    that is tainted is not the part that is read.  Where the analysis cannot
+    see which part is read, the answer is the whole value.
     """
     if kind == "store":
         # ``b.raw = x`` reaching a later ``b``: the object holds it in ``.raw``.
@@ -519,10 +520,10 @@ def _field_step(kind: str, source: "FlowEventFact", target: "FlowEventFact",
         if _below(part, step):
             return _tainted_part(part[len(step):])
         return "" if _below(step, part) else None
-    # Nothing says an opaque call, or an expression built from the object,
-    # reads the tainted attribute.
+    # What an opaque call, or an expression built from the object, reads of
+    # it cannot be seen: it may be the tainted attribute.
     if kind == _OPAQUE_CALL_EDGE or target.role == "evaluate":
-        return None
+        return ""
     return part
 
 
@@ -1171,7 +1172,38 @@ def _add_cross_file_calls(
                 # The new object is what the constructor stored into.
                 for result_node in results:
                     link(return_node, result_node, "arg_return")
-    return resolved()
+
+    resolved_calls = resolved()
+    # A constructor that hands the new object to a call nothing resolves (a
+    # base class defined elsewhere, ``setattr(self, ...)``) may have stored
+    # its arguments anywhere in it.  The taint cannot be placed, so that
+    # constructor stays opaque: a tainted argument taints the whole object.
+    escapes: dict[tuple[str, str], bool] = {}
+
+    def object_escapes(function: tuple[str, str]) -> bool:
+        if function not in escapes:
+            rows = by_function[function]
+            receiver = next((event.access_path for _node, event in rows
+                             if event.role == "param_in" and event.arg_index is None), None)
+            escapes[function] = receiver is not None and any(
+                event.call_id is not None
+                and (event.file_path, event.call_id) not in resolved_calls
+                and (
+                    (event.role == "use" and _object_path(event) == receiver)
+                    or (event.role == "call_arg" and event.access_path == receiver)
+                )
+                for _node, event in rows
+            )
+        return escapes[function]
+
+    for node, event in events.items():
+        if event.role != "param_out" or event.arg_index is not None:
+            continue
+        for target, kind in value_adjacency.get(node, ()):
+            if (kind == "arg_return" and events[target].role == "call_result"
+                    and object_escapes((event.file_path, event.func_id))):
+                resolved_calls.discard((events[target].file_path, events[target].call_id))
+    return resolved_calls
 
 
 def _add_container_mutations(

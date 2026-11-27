@@ -1709,6 +1709,66 @@ struct CallRecord {
     /// The object each argument names once the call has returned, by argument.
     outs: Vec<Option<u32>>,
     receiver_out: Option<u32>,
+    dispatch: Dispatch,
+    /// The class the calling function belongs to.
+    class: Option<String>,
+}
+
+/// What a call is made on, which decides where its method is looked up.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Dispatch {
+    /// A plain function, or a method of some other object.
+    Plain,
+    /// `self.save()`: a method of the caller's own class or of its bases.
+    OnReceiver,
+    /// `super().save()`: a method of the caller's bases.
+    OnParent,
+}
+
+/// The class a function is defined in, with the names of that class's bases.
+fn enclosing_class(node: tree_sitter::Node, lang: &LanguageConfig, source: &[u8]) -> Option<(String, Vec<String>)> {
+    let symbols = &lang.symbols;
+    let text = |node: tree_sitter::Node| node.utf8_text(source).unwrap_or("").to_string();
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if parent.kind() == symbols.class_node() {
+            let name = text(parent.child_by_field_name(symbols.name_field())?);
+            let mut bases = Vec::new();
+            let heritage = parent.child_by_field_name(symbols.superclasses_field()).or_else(|| {
+                let mut cursor = parent.walk();
+                let found = parent.children(&mut cursor)
+                    .find(|child| child.kind() == symbols.superclasses_field());
+                found
+            });
+            if let Some(heritage) = heritage {
+                let keyword = &lang.pattern_matching.keyword_argument;
+                let mut pending = vec![heritage];
+                while let Some(node) = pending.pop() {
+                    if !keyword.is_empty() && node.kind() == keyword { continue; }
+                    if node.child_count() == 0 {
+                        if node.is_named() && node.kind().contains("identifier") { bases.push(text(node)); }
+                        continue;
+                    }
+                    // `module.Base` names `Base`.
+                    let pm = &lang.pattern_matching;
+                    if !pm.attribute.is_empty() && node.kind() == pm.attribute {
+                        if let Some(attr) = node.child_by_field_name(&pm.attr_field) { bases.push(text(attr)); }
+                        continue;
+                    }
+                    let mut cursor = node.walk();
+                    let mut children: Vec<_> = node.children(&mut cursor).collect();
+                    children.reverse();
+                    pending.extend(children);
+                }
+            }
+            return Some((name, bases));
+        }
+        if Some(parent.kind()) == symbols.member_container_node() {
+            return Some((text(symbols.member_container_owner(parent)?), Vec::new()));
+        }
+        current = parent.parent();
+    }
+    None
 }
 
 /// The end of every object a path is read from, and of the path itself:
@@ -1824,6 +1884,8 @@ struct FlowExtractor<'a> {
     events: Vec<FlowEvent>,
     edges: Vec<FlowEdge>,
     calls: Vec<CallRecord>,
+    /// The name of this function's receiver, once its parameter is seen.
+    receiver_name: Option<String>,
 }
 
 impl<'a> FlowExtractor<'a> {
@@ -1845,6 +1907,17 @@ impl<'a> FlowExtractor<'a> {
         let names = &self.lang.cfg.receiver_names;
         !names.is_empty() && node.child_count() == 0
             && names.iter().any(|name| name == self.text(node))
+    }
+
+    /// `super` or `super()`: the receiver, seen as its parent class.
+    fn is_parent_receiver(&self, node: tree_sitter::Node) -> bool {
+        let name = &self.lang.cfg.parent_receiver;
+        if name.is_empty() { return false; }
+        if node.child_count() == 0 { return self.text(node) == name; }
+        let pm = &self.lang.pattern_matching;
+        !pm.call.is_empty() && node.kind() == pm.call
+            && node.child_by_field_name(&pm.func_field).or_else(|| node.named_child(0))
+                .is_some_and(|callee| callee.child_count() == 0 && self.text(callee) == name)
     }
 
     fn path(&self, node: tree_sitter::Node) -> Option<String> {
@@ -1939,7 +2012,10 @@ impl<'a> FlowExtractor<'a> {
                     let is_receiver = !receiver && self.is_receiver(name);
                     self.emit(name, "param_in", Some(path), None, (!is_receiver).then_some(index));
                     self.events.last_mut().unwrap().arg_name = Some(self.text(name).to_string());
-                    if is_receiver { receiver = true; } else { index += 1; }
+                    if is_receiver {
+                        receiver = true;
+                        self.receiver_name = Some(self.text(name).to_string());
+                    } else { index += 1; }
                 }
             }
         }
@@ -1951,7 +2027,8 @@ impl<'a> FlowExtractor<'a> {
                 let event = self.events.last_mut().unwrap();
                 event.var = Some(implicit.clone());
                 event.arg_name = Some(implicit.clone());
-                event.access_path = Some(implicit);
+                event.access_path = Some(implicit.clone());
+                self.receiver_name = Some(implicit);
             }
         }
     }
@@ -1982,8 +2059,25 @@ impl<'a> FlowExtractor<'a> {
         let pm = &self.lang.pattern_matching;
         let callee_node = node.child_by_field_name(&pm.func_field).or_else(|| node.named_child(0));
         let mut callee_values = Vec::new();
-        let callee = callee_node.and_then(|n| { callee_values.extend(self.expr(n)); self.path(n) })
+        let mut callee = callee_node.and_then(|n| { callee_values.extend(self.expr(n)); self.path(n) })
             .unwrap_or_else(|| "<dynamic>".into());
+        let member = callee_node.filter(|n| !pm.attribute.is_empty() && n.kind() == pm.attribute);
+        let member_object = member.and_then(|member| member.child_by_field_name(&pm.object_field));
+        let mut dispatch = match member_object {
+            Some(object) if self.is_receiver(object) => Dispatch::OnReceiver,
+            _ => Dispatch::Plain,
+        };
+        if let (Some(member), Some(object), Some(receiver)) = (member, member_object, self.receiver_name.clone()) {
+            if self.is_parent_receiver(object) {
+                // `super().save()` is `self.save()` looked up in the bases:
+                // read the receiver here, as a call on it would.
+                if let Some(method) = member.child_by_field_name(&pm.attr_field) {
+                    callee = format!("{}.{}", receiver, self.text(method));
+                    callee_values.push(self.emit(member, "use", Some(callee.clone()), None, None));
+                    dispatch = Dispatch::OnParent;
+                }
+            }
+        }
         let mut args = node.child_by_field_name(&pm.args_field).map(Self::children).unwrap_or_default();
         args.sort_by_key(|arg| arg.start_byte());
         let values: Vec<Vec<u32>> = args.iter().map(|arg| self.expr(*arg)).collect();
@@ -2042,7 +2136,7 @@ impl<'a> FlowExtractor<'a> {
         // argument refers to after the call is an occurrence of its own, so
         // that those stores have somewhere to arrive.
         let receiver_out = receiver_object.and_then(|object| {
-            let path = self.path(object)?;
+            let path = if dispatch == Dispatch::OnParent { self.receiver_name.clone()? } else { self.path(object)? };
             Some(self.emit(object, "arg_out", Some(path), Some(call), None))
         });
         let outs: Vec<Option<u32>> = args.iter().enumerate().map(|(index, arg)| {
@@ -2055,7 +2149,9 @@ impl<'a> FlowExtractor<'a> {
                 .map(|name| self.text(name).to_string());
             Some(id)
         }).collect();
-        self.calls.push(CallRecord { result, callee, args: arg_events, receiver, outs, receiver_out });
+        self.calls.push(CallRecord {
+            result, callee, args: arg_events, receiver, outs, receiver_out, dispatch, class: None,
+        });
         vec![result]
     }
 
@@ -2478,6 +2574,7 @@ fn extract_scope(
         block_spans: BlockSpans::new(cfg.blocks.iter().enumerate().map(|(order, block)|
             (block.start_byte, block.end_byte, (block.end_byte.saturating_sub(block.start_byte), order), block.id.0)).collect()),
         ordinal: 0, events: Vec::new(), edges: Vec::new(), calls: Vec::new(),
+        receiver_name: None,
     };
     extractor.emit_control(cfg.entry, "function_entry");
     if let Some(function) = function { extractor.parameters(function); }
@@ -2564,13 +2661,20 @@ pub fn build_analysis_from_tree(
         outs: Vec<Option<u32>>,
         receiver_out: Option<u32>,
         returns: Vec<u32>,
+        class: Option<String>,
     }
     let mut functions: HashMap<String, Vec<Callee>> = HashMap::new();
+    let mut bases: HashMap<String, Vec<String>> = HashMap::new();
     for (node, cfg) in scopes.into_iter().zip(&cfgs) {
         let Some(body) = node.child_by_field_name(&lang.cfg.body_field) else { continue };
         let name = cfg.func_name.clone();
         let start = node.start_byte();
-        let (e, d, c) = extract_scope(bytes, lang, cfg, name.clone(), start, body, Some(node), &mut next_id);
+        let (e, d, mut c) = extract_scope(bytes, lang, cfg, name.clone(), start, body, Some(node), &mut next_id);
+        let class = enclosing_class(node, lang, bytes).map(|(class, parents)| {
+            bases.entry(class.clone()).or_insert(parents);
+            class
+        });
+        for call in &mut c { call.class = class.clone(); }
         let exit_of = |index: Option<u32>| e.iter()
             .find(|v| v.role == "param_out" && v.arg_index == index).map(|v| v.id);
         let positional: Vec<_> = e.iter().filter(|v| v.role == "param_in" && v.arg_index.is_some()).collect();
@@ -2580,12 +2684,42 @@ pub fn build_analysis_from_tree(
             outs: positional.iter().map(|v| exit_of(v.arg_index)).collect(),
             receiver_out: exit_of(None),
             returns: e.iter().filter(|v| v.role == "function_exit").map(|v| v.id).collect(),
+            class,
         });
         events.extend(e); edges.extend(d); calls.extend(c);
     }
+    // A call on the receiver is a method of the caller's class or, failing
+    // that, of its bases in this file; a call on the parent starts at the
+    // bases.  Neither falls back to a function that merely shares the name.
+    let method_of = |call: &CallRecord, named: &'_ Vec<Callee>| -> Option<usize> {
+        let class = call.class.as_deref()?;
+        let mut pending: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
+        if call.dispatch == Dispatch::OnParent {
+            pending.extend(bases.get(class).into_iter().flatten().map(String::as_str));
+        } else {
+            pending.push_back(class);
+        }
+        let mut seen = HashSet::new();
+        while let Some(current) = pending.pop_front() {
+            if !seen.insert(current) || seen.len() > 64 { continue; }
+            let mut owned = named.iter().enumerate()
+                .filter(|(_, callee)| callee.class.as_deref() == Some(current));
+            if let Some((index, _)) = owned.next() {
+                return owned.next().is_none().then_some(index);
+            }
+            pending.extend(bases.get(current).into_iter().flatten().map(String::as_str));
+        }
+        None
+    };
     for call in calls {
         let name = call.callee.rsplit('.').next().unwrap_or(&call.callee);
-        let Some(target) = functions.get(name).filter(|v| v.len() == 1).map(|v| &v[0]) else { continue };
+        let Some(named) = functions.get(name) else { continue };
+        let target = if call.dispatch == Dispatch::Plain {
+            (named.len() == 1).then(|| &named[0])
+        } else {
+            method_of(&call, named).map(|index| &named[index])
+        };
+        let Some(target) = target else { continue };
         for (&arg, &param) in call.args.iter().zip(&target.params) {
             edges.push(FlowEdge { from: arg, to: param, kind: "call_arg".into() });
         }

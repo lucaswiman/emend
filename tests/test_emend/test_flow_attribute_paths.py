@@ -55,13 +55,22 @@ def _reported(tmp_path, body, *, not_through=None, prelude=BOX, name="app.py",
     )
     path = tmp_path / name
     path.write_text(source)
-    rule = LintRule(
-        name="flow", find="", message="tainted", flows_from=flows_from,
-        flows_to=flows_to, not_through=not_through,
-    )
     kwargs = {"language": language} if language else {}
-    lines = {violation.line for violation in run_lint([rule], [str(path)], **kwargs)}
-    return source.count("\n") in lines
+
+    def reported(sanitizers):
+        rule = LintRule(
+            name="flow", find="", message="tainted", flows_from=flows_from,
+            flows_to=flows_to, not_through=sanitizers,
+        )
+        lines = {violation.line for violation in run_lint([rule], [str(path)], **kwargs)}
+        return source.count("\n") in lines
+
+    answer = reported(not_through)
+    if not_through is None:
+        # A rule with a sanitizer is checked along control paths rather than
+        # over the value graph alone.  Both must give the same answer.
+        assert reported(["never_called($X)"]) == answer, "the two walks disagree"
+    return answer
 
 
 # ---------------------------------------------------------------------------
@@ -84,10 +93,15 @@ def test_taint_reaches_a_read_below_the_tainted_attribute(tmp_path):
     assert _reported(tmp_path, "box = make()\nbox.raw = input('x')\neval(box.raw.name)")
 
 
-def test_an_opaque_reader_of_the_object_is_not_reported(tmp_path):
-    """Nothing says ``render`` reads ``raw``; reporting it is opt-in."""
-    assert not _reported(tmp_path, "box = make()\nbox.raw = input('x')\neval(box.render())")
-    assert not _reported(tmp_path, "box = make()\nbox.raw = input('x')\neval(render(box))")
+def test_an_opaque_reader_of_the_object_may_have_read_the_attribute(tmp_path):
+    """What ``render`` reads of the object cannot be seen, so its result is
+    tainted.  A sink given the object itself is not: it was not given
+    ``raw``."""
+    assert _reported(tmp_path, "box = make()\nbox.raw = input('x')\neval(box.render())")
+    assert _reported(tmp_path, "box = make()\nbox.raw = input('x')\neval(render(box))")
+    assert _reported(tmp_path, "box = make()\nbox.raw = input('x')\neval(f'{box}')")
+    assert not _reported(tmp_path, "box = make()\nbox.raw = input('x')\neval(box)")
+    assert not _reported(tmp_path, "box = make()\nbox.raw = input('x')\neval(render(box.other))")
 
 
 def test_attribute_taint_follows_an_alias_of_the_object(tmp_path):
@@ -244,3 +258,84 @@ def test_a_new_object_has_none_of_the_old_ones_stores(tmp_path):
         tmp_path, "box = make()\nbox.raw = input('x')\nbox = make()\neval(read_raw(box))")
     assert _reported(
         tmp_path, "box = make()\nbox.raw = input('x')\nkept = box\nbox = make()\neval(kept.raw)")
+
+
+# ---------------------------------------------------------------------------
+# Which method a call names
+# ---------------------------------------------------------------------------
+
+HIERARCHY = '''class Base:
+    def __init__(self, raw):
+        self.raw = raw
+        self.other = "fixed"
+
+    def value(self):
+        return self.raw
+
+    def inherited(self):
+        return self.raw
+
+
+class Child(Base):
+    def __init__(self, raw, extra):
+        super().__init__(raw)
+        self.extra = extra
+
+    def through_inherited(self):
+        return self.inherited()
+
+
+class Unrelated:
+    def __init__(self, raw):
+        self.raw = "fixed"
+
+    def value(self):
+        return "fixed"
+
+    def read(self):
+        return self.value()
+
+'''
+
+
+def test_a_call_on_the_receiver_names_a_method_of_its_own_class(tmp_path):
+    """Two classes define ``value`` and ``__init__``; a shared name used to
+    leave every such call unresolved."""
+    assert _reported(
+        tmp_path, "b = Base(input('x'))\neval(b.value())", prelude=HIERARCHY)
+    assert not _reported(
+        tmp_path, "u = Unrelated(input('x'))\neval(u.read())", prelude=HIERARCHY)
+    assert not _reported(
+        tmp_path, "u = Unrelated(input('x'))\neval(u.raw)", prelude=HIERARCHY)
+
+
+def test_a_call_on_the_parent_names_the_base_class_method(tmp_path):
+    body = "c = Child(input('x'), 'fixed')\n"
+    assert _reported(tmp_path, body + "eval(c.raw)", prelude=HIERARCHY)
+    assert not _reported(tmp_path, body + "eval(c.extra)", prelude=HIERARCHY)
+    assert not _reported(tmp_path, body + "eval(c.other)", prelude=HIERARCHY)
+    assert _reported(tmp_path, body + "eval(c.through_inherited())", prelude=HIERARCHY)
+    swapped = "c = Child('fixed', input('x'))\n"
+    assert _reported(tmp_path, swapped + "eval(c.extra)", prelude=HIERARCHY)
+    assert not _reported(tmp_path, swapped + "eval(c.raw)", prelude=HIERARCHY)
+
+
+def test_a_constructor_that_hands_the_object_on_stays_opaque(tmp_path):
+    """The base class is not in the project, so what its constructor stores
+    is unknown: the argument may be anywhere in the object."""
+    prelude = (
+        "class Form(elsewhere.Base):\n"
+        "    def __init__(self, raw):\n"
+        "        super().__init__(raw)\n"
+        "        self.label = 'fixed'\n"
+        "\n"
+        "\n"
+        "class Loose:\n"
+        "    def __init__(self, **fields):\n"
+        "        for name in fields:\n"
+        "            setattr(self, name, fields[name])\n"
+        "\n"
+    )
+    assert _reported(tmp_path, "f = Form(input('x'))\neval(f.anything)", prelude=prelude)
+    assert _reported(tmp_path, "f = Form(input('x'))\neval(f)", prelude=prelude)
+    assert _reported(tmp_path, "o = Loose(raw=input('x'))\neval(o.raw)", prelude=prelude)

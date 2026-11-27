@@ -1097,6 +1097,10 @@ pub struct CfgSection {
     /// The receiver every function has without declaring it (`this`).
     #[serde(default)]
     pub implicit_receiver: String,
+    /// The name that stands for the receiver seen as its parent class
+    /// (`super`): `super().save()` is a call on the receiver itself.
+    #[serde(default)]
+    pub parent_receiver: String,
     /// Node types for destructuring targets (tuple/list unpacking).
     #[serde(default)]
     pub destructure_nodes: Vec<String>,

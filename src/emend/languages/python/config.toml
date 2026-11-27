@@ -459,6 +459,7 @@ skip_identifiers = ["True", "False", "None", "self", "cls"]
 # The value a method is called on.  Flow facts keep it as the root of an
 # access path (`self.raw`) and bind it at a resolved call.
 receiver_names = ["self", "cls"]
+parent_receiver = "super"
 destructure_nodes = ["tuple", "list", "pattern_list", "tuple_pattern"]
 attribute_access_nodes = ["subscript", "attribute"]
 attribute_node = "attribute"
