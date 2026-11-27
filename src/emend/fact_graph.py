@@ -13,6 +13,7 @@ The backing store is CozoDB with the SQLite engine, giving us:
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import logging
@@ -424,6 +425,110 @@ def _interned_positions(relation: str, columns: list[str]) -> tuple[int, ...]:
     return tuple(index for index, column in enumerate(columns) if column in interned)
 
 
+def _relation_columns(schema: str) -> dict[str, list[str]]:
+    """Map each relation to its columns, keys first, in stored order."""
+    return {
+        relation: re.findall(r"(\w+):\s*\w+", columns)
+        for relation, columns in re.findall(r"\{:create (\w+) \{([^}]*)\}\}", schema)
+    }
+
+
+_RELATION_COLUMNS = _relation_columns(_SCHEMA)
+_STORED_ATOM = re.compile(r"\*(\w+)\s*([\[{])")
+_CLOSERS = {"[": "]", "{": "}", "(": ")"}
+
+
+def _string_end(text: str, start: int) -> int:
+    """Index just past the string literal that opens at *start*."""
+    quote, index = text[start], start + 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+        elif text[index] == quote:
+            return index + 1
+        else:
+            index += 1
+    return len(text)
+
+
+def _top_level(text: str, start: int, stop_at: str) -> int:
+    """Index of the first of *stop_at* outside every bracket and string, or -1."""
+    depth, index = 0, start
+    while index < len(text):
+        char = text[index]
+        if char in "\"'":
+            index = _string_end(text, index)
+            continue
+        if depth == 0 and char in stop_at:
+            return index
+        if char in _CLOSERS:
+            depth += 1
+        elif char in "]})":
+            depth -= 1
+        index += 1
+    return -1
+
+
+def _literals_as_ids(script: str, id_of: Callable[[str], int]) -> str:
+    """Write the id for a string literal that sits in an ``Id`` column.
+
+    ``*call[caller, "os.system", ...]`` names a callee, but the column holds
+    ids, so the literal would match nothing and say nothing.  Only a literal
+    that is the whole of a column's position in a stored-relation atom is
+    replaced; comparisons and string functions still need ``*interned``.
+    """
+    pieces: list[str] = []
+    index = 0
+    while index < len(script):
+        char = script[index]
+        if char in "\"'":
+            end = _string_end(script, index)
+        elif char == "#":
+            end = script.find("\n", index)
+            end = len(script) if end == -1 else end
+        else:
+            atom = _STORED_ATOM.match(script, index) if char == "*" else None
+            interned = _INTERNED_COLUMNS.get(atom.group(1)) if atom else None
+            close = _top_level(script, atom.end(), _CLOSERS[atom.group(2)]) if interned else -1
+            if close == -1:
+                pieces.append(char)
+                index += 1
+                continue
+            columns = _RELATION_COLUMNS[atom.group(1)]
+            pieces.append(script[index:atom.end()])
+            position, start = 0, atom.end()
+            while start <= close:
+                comma = _top_level(script, start, ",")
+                stop = close if comma == -1 or comma > close else comma
+                argument = script[start:stop]
+                column, value = None, argument
+                if atom.group(2) == "{":
+                    name, colon, bound = argument.partition(":")
+                    if colon and name.strip().isidentifier():
+                        column, value = name.strip(), bound
+                        pieces.append(name + colon)
+                elif position < len(columns):
+                    column = columns[position]
+                literal = value.strip()
+                if (column in interned and literal[:1] in ("\"", "'")
+                        and _string_end(literal, 0) == len(literal)):
+                    try:
+                        text = ast.literal_eval(literal)
+                    except (SyntaxError, ValueError):
+                        text = None
+                    if isinstance(text, str):
+                        value = value.replace(literal, str(id_of(text)))
+                pieces.append(value)
+                pieces.append(script[stop])
+                position, start = position + 1, stop + 1
+            end = close + 1
+            index = end
+            continue
+        pieces.append(script[index:end])
+        index = end
+    return "".join(pieces)
+
+
 def _init_schema(client: Any) -> None:
     """Create stored relations if they don't exist."""
     for stmt in _SCHEMA_INIT.strip().split("\n\n"):
@@ -657,11 +762,15 @@ class FactGraph:
         The result has keys ``headers`` (list of column names) and
         ``rows`` (list of row tuples).  Path and qualified-name columns hold
         ids inside the script, but the rows carry their text, in the order of
-        that text unless the script has its own ``:order``.  To compare such a
-        column with text, look its id up: ``*intern["pkg.mod.func", id]``.
+        that text unless the script has its own ``:order``.  A string literal
+        written in such a column of a stored relation, as in
+        ``*call[caller, "os.system", ...]``, stands for its id.  Anywhere else
+        (a comparison, a string function) look the id or the text up:
+        ``*intern["pkg.mod.func", id]``, ``*interned[id, text]``.
         ``decode=False`` returns the stored ids.
         """
-        return self._client.run(cozoscript, read_only=True, decode=decode)
+        script = _literals_as_ids(cozoscript, self._id)
+        return self._client.run(script, read_only=True, decode=decode)
 
     def _id(self, text: str) -> int:
         """The stored id of a path or qualified name; -1, which no row holds, if unknown."""

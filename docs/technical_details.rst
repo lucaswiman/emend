@@ -570,8 +570,15 @@ equal exactly when the texts are.
 
 Custom CozoScript does see the ids *inside* a script:
 
-- A string literal compared with an id column matches nothing. Look the id up
-  first::
+- A string literal written in an id column of a stored relation stands for
+  its id, so this works as it reads::
+
+      ?[callee, line] := *call["pkg.mod.func", callee, _, line, _, _, _]
+
+  The literal has to be the whole of the column's position (or the value of
+  ``column: "..."`` in the named form).  A comparison such as
+  ``caller == "pkg.mod.func"`` compares an id with text and matches nothing.
+  Look the id up instead::
 
       ?[callee, line] := *intern["pkg.mod.func", caller],
                          *call[caller, callee, _, line, _, _, _]

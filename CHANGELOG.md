@@ -18,12 +18,13 @@
   `facts.db` shrinks from 755 MB to 407 MB; a cold index, dead-code analysis
   and the update after an edit are faster. Commands, the Python API and query
   results still take and return text. **Custom CozoScript** (policy `datalog`
-  checks) now sees ids in the path and qualified-name columns, so a string
-  literal there no longer matches: look the id up first, as in
-  `*intern["pkg.mod.func", id], *call[id, callee, _, _, _, _, _]`, and bind
-  `*interned[id, text]` before a string function or `:order`. See "Interned
-  paths and qualified names" in the technical details. The fact database is
-  rebuilt once after upgrading.
+  checks) now sees ids in the path and qualified-name columns. A string
+  literal written in such a column, as in `*call[caller, "os.system", ...]`,
+  still works: it stands for its id. A comparison (`callee == "os.system"`),
+  a string function or `:order` on such a column sees the id, so bind the text
+  first with `*interned[id, text]`, or the id with `*intern["pkg.mod.func", id]`.
+  See "Interned paths and qualified names" in the technical details. The fact
+  database is rebuilt once after upgrading.
 - Whole-project `analyze trace` and flow rules now finish on large projects:
   call and container linking no longer rescan every occurrence per call site.
 - Faster pattern linting and warm queries: language lookup no longer rescans

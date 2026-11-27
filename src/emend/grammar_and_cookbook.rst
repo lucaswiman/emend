@@ -427,10 +427,12 @@ Use the ``fact_type`` parameter to query: ``symbols``, ``calls``, ``references``
 
 Paths and qualified names are passed and returned as text. In the fact database
 itself they are integer ids of the ``intern[text, id]`` / ``interned[id, text]``
-dictionary, which matters only to custom CozoScript (policy ``datalog`` checks):
-there a string literal does not match such a column, so look the id up first,
-``*intern["pkg.mod.func", id], *call[id, callee, _, _, _, _, _]``. Results are
-decoded back to text.
+dictionary, which matters only to custom CozoScript (policy ``datalog`` checks).
+A string literal written in such a column stands for its id
+(``*call["pkg.mod.func", callee, _, _, _, _, _]``); for a comparison or a
+string function, look the id or the text up first
+(``*intern["pkg.mod.func", id]``, ``*interned[id, text]``). Results are decoded
+back to text.
 
 
 Cookbook recipes

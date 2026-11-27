@@ -491,9 +491,13 @@ def test_aggregated_names_are_decoded_inside_lists(project_graph):
 
 
 def test_raw_query_matches_text_through_the_dictionary(project_graph):
-    """A string literal no longer equals a stored path or name; its id does."""
+    """A stored path or name is an id.  A literal written in its column
+    stands for that id; a comparison with the column's value does not."""
     assert project_graph.run_query(
         '?[callee_qn] := *call["app.main", callee_qn, _, _, _, _, _]'
+    )["rows"] == [["app.Service"]]
+    assert project_graph.run_query(
+        '?[callee_qn] := *call[caller, callee_qn, _, _, _, _, _], caller == "app.main"'
     )["rows"] == []
     assert project_graph.run_query(
         '?[callee_qn] := *intern["app.main", caller], *call[caller, callee_qn, _, _, _, _, _]'
@@ -1038,3 +1042,59 @@ def test_bridge_fragment_search_reads_a_dictionary_larger_than_one_page():
     assert [text for text, _ in db.texts_containing(["0444"], 3)] == [
         "name.000444", "name.004440", "name.004441",
     ]
+
+
+# ---------------------------------------------------------------------------
+# String literals in a raw query's path and name columns
+# ---------------------------------------------------------------------------
+
+
+def _literal_graph() -> FactGraph:
+    graph = FactGraph()
+    graph.add_calls_batch([
+        CallFact("app.main", "os.system", "app.py", 3, 4),
+        CallFact("app.main", "app.helper", "app.py", 4, 4),
+        CallFact("lib.run", "os.system", "lib.py", 9, 0),
+    ])
+    graph.add_references_batch([
+        ReferenceFact("os.system", "app.py", 3, 4, "call"),
+        ReferenceFact("os.system", "lib.py", 9, 0, "call"),
+        ReferenceFact("app.helper", "app.py", 4, 4, "call"),
+    ])
+    return graph
+
+
+@pytest.mark.parametrize("query, expected", [
+    # A name or path written where its column is: the natural way to ask.
+    ('?[caller] := *call[caller, "os.system", _, _, _, _, _]', [["app.main"], ["lib.run"]]),
+    ("?[caller] := *call[caller, 'os.system', _, _, _, _, _]", [["app.main"], ["lib.run"]]),
+    ('?[callee] := *call["app.main", callee, "app.py", _, _, _, _]',
+     [["app.helper"], ["os.system"]]),
+    ('?[file] := *reference{symbol_qn: "os.system", file_path: file}', [["app.py"], ["lib.py"]]),
+    ('?[line] := *reference{symbol_qn: "os.system", file_path: "lib.py", line}', [[9]]),
+    ('?[caller] := *call_by_callee[ "os.system" , caller, _, _, _, _, _]',
+     [["app.main"], ["lib.run"]]),
+    # A name the graph has never seen matches nothing, without an error.
+    ('?[caller] := *call[caller, "os.absent", _, _, _, _, _]', []),
+])
+def test_string_literal_in_an_id_column_matches_its_text(query, expected):
+    assert _literal_graph().run_query(query)["rows"] == expected
+
+
+@pytest.mark.parametrize("query, expected", [
+    # A text column keeps its string.
+    ('?[name] := *reference{symbol_qn: name, ref_kind: "call", file_path: "lib.py"}',
+     [["os.system"]]),
+    # Text that only looks like an atom is left alone.
+    ("?[text] := text = \"*call[caller, 'os.system', _, _, _, _, _]\"",
+     [["*call[caller, 'os.system', _, _, _, _, _]"]]),
+    # So is a comment, and an expression inside a position.
+    ('# *call[caller, "os.system", _, _, _, _, _]\n'
+     '?[callee] := *call[caller, callee, _, line, _, _, _], line == max(4, 0)',
+     [["app.helper"]]),
+    # The dictionary is still there for comparisons and string functions.
+    ('?[caller] := *intern["os.system", id], *call[caller, id, _, _, _, _, _]',
+     [["app.main"], ["lib.run"]]),
+])
+def test_other_strings_in_a_raw_query_are_untouched(query, expected):
+    assert _literal_graph().run_query(query)["rows"] == expected
