@@ -122,6 +122,42 @@ def test_ts_lint_flow_follows_a_method_call_on_the_value(tmp_path):
     assert lines("$TARGET.run()") == [8]
 
 
+def test_ts_lint_flow_keeps_taint_on_the_attribute_across_methods(tmp_path):
+    """``this.raw`` is an attribute of the object a method is called on."""
+    ts_file = tmp_path / "box.ts"
+    ts_file.write_text(
+        "class Box {\n"
+        "    store(item: string): void {\n"
+        "        this.raw = item;\n"
+        "    }\n"
+        "    value(): string {\n"
+        "        return this.raw;\n"
+        "    }\n"
+        "    constant(): string {\n"
+        '        return "fixed";\n'
+        "    }\n"
+        "}\n"
+        "function handler(): void {\n"
+        "    const b = make();\n"
+        '    b.store(prompt("x"));\n'
+        "    eval(b.value());\n"
+        "    eval(b.constant());\n"
+        "    eval(b.raw);\n"
+        "    eval(b.other);\n"
+        "    const c = make();\n"
+        '    c.raw = prompt("y");\n'
+        "    eval(c.value());\n"
+        "    eval(c.constant());\n"
+        "}\n"
+    )
+    rule = LintRule(
+        name="flow", find="", message="tainted",
+        flows_from="prompt($X)", flows_to="eval($CODE)",
+    )
+    lines = sorted(v.line for v in run_lint([rule], [str(ts_file)], language="typescript"))
+    assert lines == [15, 17, 21]
+
+
 # --- Fix / replace mode ---
 
 

@@ -33,7 +33,7 @@ from emend.symbol_projection import SymbolInfo, _symbol_info_view
 from emend.sqlite_writer import SQLiteWriter
 
 
-EXTRACTION_ARTIFACT_VERSION = "24"
+EXTRACTION_ARTIFACT_VERSION = "25"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 TYPE_RESULT_VERSION = 5  # FileTypes now carries failure diagnostics.
 logger = logging.getLogger(__name__)

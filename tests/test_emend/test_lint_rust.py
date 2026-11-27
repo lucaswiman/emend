@@ -121,6 +121,38 @@ def test_rust_lint_flow_follows_a_method_call_on_the_value(tmp_path):
     assert lines("$TARGET.run()") == [8]
 
 
+def test_rust_lint_flow_keeps_taint_on_the_field_across_methods(tmp_path):
+    """``self.raw`` is a field of the value a method is called on."""
+    test_file = tmp_path / "holder.rs"
+    test_file.write_text(
+        "impl Holder {\n"
+        "    fn store(&mut self, item: String) {\n"
+        "        self.raw = item;\n"
+        "    }\n"
+        "    fn value(&self) -> String {\n"
+        "        return self.raw;\n"
+        "    }\n"
+        "    fn constant(&self) -> String {\n"
+        "        return fixed();\n"
+        "    }\n"
+        "}\n"
+        "fn handler() {\n"
+        "    let mut b = make();\n"
+        '    b.store(get_input("x"));\n'
+        "    execute_query(b.value());\n"
+        "    execute_query(b.constant());\n"
+        "    execute_query(b.raw);\n"
+        "    execute_query(b.other);\n"
+        "}\n"
+    )
+    rule = LintRule(
+        name="flow", find="", message="tainted",
+        flows_from="get_input($X)", flows_to="execute_query($X)",
+    )
+    lines = sorted(v.line for v in run_lint([rule], [str(test_file)], language="rust"))
+    assert lines == [15, 17]
+
+
 # ---------------------------------------------------------------------------
 # Fix / replace
 # ---------------------------------------------------------------------------

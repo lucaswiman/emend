@@ -275,7 +275,8 @@ class _EventIndex:
     @classmethod
     def build(cls, rows):
         return cls(
-            sorted((row for row in rows if row.role not in {"control", "function_entry"}),
+            sorted((row for row in rows
+                    if row.role not in {"control", "function_entry", *_OBJECT_ROLES}),
                    key=lambda row: row.start_byte),
             {row.call_id: row for row in rows if row.role == "call_result"},
             {row.event_id: position for position, row in enumerate(rows)},
@@ -417,18 +418,12 @@ def _resolve_endpoints(
             captured_value = capture[7] if capture is not None else next(
                 (item[7] for item in captures), "",
             )
-            call_id, variable = event.call_id, event.access_path or event.var
+            variable = event.access_path or event.var
             if capture is not None and event.role == "use" and event.end_byte > capture[2]:
                 # A captured receiver stands for the value, not for the longer
-                # path it was read through, and its call is the one made on it.
+                # path it was read through.
                 variable = captured_value
-                call_id = next((
-                    candidate.call_id for candidate in candidates
-                    if candidate.role == "call"
-                    and candidate.start_byte == event.start_byte
-                    and candidate.end_byte > event.end_byte
-                ), None)
-            completion = index.completions.get(call_id) \
+            completion = index.completions.get(event.call_id) \
                 if purpose in {"sanitizer", "scope"} else None
             matches.append(_EndpointMatch(
                 node, span,
@@ -438,9 +433,105 @@ def _resolve_endpoints(
     return matches
 
 
-_INTRA_VALUE_EDGES = frozenset({"reaching", "transfer"})
-_CALL_EDGES = frozenset({"call_arg", "call_return"})
+_INTRA_VALUE_EDGES = frozenset({"reaching", "transfer", "store"})
+# ``arg_return`` carries what a callee stored into an object it was given back
+# to the caller's name for that object; it leaves the call as a return does.
+_CALL_EDGES = frozenset({"call_arg", "call_return", "arg_return"})
 _OPAQUE_CALL_EDGE = "call_input"
+# Occurrences that exist to carry attribute taint across a call.  A pattern
+# never matches them.
+_OBJECT_ROLES = frozenset({"arg_out", "param_out"})
+# How many attributes deep a tainted part is tracked.  Below that, everything
+# under the last tracked attribute counts as tainted.
+_FIELD_DEPTH = 3
+
+
+def _object_path(event: "FlowEventFact") -> str | None:
+    """The object an occurrence denotes.  The read of a receiver, ``b.value``
+    in ``b.value()``, denotes ``b``."""
+    path = event.access_path or event.var
+    if path and event.role == "use" and event.call_id is not None:
+        return path.rpartition(".")[0] or path
+    return path
+
+
+def _segment_ends(part: str) -> list[int]:
+    """Where each step of ``.inner["k"].raw`` ends."""
+    ends: list[int] = []
+    depth, quote = 0, ""
+    for index, char in enumerate(part):
+        if quote:
+            quote = "" if char == quote else quote
+        elif depth and char in "\"'":
+            quote = char
+        elif char == "[":
+            if not depth and index:
+                ends.append(index)
+            depth += 1
+        elif char == "]":
+            depth = max(depth - 1, 0)
+        elif char == "." and not depth and index:
+            ends.append(index)
+    ends.append(len(part))
+    return ends
+
+
+def _below(text: str, prefix: str) -> bool:
+    """Whether ``text`` is ``prefix`` or something read from it."""
+    return text.startswith(prefix) and (len(text) == len(prefix) or text[len(prefix)] in ".[")
+
+
+def _tainted_part(part: str) -> str | None:
+    """Normalize the part of an object that is tainted.
+
+    An element of a container is the container read whole: nothing tracks
+    which key a consumer reads.  An attribute of an element is not tracked.
+    """
+    if not part or part[0] != "[" and part.count(".") + part.count("[") <= _FIELD_DEPTH:
+        return part
+    ends = _segment_ends(part)
+    if part[0] == "[":
+        return "" if len(ends) == 1 else None
+    return part[:ends[_FIELD_DEPTH - 1]] if len(ends) > _FIELD_DEPTH else part
+
+
+def _field_step(kind: str, source: "FlowEventFact", target: "FlowEventFact",
+                part: str) -> str | None:
+    """The tainted part of ``target``, given the tainted ``part`` of ``source``.
+
+    ``""`` is the whole value and ``.raw`` the attribute ``raw`` of the object
+    the occurrence denotes.  None means the edge carries no taint: the part
+    that is tainted is not the part that is read.
+    """
+    if kind == "store":
+        # ``b.raw = x`` reaching a later ``b``: the object holds it in ``.raw``.
+        stored = source.access_path or ""
+        return _tainted_part(stored[len(_object_path(target) or ""):] + part)
+    if kind.startswith("store:"):
+        return _tainted_part(kind[6:] + part)
+    if not part:
+        return ""
+    if kind == "reaching":
+        defined, read = _object_path(source), _object_path(target)
+        if not defined or not read or defined == read:
+            return part
+        step = read[len(defined):]
+        if _below(part, step):
+            return _tainted_part(part[len(step):])
+        return "" if _below(step, part) else None
+    # Nothing says an opaque call, or an expression built from the object,
+    # reads the tainted attribute.
+    if kind == _OPAQUE_CALL_EDGE or target.role == "evaluate":
+        return None
+    return part
+
+
+def _edge_allowed(kind: str, allowed: frozenset[str]) -> bool:
+    return (
+        kind in allowed
+        or (_is_control_edge(kind) and "control" in allowed)
+        or (kind.startswith("store:") and "store" in allowed)
+    )
 
 
 def _call_transition(
@@ -462,7 +553,7 @@ def _call_transition(
         if max_call_depth is not None and len(stack) >= max_call_depth:
             return None
         return (*stack, marker)
-    if kind == "call_return":
+    if kind in {"call_return", "arg_return"}:
         if target.call_id is None:
             return None
         marker = (target.file_path, target.call_id)
@@ -505,15 +596,22 @@ def _walk(
     max_call_depth: int | None = None,
     initial_states: Iterable[Any] | None = None,
 ) -> tuple[set[Any], dict[Any, Any]]:
-    queue = deque(initial_states if initial_states is not None else [(start, (), ())])
+    # A state is an occurrence, its call stack, its pending finalizers and the
+    # part of it that is tainted ("" for the whole value).
+    queue = deque(initial_states if initial_states is not None else [(start, (), (), "")])
     seen = set(queue)
     predecessor: dict[Any, Any] = {}
     while queue:
         current = queue.popleft()
-        node, stack, pending = current
+        node, stack, pending, part = current
         for target, kind in adjacency.get(node, ()):
-            if (kind not in allowed and not (_is_control_edge(kind) and "control" in allowed)) or target in blocked:
+            if not _edge_allowed(kind, allowed) or target in blocked:
                 continue
+            next_part = part
+            if part or kind.startswith("store"):
+                next_part = _field_step(kind, events[node], events[target], part)
+                if next_part is None:
+                    continue
             next_stack = _call_transition(
                 kind, events[node], events[target], stack, max_call_depth,
             )
@@ -522,7 +620,7 @@ def _walk(
             next_pending = _finally_transition(kind, events[node], pending)
             if next_pending is None:
                 continue
-            state = (target, next_stack, next_pending)
+            state = (target, next_stack, next_pending, next_part)
             if state in seen:
                 continue
             seen.add(state)
@@ -549,7 +647,7 @@ def _can_reach(
     blocked: frozenset[tuple[str, int]] = frozenset(),
     max_call_depth: int | None = None,
 ) -> bool:
-    return any(state[0] == target for state in _walk(
+    return any(state[0] == target and not state[3] for state in _walk(
         start, adjacency, events, allowed, blocked=blocked,
         max_call_depth=max_call_depth,
     )[0])
@@ -594,8 +692,8 @@ def _sanitized_nodes(
     if outputs & reachable_nodes:
         onward, _ = _walk(source.node, value_adjacency, events, value_edges,
                          max_call_depth=max_call_depth,
-                         initial_states=((node, (), ()) for node in outputs & reachable_nodes))
-        clean.update(state[0] for state in onward)
+                         initial_states=((node, (), (), "") for node in outputs & reachable_nodes))
+        clean.update(state[0] for state in onward if not state[3])
     # Value sanitizers only affect the generation which reaches their exact
     # argument occurrence. Scope sanitizers apply to every value in the scope.
     if _source_starts_clean(source, sanitizers, value_adjacency, events,
@@ -697,6 +795,7 @@ def _component_value_path_walker(sanitizers, scope_sanitizers,
     final_actions = defaultdict(set)
     resolved_results = set()
     call_results = {}
+    edge_kinds = defaultdict(set)
     function = [(events[node].file_path, events[node].func_id) for node in nodes]
     for node, index in indices.items():
         event = events[node]
@@ -709,6 +808,7 @@ def _component_value_path_walker(sanitizers, scope_sanitizers,
             if kind in _CALL_EDGES and not interprocedural:
                 continue
             incoming[indices[target]].add(index)
+            edge_kinds[index, indices[target]].add(kind)
             if kind == "call_arg":
                 marker = indices[(event.file_path, event.call_id)]
                 call_targets[marker].add(function[indices[target]])
@@ -765,27 +865,57 @@ def _component_value_path_walker(sanitizers, scope_sanitizers,
                 pending.append(previous)
                 queued.add(previous)
 
+    def thaw(frozen):
+        values = {}
+        for index, part, identity in frozen:
+            values.setdefault(index, {})[part] = identity
+        return values
+
     def walk(source, sinks):
         def advance(index, values, stack):
+            # ``values`` maps a live occurrence to its tainted parts ("" for
+            # the whole value), each with the identity of the value it holds.
             inputs = incoming[index]
             if index in parameter_inputs:
                 inputs = parameter_inputs[index].get(stack[-1], ()) if stack else ()
             parents = [i for i in inputs if i in values]
-            identities = {values[i] for i in parents}
-            fresh = max(values.values(), default=-1) + 1
-            identity = next(iter(identities)) if len(identities) == 1 else fresh
             event = events[nodes[index]]
-            if event.role in {"evaluate", "mutation"} or (
+            arrived = {}
+            for parent in parents:
+                origin = events[nodes[parent]]
+                for part, identity in values[parent].items():
+                    for kind in edge_kinds[parent, index]:
+                        reached = part
+                        if part or kind.startswith("store"):
+                            reached = _field_step(kind, origin, event, part)
+                            if reached is None:
+                                continue
+                        arrived.setdefault(reached, set()).add(identity)
+            fresh = max((identity for parts in values.values()
+                         for identity in parts.values()), default=-1) + 1
+            derived = event.role in {"evaluate", "mutation"} or (
                 event.role == "call_result" and index not in resolved_results
-            ):
-                identity = fresh
-            cleaned = {values[i] for i in validators[index] if i in values}
-            values = {i: value for i, value in values.items()
-                      if not (kills[index] & (1 << i)) and value not in cleaned}
+            )
+            # A validator cleans the value it is given, not an object that
+            # merely holds a tainted attribute.
+            cleaned = {values[i][""] for i in validators[index] if "" in values.get(i, ())}
+            kept = {}
+            for i, parts in values.items():
+                if kills[index] & (1 << i):
+                    continue
+                parts = {part: identity for part, identity in parts.items()
+                         if identity not in cleaned}
+                if parts:
+                    kept[i] = parts
+            values = kept
             if index == indices[source.node]:
-                values[index] = fresh
-            elif parents and index not in outputs and not cleaned:
-                values[index] = identity
+                values[index] = {"": fresh}
+            elif arrived and index not in outputs and not cleaned:
+                values[index] = {
+                    part: fresh + offset if derived or len(identities) != 1
+                    else next(iter(identities))
+                    for offset, (part, identities) in enumerate(sorted(arrived.items()))
+                }
             if index in scopes:
                 values.clear()
             return values, parents
@@ -806,8 +936,8 @@ def _component_value_path_walker(sanitizers, scope_sanitizers,
         while queue:
             state = queue.popleft()
             index, frozen, stack, pending_finally = state
-            values, _ = advance(index, dict(frozen), stack)
-            if index in wanted and index in values and nodes[index] not in paths:
+            values, _ = advance(index, thaw(frozen), stack)
+            if index in wanted and "" in values.get(index, ()) and nodes[index] not in paths:
                 route = []
                 cursor = state
                 while cursor is not None:
@@ -815,12 +945,14 @@ def _component_value_path_walker(sanitizers, scope_sanitizers,
                     cursor = previous[cursor]
                 provenance = {}
                 for step, snapshot, frame, _pending in reversed(route):
-                    active, parents = advance(step, dict(snapshot), frame)
+                    active, parents = advance(step, thaw(snapshot), frame)
                     if step == indices[source.node]:
                         provenance[step] = (1, source.node, None)
                     elif step in active:
-                        parent = min((provenance[i] for i in parents), key=lambda record: record[0])
-                        provenance[step] = (parent[0] + 1, nodes[step], parent)
+                        records = [provenance[i] for i in parents if i in provenance]
+                        if records:
+                            parent = min(records, key=lambda record: record[0])
+                            provenance[step] = (parent[0] + 1, nodes[step], parent)
                 record = provenance[index]
                 path = []
                 while record is not None:
@@ -858,8 +990,9 @@ def _component_value_path_walker(sanitizers, scope_sanitizers,
                     # confusing separate executions of the same loop occurrence.
                     names = {}
                     next_state = (target, tuple(
-                        (i, names.setdefault(value, len(names)))
-                        for i, value in sorted(carried.items()) if live[target] & (1 << i)
+                        (i, part, names.setdefault(identity, len(names)))
+                        for i, parts in sorted(carried.items()) if live[target] & (1 << i)
+                        for part, identity in sorted(parts.items())
                     ), next_stack, next_pending)
                     if next_state not in previous:
                         if len(previous) - len(visited_nodes) >= _VALUE_STATE_LIMIT:
@@ -898,39 +1031,63 @@ def _add_cross_file_calls(
     fallback would make two same-named functions (or two call sites on one
     line) contaminate one another, so ambiguous joins are omitted.
     """
+    from emend.language_registry import detect_language, load_config
+
     by_function: dict[tuple[str, str], list[tuple[tuple[str, int], FlowEventFact]]] = defaultdict(list)
     by_call: dict[tuple[str, int], list[tuple[tuple[str, int], FlowEventFact]]] = defaultdict(list)
     # Every lookup below is keyed.  A whole-project event table holds millions
     # of occurrences, so scanning it once per resolved call never finishes.
-    functions_by_name: dict[tuple[str, str], dict[tuple[str, str], None]] = defaultdict(dict)
+    functions_by_name: dict[tuple[str, str], dict[tuple[str, str], int]] = defaultdict(dict)
     calls_by_line: dict[tuple[str, int], list[tuple[tuple[str, int], FlowEventFact]]] = defaultdict(list)
     for node, event in events.items():
         function = (event.file_path, event.func_id)
         by_function[function].append((node, event))
-        functions_by_name[(event.file_path, event.func_name)][function] = None
+        if event.role == "function_entry":
+            functions_by_name[(event.file_path, event.func_name)][function] = event.start_line + 1
         if event.call_id is not None:
             by_call[(event.file_path, event.call_id)].append((node, event))
         if event.role == "call":
             calls_by_line[(event.file_path, event.start_line)].append((node, event))
 
+    def resolved() -> set[tuple[str, int]]:
+        # A call is resolved when a callee's exit returns into its result.
+        return {
+            (events[target].file_path, events[target].call_id)
+            for outgoing in value_adjacency.values()
+            for target, kind in outgoing if kind == "call_return"
+        }
+
     # These are already-resolved calls from the same FactGraph snapshot.  Do
     # not infer a new call target from occurrence text: that would reintroduce
     # the name-based cross-file false positives this linker exists to avoid.
-    resolved_calls = {
-        (events[source].file_path, events[source].call_id)
-        for source, outgoing in value_adjacency.items()
-        if source in events and events[source].role == "call_arg"
-        and events[source].call_id is not None
-        and any(kind == "call_arg" for _target, kind in outgoing)
-    }
     try:
         calls = graph._all_calls()  # type: ignore[attr-defined]
         symbols = graph.symbols()
     except Exception:
-        return resolved_calls
+        return resolved()
     symbols_by_qn: dict[str, list[Any]] = defaultdict(list)
     for symbol in symbols:
         symbols_by_qn[symbol.qualified_name].append(symbol)
+    constructors: dict[str, tuple[str, ...]] = {}
+
+    def function_of(symbol) -> tuple[str, str] | None:
+        """The flow scope of a function symbol.  Several functions in a file
+        may share a name; the symbol's own lines tell them apart."""
+        named = functions_by_name.get((symbol.file_path, symbol.name), {})
+        if len(named) > 1:
+            named = {function: line for function, line in named.items()
+                     if symbol.line <= line <= symbol.end_line}
+        if not named:
+            return None
+        # A nested function of the same name starts after the one that holds it.
+        return min(named, key=named.__getitem__)
+
+    def link(source, target, kind) -> None:
+        edge = (source, target, kind)
+        if edge not in existing:
+            value_adjacency[source].append((target, kind))
+            control_adjacency[source].append((target, kind))
+            existing.add(edge)
 
     existing = {
         (source, target, kind)
@@ -942,10 +1099,23 @@ def _add_cross_file_calls(
         if len(targets) != 1:
             continue
         target = targets[0]
-        callee_funcs = list(functions_by_name.get((target.file_path, target.name), ()))
-        if len(callee_funcs) != 1:
+        constructed = False
+        if target.kind == "class":
+            # Calling a class runs its constructor on a new object.
+            suffix = Path(target.file_path).suffix
+            if suffix not in constructors:
+                language = detect_language(target.file_path) or "python"
+                constructors[suffix] = tuple(
+                    load_config(language).get("trace", {}).get("constructor_methods", ()))
+            found = [symbol for name in constructors[suffix]
+                     for symbol in symbols_by_qn.get(f"{target.qualified_name}.{name}", ())]
+            if len(found) != 1:
+                continue
+            target, constructed = found[0], True
+        callee_function = function_of(target)
+        if callee_function is None:
             continue
-        callee_events = by_function[callee_funcs[0]]
+        callee_events = by_function[callee_function]
 
         same_line = calls_by_line.get((call.file_path, call.line - 1), ())
         candidates = [
@@ -961,36 +1131,47 @@ def _add_cross_file_calls(
         if len(candidates) != 1:
             continue
         _call_node, call_event = candidates[0]
-        resolved_calls.add((call_event.file_path, call_event.event_id))
         caller_events = by_call.get((call.file_path, call_event.event_id), ())
+        results = [node for node, event in caller_events if event.role == "call_result"]
+
+        def bound_to(argument, parameter) -> bool:
+            """Whether a caller occurrence and a callee one name the same
+            parameter.  The receiver has no position on either side."""
+            if (argument.arg_index is None) != (parameter.arg_index is None):
+                return False
+            if argument.arg_index is None:
+                return not constructed
+            if argument.arg_name is not None:
+                return parameter.arg_name == argument.arg_name
+            return parameter.arg_index == argument.arg_index
+
         for argument_node, argument in caller_events:
-            if argument.role != "call_arg" or argument.arg_index is None:
+            if argument.role == "call_arg" and argument.arg_index is not None:
+                wanted = "param_in"
+            elif argument.role == "use":
+                wanted = "param_in"  # the value the method is called on
+            elif argument.role == "arg_out":
+                wanted = "param_out"
+            else:
                 continue
             for parameter_node, parameter in callee_events:
-                argument_name = getattr(argument, "arg_name", None)
-                parameter_name = getattr(parameter, "arg_name", None)
-                matches_parameter = (
-                    parameter_name == argument_name
-                    if argument_name is not None
-                    else parameter.arg_index == argument.arg_index
-                )
-                if parameter.role == "param_in" and matches_parameter:
-                    edge = (argument_node, parameter_node, "call_arg")
-                    if edge not in existing:
-                        value_adjacency[argument_node].append((parameter_node, "call_arg"))
-                        control_adjacency[argument_node].append((parameter_node, "call_arg"))
-                        existing.add(edge)
-        results = [node for node, event in caller_events if event.role == "call_result"]
+                if parameter.role != wanted or not bound_to(argument, parameter):
+                    continue
+                if wanted == "param_in":
+                    link(argument_node, parameter_node, "call_arg")
+                else:
+                    # What the callee stored into the object comes back to
+                    # the caller's name for it.
+                    link(parameter_node, argument_node, "arg_return")
         for return_node, returned in callee_events:
-            if returned.role != "function_exit":
-                continue
-            for result_node in results:
-                edge = (return_node, result_node, "call_return")
-                if edge not in existing:
-                    value_adjacency[return_node].append((result_node, "call_return"))
-                    control_adjacency[return_node].append((result_node, "call_return"))
-                    existing.add(edge)
-    return resolved_calls
+            if returned.role == "function_exit":
+                for result_node in results:
+                    link(return_node, result_node, "call_return")
+            elif constructed and returned.role == "param_out" and returned.arg_index is None:
+                # The new object is what the constructor stored into.
+                for result_node in results:
+                    link(return_node, result_node, "arg_return")
+    return resolved()
 
 
 def _add_container_mutations(
@@ -998,7 +1179,12 @@ def _add_container_mutations(
     adjacency: dict[Any, list[Any]],
     language: str | None,
 ) -> None:
-    """Connect append/extend inputs to later uses of the same container generation."""
+    """Connect append/extend inputs to later uses of the same container generation.
+
+    What is added becomes an element of the container at the receiver's own
+    path: ``self.items.append(x)`` taints ``self.items``, not ``self.other``,
+    and taints ``self`` only in its ``items``.
+    """
     from emend.language_registry import detect_language, load_config
 
     languages = {path: language or detect_language(path) or "python"
@@ -1016,9 +1202,12 @@ def _add_container_mutations(
             if kind == "reaching":
                 incoming_reaching[target].add(source)
                 outgoing_reaching[source].add(target)
+    exits: dict[tuple[str, str], list[tuple[Any, FlowEventFact]]] = defaultdict(list)
     for node, event in events.items():
         if event.call_id is not None:
             calls[(event.file_path, event.call_id)].append((node, event))
+        if event.role == "param_out":
+            exits[(event.file_path, event.func_id)].append((node, event))
     # Only occurrences with a reaching definition can name a container
     # generation.  Key them by function and receiver root once instead of
     # rescanning the whole event table for each mutating call.
@@ -1048,12 +1237,20 @@ def _add_container_mutations(
             target for definition in defining for target in outgoing_reaching[definition]
             if events[target].ordinal > call[1].ordinal
         }
+        if any(events[definition].role == "param_in" for definition in defining):
+            # The container belongs to an object the caller passed in.
+            later_uses.update(node for node, _exit in exits.get(
+                (call[1].file_path, call[1].func_id), ()))
+        stores = []
+        for target in later_uses:
+            held = _object_path(events[target]) or ""
+            if _below(held, receiver):
+                stores.append((target, "store:[]"))
+            elif _below(receiver, held):
+                stores.append((target, f"store:{receiver[len(held):]}[]"))
         for argument_node, argument in call_rows:
-            if argument.role != "call_arg":
-                continue
-            adjacency[argument_node].extend(
-                (target, "transfer") for target in later_uses
-            )
+            if argument.role == "call_arg":
+                adjacency[argument_node].extend(stores)
 
 
 def _type_filter(
@@ -1377,9 +1574,12 @@ def evaluate_compiled_flow(
                 source.node, value_adjacency, all_events, value_edges,
                 max_call_depth=max_call_depth,
             )
+            # Only a wholly tainted occurrence can be a sink or meet a
+            # sanitizer; an object with one tainted attribute cannot.
             states_by_node: dict[Any, list[Any]] = defaultdict(list)
             for state in states:
-                states_by_node[state[0]].append(state)
+                if not state[3]:
+                    states_by_node[state[0]].append(state)
 
             reachable_sinks = {sink.node for _, sink in candidates
                                if sink.node in states_by_node}
