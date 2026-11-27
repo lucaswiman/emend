@@ -1566,3 +1566,25 @@ def test_facts_command_lists_transitive_callers(tmp_path):
         "--symbol", "chain.leaf", "--transitive", "--max-depth", "1", "--json",
     ])
     assert json.loads(shallow.stdout)["transitive_callers"] == ["chain.middle"]
+
+
+def test_qualified_names_of_an_in_file_or_bare_name(tmp_path):
+    """Definitions are looked up by the name a file outline shows."""
+    from emend.analysis_store import AnalysisStore
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'names'\n")
+    (tmp_path / "shop.py").write_text(
+        "class Greeter:\n    def greet(self):\n        return 1\n\n\ndef greet():\n    return 2\n"
+    )
+    (tmp_path / "other.py").write_text("def greet():\n    return 3\n")
+    store = AnalysisStore.open(tmp_path)
+    try:
+        graph = store.query_facts()
+        assert graph.qualified_names_of("Greeter.greet") == ["shop.Greeter.greet"]
+        assert graph.qualified_names_of("greet") == [
+            "other.greet", "shop.Greeter.greet", "shop.greet",
+        ]
+        assert graph.qualified_names_of("Greeter") == ["shop.Greeter"]
+        assert graph.qualified_names_of("absent") == []
+    finally:
+        store.close()

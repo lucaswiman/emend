@@ -2223,6 +2223,21 @@ class FactGraph:
                 return rows
             wanted *= 8
 
+    def qualified_names_of(self, name: str) -> list[str]:
+        """Full names of the definitions known as *name* within their file.
+
+        *name* is a definition's path within its file (``Class.method``) or
+        its bare name (``method``); a bare name is every definition called
+        that, at any depth.
+        """
+        rows = self._client.run(
+            "?[full] := "
+            "*search_symbol[_, full, bare, local, kind, _, _, _, _, _, _, _], "
+            'kind != "reference", (local == $name or bare == $name)',
+            {"name": name},
+        )["rows"]
+        return sorted({row[0] for row in rows})
+
     def references_to_names_containing(
         self, fragment: str, *, limit: int, file_paths: Iterable[str] | None = None,
     ) -> list[tuple[str, str, int, int, str]]:

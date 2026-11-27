@@ -1371,12 +1371,22 @@ class EditorSearchEngine:
         graph = self._published_references()
         if graph is not None:
             try:
-                items = [
-                    self._reference_item(qualified_name, *row)
-                    for row in graph.reference_locations(
-                        qualified_name, ref_kind=ref_kind, limit=limit,
-                    )
-                ]
+                names = [qualified_name]
+                if not graph.reference_locations(qualified_name, limit=1):
+                    # A picker hands over the name a symbol has within its
+                    # file, and a cursor word is barer still; references are
+                    # stored under the full name.
+                    names = graph.qualified_names_of(qualified_name)
+                items = sorted(
+                    (
+                        self._reference_item(name, *row)
+                        for name in names
+                        for row in graph.reference_locations(
+                            name, ref_kind=ref_kind, limit=limit,
+                        )
+                    ),
+                    key=lambda item: (item["file_path"], item["line"], item["col"]),
+                )[:limit]
             except BUG_EXCEPTIONS:
                 raise
             except Exception:

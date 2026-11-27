@@ -453,6 +453,38 @@ class TestReferenceSearch:
         ]
         assert result.truncated
 
+    def test_in_file_name_finds_the_definitions_references(self, tmp_path):
+        """The picker offers a symbol by its name within the file
+        (``Greeter.greet``); references are stored under the full name."""
+        proj = _write_project(tmp_path, {
+            "shop.py": (
+                "class Greeter:\n"
+                "    def greet(self):\n"
+                "        return 1\n"
+                "\n"
+                "\n"
+                "def greet():\n"
+                "    return Greeter().greet()\n"
+            ),
+        })
+        _tool_index(proj)
+        with _engine(proj) as engine:
+            method = engine.search_references("Greeter.greet")
+            bare = engine.search_references("greet")
+            full = engine.search_references("shop.Greeter.greet")
+        assert {item["target_qn"] for item in method.items} == {"shop.Greeter.greet"}
+        assert _locations(method) == _locations(full) != []
+        # A bare name is every definition of that name, each under its own.
+        assert {item["target_qn"] for item in bare.items} == {
+            "shop.Greeter.greet", "shop.greet",
+        }
+        assert _locations(bare) == sorted(_locations(bare))
+
+    def test_full_name_is_not_widened_to_its_namesakes(self, referenced_project):
+        with _engine(referenced_project) as engine:
+            result = engine.search_references("lib.greet")
+        assert {item["target_qn"] for item in result.items} == {"lib.greet"}
+
     def test_unknown_name_has_no_references(self, referenced_project):
         with _engine(referenced_project) as engine:
             assert engine.search_references("lib.absent").items == []
