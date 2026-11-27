@@ -94,6 +94,33 @@ def test_rust_lint_flow_rule(tmp_path):
     assert all(v.rule_name == "sql-injection" for v in violations)
 
 
+def test_rust_lint_flow_follows_a_method_call_on_the_value(tmp_path):
+    """The value a method is called on is an input of the call."""
+    test_file = tmp_path / "handler.rs"
+    test_file.write_text(
+        "fn handle_request() {\n"
+        '    let data = get_input("user");\n'
+        "    execute_query(data.trim());\n"
+        "    let trimmed = data.trim().to_lowercase();\n"
+        "    execute_query(trimmed);\n"
+        '    execute_query("constant".to_uppercase());\n'
+        "    execute_query(other.trim());\n"
+        "    data.run();\n"
+        "}\n"
+    )
+
+    def lines(flows_to):
+        rule = LintRule(
+            name="flow", find="", message="tainted",
+            flows_from="get_input($X)", flows_to=flows_to,
+        )
+        return sorted(v.line for v in run_lint([rule], [str(test_file)], language="rust"))
+
+    assert lines("execute_query($X)") == [3, 5]
+    # A sink may capture the value the method is called on.
+    assert lines("$TARGET.run()") == [8]
+
+
 # ---------------------------------------------------------------------------
 # Fix / replace
 # ---------------------------------------------------------------------------

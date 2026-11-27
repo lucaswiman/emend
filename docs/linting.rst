@@ -392,10 +392,16 @@ For each function in the file, emend:
 1. Finds all matches of the source pattern within the function
 2. Extracts variable names from the source match (assignment targets and captures)
 3. Propagates taint through assignments: if a tainted variable appears on the RHS
-   of an assignment, the LHS becomes tainted
+   of an assignment, the LHS becomes tainted. The result of a call is tainted
+   when an argument is, or when the value the method is called on is:
+   ``data.strip()`` is as tainted as ``data``
 4. Checks if any tainted variable appears in a sink pattern match
 5. If any configured sanitizer (``not-through``) matches on the source-to-sink
    path, including at either endpoint, the violation is suppressed
+
+A sink or sanitizer may capture the value a method is called on as well as an
+argument: ``flows-to: "$QUERY.execute()"`` reports a tainted ``$QUERY``, and
+``not-through: "$TEXT.escaped()"`` validates ``$TEXT``.
 
 Sanitizers without an effect retain the argument-validation contract: a
 successful call validates the captured value. For functions that return a

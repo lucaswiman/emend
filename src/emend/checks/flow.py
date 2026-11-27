@@ -343,6 +343,19 @@ def _choose_event(
         candidates = [event for event in events if any(
             event.start_byte >= start and event.end_byte <= end for start, end in ranges
         )]
+        if not candidates and purpose != "source_capture":
+            # A captured receiver, ``$P`` in ``$P.strip()``: the variable is
+            # read as part of the longer path ``data.strip``, so no occurrence
+            # lies inside ``data`` alone.  That read is where it is used.
+            texts = {(cap[1], cap[2]): cap[7] for cap in span.captures}
+            candidates = [
+                event for event in events
+                if event.role == "use" and any(
+                    event.start_byte == start and event.end_byte > end
+                    and (event.access_path or "").startswith(texts.get((start, end), "\0") + ".")
+                    for start, end in ranges
+                )
+            ]
         preferred = (
             ("use", "call_arg", "param_in", "def")
             if purpose == "source_capture" else
@@ -404,11 +417,22 @@ def _resolve_endpoints(
             captured_value = capture[7] if capture is not None else next(
                 (item[7] for item in captures), "",
             )
-            completion = index.completions.get(event.call_id) \
+            call_id, variable = event.call_id, event.access_path or event.var
+            if capture is not None and event.role == "use" and event.end_byte > capture[2]:
+                # A captured receiver stands for the value, not for the longer
+                # path it was read through, and its call is the one made on it.
+                variable = captured_value
+                call_id = next((
+                    candidate.call_id for candidate in candidates
+                    if candidate.role == "call"
+                    and candidate.start_byte == event.start_byte
+                    and candidate.end_byte > event.end_byte
+                ), None)
+            completion = index.completions.get(call_id) \
                 if purpose in {"sanitizer", "scope"} else None
             matches.append(_EndpointMatch(
                 node, span,
-                event.access_path or event.var or captured_value or span.text,
+                variable or captured_value or span.text,
                 (node[0], completion.event_id) if completion is not None else None,
             ))
     return matches
@@ -1193,12 +1217,18 @@ def evaluate_compiled_flow(
     finally_functions = set().union(*{components.connected(function)
                                       for function in finally_functions})
     if interprocedural:
-        for source_node, outgoing in value_adjacency.items():
-            source_event = all_events[source_node]
-            marker = (source_event.file_path, source_event.call_id)
-            if marker in resolved_calls:
-                outgoing[:] = [edge for edge in outgoing
-                               if edge[1] != _OPAQUE_CALL_EDGE]
+        # A resolved call's result comes from the callee's returns, not from
+        # its inputs.  The call is the one the edge's target result belongs
+        # to: an argument carries that call's id, a receiver does not.
+        def opaque_into_resolved(edge) -> bool:
+            target, kind = edge
+            result = all_events[target]
+            return (kind == _OPAQUE_CALL_EDGE
+                    and (result.file_path, result.call_id) in resolved_calls)
+
+        for outgoing in value_adjacency.values():
+            if any(map(opaque_into_resolved, outgoing)):
+                outgoing[:] = [edge for edge in outgoing if not opaque_into_resolved(edge)]
 
     event_indices = {path: _EventIndex.build(rows) for path, rows in events_by_actual.items()}
     match_cache: dict[tuple[Any, ...], list[_PatternSpan]] = {}

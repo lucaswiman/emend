@@ -93,6 +93,35 @@ def test_ts_lint_flow_rule(tmp_path):
     assert violations[0].rule_name == "xss"
 
 
+def test_ts_lint_flow_follows_a_method_call_on_the_value(tmp_path):
+    """The value a method is called on is an input of the call."""
+    ts_file = tmp_path / "handler.ts"
+    ts_file.write_text(
+        "function handler(): void {\n"
+        '    const data = prompt("x");\n'
+        "    eval(data.trim());\n"
+        "    const trimmed = data.trim().toLowerCase();\n"
+        "    eval(trimmed);\n"
+        '    eval("constant".toUpperCase());\n'
+        "    eval(other.trim());\n"
+        "    data.run();\n"
+        "}\n"
+    )
+
+    def lines(flows_to):
+        rule = LintRule(
+            name="flow", find="", message="tainted",
+            flows_from="prompt($X)", flows_to=flows_to,
+        )
+        return sorted(
+            v.line for v in run_lint([rule], [str(ts_file)], language="typescript")
+        )
+
+    assert lines("eval($CODE)") == [3, 5]
+    # A sink may capture the value the method is called on.
+    assert lines("$TARGET.run()") == [8]
+
+
 # --- Fix / replace mode ---
 
 

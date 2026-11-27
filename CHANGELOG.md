@@ -71,6 +71,25 @@
   1.6 s).
 - A freshly built `facts.db` is compacted before it is published (Django:
   407 MB to 367 MB).
+- Flow rules and `analyze trace` follow a value through a method called on it.
+  `eval(data.strip())` and `clean = data.strip(); eval(clean)` were not
+  reported for a tainted `data`: only arguments counted as inputs of a call,
+  so any method call laundered the value. **Expect new findings** where taint
+  reaches a sink through a method call. The fact database is rebuilt once
+  after upgrading.
+- A sink or sanitizer may capture the value a method is called on.
+  `flows-to: "$QUERY.execute()"` never fired, and `not-through:
+  "$TEXT.escaped()"` never sanitized.
+- `analyze facts --transitive` no longer crashes with a `TypeError`, and its
+  depth bound counts the shortest call chain.
+- A rules file whose `rules` is a list, or whose rule is not a mapping, is an
+  error. It was read as a file with no rules, so `emend check` passed.
+- `emend tool index` builds the search index for every language in the
+  project. It indexed Python only unless `--language` was given, and handed a
+  type engine files of languages it does not check.
+- Editor reference search accepts the name a symbol has within its file
+  (`Widget.render`, as the picker shows it) as well as its full qualified
+  name; the former found nothing.
 
 ## 0.5.6
 

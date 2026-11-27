@@ -1953,9 +1953,28 @@ impl<'a> FlowExtractor<'a> {
         // Callee/argument evaluation is sequenced by control edges. It is not
         // an unconditional value transfer through a known function: resolved
         // calls flow through param_in/return_out instead.
-        let _ = callee_values;
         let result = self.emit(node, "call_result", None, Some(call), None);
         for &arg in &arg_events { self.edge(arg, result, "call_input"); }
+        // The value a method is called on is an input like any argument:
+        // `data.strip()` is made of `data`.  A plain callee is not.
+        let pm = &self.lang.pattern_matching;
+        if let Some(member) = callee_node
+            .filter(|n| !pm.attribute.is_empty() && n.kind() == pm.attribute)
+        {
+            // The callee's values are the read of a whole path (`data.strip`)
+            // or what its object evaluates to (`make()` in `make().strip`).
+            // The member name after a computed object is not a value.
+            let object = member.child_by_field_name(&pm.object_field);
+            let receivers: Vec<u32> = callee_values.iter().copied().filter(|value| {
+                let event = &self.events[(*value - first_id) as usize];
+                let whole = event.start_byte == member.start_byte()
+                    && event.end_byte == member.end_byte();
+                whole || object.is_some_and(|object| {
+                    event.start_byte >= object.start_byte() && event.end_byte <= object.end_byte()
+                })
+            }).collect();
+            for receiver in receivers { self.edge(receiver, result, "call_input"); }
+        }
         self.calls.push(CallRecord { result, callee, args: arg_events });
         vec![result]
     }
@@ -2475,6 +2494,28 @@ mod tests {
         }).map(|e| e.from).collect();
         assert_eq!(reaching, vec![defs[1].id]);
         assert!(facts.events.iter().all(|e| &source[e.start_byte..e.end_byte] == e.text));
+    }
+
+    #[test]
+    fn a_method_call_takes_its_receiver_as_an_input() {
+        let source = "def f(data):\n    a = data.strip()\n    b = make().strip()\n    c = helper(data)\n";
+        let facts = build_flow_facts(source, "py");
+        let text = |id: u32| facts.events.iter().find(|e| e.id == id).map(|e| e.text.clone()).unwrap();
+        let inputs = |result: &str| -> Vec<String> {
+            let result = facts.events.iter()
+                .find(|e| e.role == "call_result" && e.text == result).unwrap();
+            let mut names: Vec<String> = facts.edges.iter()
+                .filter(|e| e.to == result.id && e.kind == "call_input")
+                .map(|e| text(e.from)).collect();
+            names.sort();
+            names
+        };
+        assert_eq!(inputs("data.strip()"), ["data.strip"]);
+        // A receiver that is itself a call: its result is the input.
+        assert_eq!(inputs("make().strip()"), ["make()"]);
+        // A plain function is not an input of its own call.
+        assert_eq!(inputs("helper(data)"), ["data"]);
+        assert!(inputs("make()").is_empty());
     }
 
     #[test]
