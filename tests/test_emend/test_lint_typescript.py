@@ -158,6 +158,59 @@ def test_ts_lint_flow_keeps_taint_on_the_attribute_across_methods(tmp_path):
     assert lines == [15, 17, 21]
 
 
+def test_ts_lint_flow_follows_super_without_explicit_this(tmp_path):
+    """A subclass method that only calls ``super`` still binds ``this``."""
+    ts_file = tmp_path / "child.ts"
+    ts_file.write_text(
+        "class Base {\n"
+        "    store(item: string): void {\n"
+        "        this.raw = item;\n"
+        "    }\n"
+        "    value(): string {\n"
+        "        return this.raw;\n"
+        "    }\n"
+        "    constant(): string {\n"
+        '        return "fixed";\n'
+        "    }\n"
+        "}\n"
+        "class Child extends Base {\n"
+        "    store(item: string): void {\n"
+        "        super.store(item);\n"
+        "    }\n"
+        "    value(): string {\n"
+        "        return super.value();\n"
+        "    }\n"
+        "    run(): void {\n"
+        '        this.store(prompt("x"));\n'
+        "        eval(this.value());\n"
+        "        eval(this.constant());\n"
+        "        eval(this.raw);\n"
+        "        eval(this.other);\n"
+        "    }\n"
+        "    put(item: string): void {\n"
+        "        super.store(item);\n"
+        "    }\n"
+        "    get(): string {\n"
+        "        return super.value();\n"
+        "    }\n"
+        "}\n"
+        "function handler(): void {\n"
+        "    const c = make();\n"
+        '    c.put(prompt("y"));\n'
+        "    eval(c.get());\n"
+        "    eval(c.constant());\n"
+        "    eval(c.raw);\n"
+        "    eval(c.other);\n"
+        "}\n"
+    )
+    rule = LintRule(
+        name="flow", find="", message="tainted",
+        flows_from="prompt($X)", flows_to="eval($CODE)",
+    )
+    lines = sorted(v.line for v in run_lint([rule], [str(ts_file)], language="typescript"))
+    assert lines == [21, 23, 36, 38]
+
+
 # --- Fix / replace mode ---
 
 

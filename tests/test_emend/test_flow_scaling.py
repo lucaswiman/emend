@@ -204,3 +204,49 @@ def test_a_call_into_an_unwalked_function_that_never_returns_ends_the_path(tmp_p
     found = evaluate_flow_config(
         config, [str(path)], interprocedural=True, project_path=str(tmp_path))
     assert [row.line for row in found] == [19]
+
+
+def test_returns_normally_memoizes_diamond_call_graphs(tmp_path, monkeypatch):
+    """A deep diamond of unwalked functions must be analyzed linearly, not
+    re-walked along every path through the DAG."""
+    from emend.checks.flow import FlowSanitizer
+
+    depth = 18
+    lines = ["def leaf():\n    raise ValueError()\n\n"]
+    for level in range(depth):
+        prev = "leaf" if level == 0 else f"d_{level - 1}"
+        lines.append(
+            f"def d_{level}():\n"
+            f"    if flag:\n"
+            f"        {prev}()\n"
+            f"    {prev}()\n\n"
+        )
+    lines.append(
+        "def handler():\n"
+        "    clean(0)\n"
+        "    value = source()\n"
+        f"    d_{depth - 1}()\n"
+        "    sink(value)\n"
+    )
+    path = tmp_path / "diamond.py"
+    path.write_text("".join(lines))
+
+    calls = 0
+    orig = flow._CallComponents._returns_normally
+
+    def counting(self, function, control_adjacency, active):
+        nonlocal calls
+        calls += 1
+        return orig(self, function, control_adjacency, active)
+
+    monkeypatch.setattr(flow._CallComponents, "_returns_normally", counting)
+    config = CompiledFlowConfig(
+        sources=[FlowSource("source()", "value")],
+        sinks=[FlowSink("sink($X)", "value", "unsafe")],
+        sanitizers=[FlowSanitizer("clean($X)", "value")],
+    )
+    found = evaluate_flow_config(
+        config, [str(path)], interprocedural=True, project_path=str(tmp_path))
+    assert found == []
+    # Without memoization on recursive calls, a depth-18 diamond visits 2^19 nodes.
+    assert calls < depth * 4

@@ -353,7 +353,7 @@ def _choose_event(
                 event for event in events
                 if event.role == "use" and any(
                     event.start_byte == start and event.end_byte > end
-                    and (event.access_path or "").startswith(texts.get((start, end), "\0") + ".")
+                    and _below(event.access_path or "", texts.get((start, end), "\0"))
                     for start, end in ranges
                 )
             ]
@@ -481,18 +481,53 @@ def _below(text: str, prefix: str) -> bool:
     return text.startswith(prefix) and (len(text) == len(prefix) or text[len(prefix)] in ".[")
 
 
+def _segments(part: str) -> list[str]:
+    if not part:
+        return []
+    ends = _segment_ends(part)
+    starts = (0, *ends[:-1])
+    return [part[start:end] for start, end in zip(starts, ends)]
+
+
+def _segment_matches(a: str, b: str) -> bool:
+    """Whether two path steps match, treating ``[]`` as any subscript."""
+    return a == b or (a == "[]" and b.startswith("[")) or (b == "[]" and a.startswith("["))
+
+
 def _tainted_part(part: str) -> str | None:
     """Normalize the part of an object that is tainted.
 
-    An element of a container is the container read whole: nothing tracks
-    which key a consumer reads.  An attribute of an element is not tracked.
+    A bare element of a container (``['k']`` or ``[]``) is the container read
+    whole: nothing tracks which key a consumer reads.  Deeper paths (including
+    an attribute on an element such as ``['k'].raw`` or ``[].raw``) are capped
+    at ``_FIELD_DEPTH`` segments.
     """
-    if not part or part[0] != "[" and part.count(".") + part.count("[") <= _FIELD_DEPTH:
+    if not part:
+        return ""
+    if part[0] != "[" and part.count(".") + part.count("[") <= _FIELD_DEPTH:
         return part
     ends = _segment_ends(part)
-    if part[0] == "[":
-        return "" if len(ends) == 1 else None
+    if part[0] == "[" and len(ends) == 1:
+        return ""
     return part[:ends[_FIELD_DEPTH - 1]] if len(ends) > _FIELD_DEPTH else part
+
+
+def _step_part(part: str, step: str) -> str | None:
+    """Resolve tainted ``part`` on an object when reading ``step`` below it."""
+    if not part:
+        return ""
+    if "[]" not in part:
+        if _below(part, step):
+            return _tainted_part(part[len(step):])
+        return "" if _below(step, part) else None
+    part_segs = _segments(part)
+    step_segs = _segments(step)
+    shared = min(len(part_segs), len(step_segs))
+    if not all(_segment_matches(part_segs[i], step_segs[i]) for i in range(shared)):
+        return None
+    if len(part_segs) >= len(step_segs):
+        return _tainted_part("".join(part_segs[shared:]))
+    return ""
 
 
 def _field_step(kind: str, source: "FlowEventFact", target: "FlowEventFact",
@@ -510,16 +545,15 @@ def _field_step(kind: str, source: "FlowEventFact", target: "FlowEventFact",
         return _tainted_part(stored[len(_object_path(target) or ""):] + part)
     if kind.startswith("store:"):
         return _tainted_part(kind[6:] + part)
+    if kind.startswith("store_read:"):
+        return _step_part("[]" + part, kind[11:])
     if not part:
         return ""
     if kind == "reaching":
         defined, read = _object_path(source), _object_path(target)
         if not defined or not read or defined == read:
             return part
-        step = read[len(defined):]
-        if _below(part, step):
-            return _tainted_part(part[len(step):])
-        return "" if _below(step, part) else None
+        return _step_part(part, read[len(defined):])
     # What an opaque call, or an expression built from the object, reads of
     # it cannot be seen: it may be the tainted attribute.
     if kind == _OPAQUE_CALL_EDGE or target.role == "evaluate":
@@ -531,7 +565,7 @@ def _edge_allowed(kind: str, allowed: frozenset[str]) -> bool:
     return (
         kind in allowed
         or (_is_control_edge(kind) and "control" in allowed)
-        or (kind.startswith("store:") and "store" in allowed)
+        or (kind.startswith(("store:", "store_read:")) and "store" in allowed)
     )
 
 
@@ -745,21 +779,26 @@ class _CallComponents:
                             result = events[target]
                             self.callees[(result.file_path, result.call_id)].add(function)
 
-    def returns_normally(self, function, control_adjacency, active=frozenset()):
+    def returns_normally(self, function, control_adjacency):
         """Whether control can get from a function's entry to its exit.
 
         A function that always raises, or always calls one that does, never
         hands control back.  The walk must know that about a function it does
         not enter.
         """
+        return self._returns_normally(function, control_adjacency, frozenset())[0]
+
+    def _returns_normally(self, function, control_adjacency, active):
         if function in self._returns:
-            return self._returns[function]
+            return self._returns[function], False
         if function in active:
-            return True  # Recursion: assume the other branch returns.
+            return True, True  # Recursion: assume the other branch returns.
         members = self.members[function]
         pending = [node for node, event in members.items() if event.role == "function_entry"]
         seen = set(pending)
         found = False
+        cycle = False
+        next_active = active | {function}
         while pending and not found:
             node = pending.pop()
             event = members[node]
@@ -768,10 +807,18 @@ class _CallComponents:
                 break
             callees = self.callees.get((event.file_path, event.event_id), ()) \
                 if event.role == "call" else ()
-            stuck = bool(callees) and not any(
-                self.returns_normally(callee, control_adjacency, active | {function})
-                for callee in callees
-            )
+            stuck = False
+            if callees:
+                any_returns = False
+                for callee in callees:
+                    callee_returns, hit_cycle = self._returns_normally(
+                        callee, control_adjacency, next_active,
+                    )
+                    cycle = cycle or hit_cycle
+                    if callee_returns:
+                        any_returns = True
+                        break
+                stuck = not any_returns
             for target, kind in control_adjacency.get(node, ()):
                 if not _is_control_edge(kind) or target in seen or target not in members:
                     continue
@@ -782,9 +829,9 @@ class _CallComponents:
                     continue
                 seen.add(target)
                 pending.append(target)
-        if not active:
+        if not cycle:
             self._returns[function] = found
-        return found
+        return found, cycle
 
     def connected(self, function):
         if function not in self.components:
@@ -865,6 +912,7 @@ def _component_value_path_walker(sanitizers, scope_sanitizers,
     transitions = {}
     final_actions = defaultdict(set)
     resolved_results = set()
+    opaque_results = set()
     call_results = {}
     edge_kinds = defaultdict(set)
     function = [(events[node].file_path, events[node].func_id) for node in nodes]
@@ -873,14 +921,16 @@ def _component_value_path_walker(sanitizers, scope_sanitizers,
         functions[function[index]].append(index)
         if event.role == "call_result":
             call_results[indices[(event.file_path, event.call_id)]] = index
-        if event.role in {"def", "param_in", "mutation"}:
+        if event.role in {"def", "param_in", "mutation", "arg_out"}:
             bindings[(function[index], event.access_path or event.var)] |= 1 << index
         for target, kind in value_adjacency.get(node, ()):
             if (kind in _CALL_EDGES and not interprocedural) or target not in indices:
                 continue
             incoming[indices[target]].add(index)
             edge_kinds[index, indices[target]].add(kind)
-            if kind == "call_arg":
+            if kind == _OPAQUE_CALL_EDGE:
+                opaque_results.add(indices[target])
+            elif kind == "call_arg":
                 marker = indices[(event.file_path, event.call_id)]
                 call_targets[marker].add(function[indices[target]])
                 parameter_inputs[indices[target]][marker].add(index)
@@ -912,6 +962,9 @@ def _component_value_path_walker(sanitizers, scope_sanitizers,
             entry = min(members, key=lambda i: events[nodes[i]].ordinal)
             successors[marker].add(entry)
             transitions[marker, entry] = ("enter", marker)
+    # Calls whose opaque input edge was kept (such as an escaping constructor)
+    # produce a derived object rather than aliasing an argument directly.
+    resolved_results -= opaque_results
     for index, targets in enumerate(successors):
         for target in targets:
             predecessors[target].add(index)
@@ -921,9 +974,25 @@ def _component_value_path_walker(sanitizers, scope_sanitizers,
             validators[indices[match.control_node]].add(indices[match.node])
     scopes = {indices[m.control_node] for m in scope_sanitizers if m.control_node in indices}
     outputs = {indices[m.node] for m in return_sanitizers if m.node in indices}
-    kills = [bindings[(function[index], events[node].access_path or events[node].var)]
-             if events[node].role in {"def", "param_in", "mutation"} else 0
-             for index, node in enumerate(nodes)]
+    bindings_by_func: dict[tuple[str, str], list[tuple[str, int]]] = defaultdict(list)
+    for (func_key, path), mask in bindings.items():
+        if path:
+            bindings_by_func[func_key].append((path, mask))
+
+    def _kill_mask(index: int, node: tuple[str, int]) -> int:
+        event = events[node]
+        if event.role not in {"def", "param_in", "mutation"}:
+            return 0
+        name = event.access_path or event.var
+        if not name:
+            return 0
+        mask = 0
+        for other_path, other_mask in bindings_by_func.get(function[index], ()):
+            if _below(other_path, name):
+                mask |= other_mask
+        return mask
+
+    kills = [_kill_mask(index, node) for index, node in enumerate(nodes)]
     required = [sum(1 << i for i in inputs | validators[index])
                 for index, inputs in enumerate(incoming)]
     # Backward liveness includes backedges and sanitizer arguments. It removes
@@ -1058,6 +1127,13 @@ def _component_value_path_walker(sanitizers, scope_sanitizers,
                     if stack[-1] != marker:
                         continue
                     next_stack = stack[:-1]
+                elif kind == "control" and index in call_targets and target == call_results.get(index):
+                    # Taking the bypass edge for an unwalked sibling callee must
+                    # not carry stale return/param_out values from an earlier call
+                    # to the in-scope callee.
+                    bypassed = call_targets[index]
+                    carried = {i: value for i, value in values.items()
+                               if function[i] not in bypassed}
                 for action in final_actions.get((index, target), ("control",)):
                     next_pending = _finally_transition(action, events[nodes[index]], pending_finally)
                     if next_pending is None:
@@ -1253,26 +1329,75 @@ def _add_cross_file_calls(
 
     resolved_calls = resolved()
     # A constructor that hands the new object to a call nothing resolves (a
-    # base class defined elsewhere, ``setattr(self, ...)``) may have stored
-    # its arguments anywhere in it.  The taint cannot be placed, so that
+    # base class defined elsewhere, ``setattr(self, ...)``) — directly or
+    # through a resolved helper / base constructor — may have stored its
+    # arguments anywhere in it.  The taint cannot be placed, so that
     # constructor stays opaque: a tainted argument taints the whole object.
-    escapes: dict[tuple[str, str], bool] = {}
-
-    def object_escapes(function: tuple[str, str]) -> bool:
-        if function not in escapes:
-            rows = by_function[function]
-            receiver = next((event.access_path for _node, event in rows
-                             if event.role == "param_in" and event.arg_index is None), None)
-            escapes[function] = receiver is not None and any(
-                event.call_id is not None
-                and (event.file_path, event.call_id) not in resolved_calls
-                and (
-                    (event.role == "use" and _object_path(event) == receiver)
-                    or (event.role == "call_arg" and event.access_path == receiver)
+    parent_receivers: dict[str, str] = {}
+    arg_callees: dict[tuple[str, int], set[tuple[str, str, str | None]]] = defaultdict(set)
+    for node, outgoing in value_adjacency.items():
+        if events[node].call_id is None:
+            continue
+        for target, kind in outgoing:
+            if kind == "call_arg":
+                target_ev = events[target]
+                arg_callees[node].add(
+                    (target_ev.file_path, target_ev.func_id, target_ev.access_path)
                 )
-                for _node, event in rows
+    escapes: dict[tuple[tuple[str, str], str | None], bool] = {}
+
+    def _is_parent_proxy_call(event: FlowEventFact) -> bool:
+        suffix = Path(event.file_path).suffix
+        if suffix not in parent_receivers:
+            language = detect_language(event.file_path) or "python"
+            parent_receivers[suffix] = (
+                load_config(language).get("cfg", {}).get("parent_receiver", "")
             )
-        return escapes[function]
+        parent_name = parent_receivers[suffix]
+        if not parent_name or event.call_id is None:
+            return False
+        call_ev = events.get((event.file_path, event.call_id))
+        return call_ev is not None and call_ev.access_path == parent_name
+
+    def object_escapes(
+        function: tuple[str, str],
+        param_name: str | None = None,
+        active: frozenset[tuple[tuple[str, str], str | None]] = frozenset(),
+    ) -> bool:
+        rows = by_function[function]
+        if param_name is None:
+            param_name = next((event.access_path for _node, event in rows
+                               if event.role == "param_in" and event.arg_index is None), None)
+        if param_name is None:
+            return False
+        key = (function, param_name)
+        if key in escapes:
+            return escapes[key]
+        if key in active:
+            return False
+        found = False
+        next_active = active | {key}
+        for node, event in rows:
+            if event.call_id is None:
+                continue
+            passes_object = (
+                (event.role == "use" and _object_path(event) == param_name)
+                or (event.role == "call_arg" and event.access_path == param_name
+                    and not _is_parent_proxy_call(event))
+            )
+            if not passes_object:
+                continue
+            marker = (event.file_path, event.call_id)
+            if marker not in resolved_calls:
+                found = True
+                break
+            if any(object_escapes((cfile, cfunc), cparam, next_active)
+                   for cfile, cfunc, cparam in arg_callees.get(node, ())):
+                found = True
+                break
+        if not active:
+            escapes[key] = found
+        return found
 
     for node, event in events.items():
         if event.role != "param_out" or event.arg_index is not None:
@@ -1337,10 +1462,15 @@ def _add_container_mutations(
             continue
         receiver_root = receiver.split(".", 1)[0].split("[", 1)[0]
         receiver_uses = [
-            node for ordinal, node in reached_uses.get(
-                (call[1].file_path, call[1].func_id, receiver_root), ())
-            if ordinal <= call[1].ordinal
+            node for node, event in call_rows
+            if event.role == "use" and node in incoming_reaching
         ]
+        if not receiver_uses:
+            receiver_uses = [
+                node for ordinal, node in reached_uses.get(
+                    (call[1].file_path, call[1].func_id, receiver_root), ())
+                if ordinal <= call[1].ordinal
+            ]
         defining = set().union(*(incoming_reaching[node] for node in receiver_uses)) \
             if receiver_uses else set()
         later_uses = {
@@ -1354,8 +1484,10 @@ def _add_container_mutations(
         stores = []
         for target in later_uses:
             held = _object_path(events[target]) or ""
-            if _below(held, receiver):
+            if held == receiver:
                 stores.append((target, "store:[]"))
+            elif _below(held, receiver):
+                stores.append((target, f"store_read:{held[len(receiver):]}"))
             elif _below(receiver, held):
                 stores.append((target, f"store:{receiver[len(held):]}[]"))
         for argument_node, argument in call_rows:

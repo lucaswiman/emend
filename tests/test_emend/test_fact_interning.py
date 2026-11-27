@@ -1076,6 +1076,12 @@ def _literal_graph() -> FactGraph:
      [["app.main"], ["lib.run"]]),
     # A name the graph has never seen matches nothing, without an error.
     ('?[caller] := *call[caller, "os.absent", _, _, _, _, _]', []),
+    # Comments (including apostrophes and commas) inside a multi-line atom.
+    ('?[caller] := *call[\n'
+     '    caller,        # caller\'s qualified name, not callee\n'
+     '    "os.system",   # target callee]\n'
+     '    _, _, _, _, _\n'
+     ']', [["app.main"], ["lib.run"]]),
 ])
 def test_string_literal_in_an_id_column_matches_its_text(query, expected):
     assert _literal_graph().run_query(query)["rows"] == expected

@@ -339,3 +339,250 @@ def test_a_constructor_that_hands_the_object_on_stays_opaque(tmp_path):
     assert _reported(tmp_path, "f = Form(input('x'))\neval(f.anything)", prelude=prelude)
     assert _reported(tmp_path, "f = Form(input('x'))\neval(f)", prelude=prelude)
     assert _reported(tmp_path, "o = Loose(raw=input('x'))\neval(o.raw)", prelude=prelude)
+
+
+def test_nested_object_call_store_flows_through_alias_and_clears_on_rebind(tmp_path):
+    prelude = BOX + (
+        "def fill_inner(box, item):\n"
+        "    box.inner.store(item)\n\n"
+    )
+    assert _reported(
+        tmp_path,
+        "box = make()\nbox.inner.store(input('x'))\nsame = box\neval(same.inner.raw)",
+        prelude=prelude,
+    )
+    assert not _reported(
+        tmp_path,
+        "box = make()\nbox.inner.store(input('x'))\nsame = box\neval(same.inner.other)",
+        prelude=prelude,
+    )
+    assert not _reported(
+        tmp_path,
+        "box = make()\nbox.inner.store(input('x'))\nbox = make()\neval(box.inner.raw)",
+        prelude=prelude,
+    )
+    assert _reported(
+        tmp_path,
+        "box = make()\nfill_inner(box, input('x'))\neval(box.inner.raw)",
+        prelude=prelude,
+    )
+    assert not _reported(
+        tmp_path,
+        "box = make()\nfill_inner(box, input('x'))\neval(box.inner.other)",
+        prelude=prelude,
+    )
+
+
+def test_same_file_keyword_arguments_bind_by_name(tmp_path):
+    prelude = (
+        "class Box:\n"
+        "    def set_pair(self, clean, raw):\n"
+        "        self.raw = raw\n"
+        "\n"
+        "def fill_kw(box, item):\n"
+        "    box.raw = item\n\n"
+    )
+    assert _reported(
+        tmp_path,
+        "b = Box()\nb.set_pair(raw=input('x'), clean='fixed')\neval(b.raw)",
+        prelude=prelude,
+    )
+    assert not _reported(
+        tmp_path,
+        "b = Box()\nb.set_pair(raw='fixed', clean=input('x'))\neval(b.raw)",
+        prelude=prelude,
+    )
+    assert _reported(
+        tmp_path,
+        "b = Box()\nfill_kw(item=input('x'), box=b)\neval(b.raw)",
+        prelude=prelude,
+    )
+
+
+def test_free_function_and_method_of_the_same_name_do_not_collide(tmp_path):
+    method_only = (
+        "class Box:\n"
+        "    def render(self):\n"
+        "        return 'fixed'\n\n"
+    )
+    assert _reported(tmp_path, "eval(render(input('x')))", prelude=method_only)
+
+    func_only = "def strip(x):\n    return 'fixed'\n\n"
+    assert _reported(tmp_path, "data = input('x')\neval(data.strip())", prelude=func_only)
+
+    both = (
+        "class Box:\n"
+        "    def value(self):\n"
+        "        return self.raw\n"
+        "\n"
+        "def value():\n"
+        "    return 'fixed'\n\n"
+    )
+    assert _reported(
+        tmp_path, "b = Box()\nb.raw = input('x')\neval(b.value())", prelude=both,
+    )
+
+
+def test_nested_function_inside_method_does_not_shadow_class_method(tmp_path):
+    prelude = (
+        "class Holder:\n"
+        "    def value(self):\n"
+        "        return self.raw\n"
+        "\n"
+        "    def run(self):\n"
+        "        def value():\n"
+        "            return 'fixed'\n"
+        "        return self.value()\n\n"
+    )
+    assert _reported(
+        tmp_path, "h = Holder()\nh.raw = input('x')\neval(h.run())", prelude=prelude,
+    )
+
+
+def test_generic_base_class_ignores_type_arguments(tmp_path):
+    prelude = (
+        "class Other:\n"
+        "    def value(self):\n"
+        "        return 'fixed'\n"
+        "\n"
+        "class Base:\n"
+        "    def value(self):\n"
+        "        return self.raw\n"
+        "\n"
+        "class Child(Base[Other]):\n"
+        "    def run(self):\n"
+        "        return self.value()\n\n"
+    )
+    assert _reported(
+        tmp_path, "c = Child()\nc.raw = input('x')\neval(c.run())", prelude=prelude,
+    )
+
+
+def test_container_attribute_indexing_and_element_attributes(tmp_path):
+    prelude = (
+        "class Bag:\n"
+        "    def add(self, item):\n"
+        "        self.items.append(item)\n"
+        "\n"
+        "    def first(self):\n"
+        "        return self.items[0]\n\n"
+    )
+    assert _reported(
+        tmp_path,
+        "b = make()\nb.items = []\nb.items.append(input('x'))\nsame = b\neval(same.items[0])",
+        prelude=prelude,
+    )
+    assert _reported(
+        tmp_path,
+        "b = Bag()\nb.items = []\nb.add(input('x'))\neval(b.first())",
+        prelude=prelude,
+    )
+    assert _reported(
+        tmp_path,
+        "b = Bag()\nb.items = []\nb.add(input('x'))\neval(b.items[0])",
+        prelude=prelude,
+    )
+    assert not _reported(
+        tmp_path,
+        "b = Bag()\nb.items = []\nb.add(input('x'))\neval(b.other)",
+        prelude=prelude,
+    )
+    assert _reported(
+        tmp_path,
+        "item = make()\nitem.raw = input('x')\nxs = []\nxs.append(item)\neval(xs[0].raw)",
+        prelude=prelude,
+    )
+    assert not _reported(
+        tmp_path,
+        "item = make()\nitem.raw = input('x')\nxs = []\nxs.append(item)\neval(xs[0].other)",
+        prelude=prelude,
+    )
+    assert _reported(
+        tmp_path,
+        "d = {}\nd['k'].raw = input('x')\nsame = d\neval(same['k'].raw)",
+        prelude=prelude,
+    )
+    assert not _reported(
+        tmp_path,
+        "d = {}\nd['k'].raw = input('x')\nsame = d\neval(same['k'].other)",
+        prelude=prelude,
+    )
+
+
+def test_container_mutation_after_rebind_does_not_taint_other_branch(tmp_path):
+    body = (
+        "xs = []\n"
+        "_ = xs\n"
+        "if cond:\n"
+        "    xs = []\n"
+        "    xs.append(input('x'))\n"
+        "else:\n"
+        "    eval(xs)"
+    )
+    assert not _reported(tmp_path, body)
+
+
+def test_rebinding_an_object_kills_attributes_and_arg_outs_in_control_path_walk(tmp_path):
+    attr_body = (
+        "box = make()\n"
+        "box.raw = input('x')\n"
+        "if cond:\n"
+        "    box = make()\n"
+        "else:\n"
+        "    sanitize(box.raw)\n"
+        "eval(box.raw)"
+    )
+    assert not _reported(tmp_path, attr_body, not_through=["sanitize($X)"])
+
+    method_body = (
+        "box = Box()\n"
+        "box.store(input('x'))\n"
+        "if cond:\n"
+        "    box = Box()\n"
+        "else:\n"
+        "    sanitize(box.raw)\n"
+        "eval(box.raw)"
+    )
+    assert not _reported(tmp_path, method_body, not_through=["sanitize($X)"])
+
+
+def test_transitive_escaping_constructor_and_validator_isolation(tmp_path):
+    prelude = (
+        "class Base(elsewhere.Root):\n"
+        "    def __init__(self, raw):\n"
+        "        super().__init__(raw)\n"
+        "\n"
+        "class Child(Base):\n"
+        "    def __init__(self, raw):\n"
+        "        super().__init__(raw)\n"
+        "\n"
+        "class LocalBase:\n"
+        "    def __init__(self, raw):\n"
+        "        self.raw = raw\n"
+        "        self.other = 'fixed'\n"
+        "\n"
+        "class TwoArgSuper(LocalBase):\n"
+        "    def __init__(self, raw):\n"
+        "        super(TwoArgSuper, self).__init__(raw)\n"
+        "\n"
+        "def populate_dynamic(obj, raw):\n"
+        "    setattr(obj, 'raw', raw)\n"
+        "\n"
+        "class ViaHelper:\n"
+        "    def __init__(self, raw):\n"
+        "        populate_dynamic(self, raw)\n\n"
+    )
+    # Transitive escape through a resolved base constructor or helper stays opaque.
+    assert _reported(tmp_path, "c = Child(input('x'))\neval(c.anything)", prelude=prelude)
+    assert _reported(tmp_path, "v = ViaHelper(input('x'))\neval(v.raw)", prelude=prelude)
+    # Validating the input argument after constructing an escaping object does
+    # not validate the constructed object.
+    assert _reported(
+        tmp_path,
+        "data = input('x')\nf = Base(data)\nvalidate(data)\neval(f)",
+        not_through=["validate($X)"],
+        prelude=prelude,
+    )
+    # Two-arg super() to a known in-file base stays attribute-precise.
+    assert _reported(tmp_path, "s = TwoArgSuper(input('x'))\neval(s.raw)", prelude=prelude)
+    assert not _reported(tmp_path, "s = TwoArgSuper(input('x'))\neval(s.other)", prelude=prelude)

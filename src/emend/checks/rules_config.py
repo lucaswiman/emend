@@ -616,10 +616,20 @@ def _policy_check(
 
 
 def _compile_policies(raw: Any) -> tuple[CompiledPolicy, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(
+            "'policies' must be a list of policy mappings, not a "
+            f"{type(raw).__name__}"
+        )
     policies: list[CompiledPolicy] = []
-    for policy_index, policy_raw in enumerate(raw or []):
+    for policy_index, policy_raw in enumerate(raw):
         if not isinstance(policy_raw, dict):
-            continue
+            raise ValueError(
+                f"policy entry {policy_index} must be a mapping, not "
+                f"{'empty' if policy_raw is None else type(policy_raw).__name__}"
+            )
         name = str(policy_raw.get("name", ""))
         severity = str(policy_raw.get("severity", "warning"))
         checks = tuple(
@@ -742,10 +752,12 @@ def compile_rules_document(
     if not isinstance(data, dict):
         raise ValueError("Rules document must be a mapping")
     macros = _macro_map(data.get("macros"))
-    raw_rules = data.get("rules") or {}
+    raw_rules = data.get("rules")
     # A document in another shape used to load as no rules at all, and a run
     # with no rules reports nothing and succeeds.
-    if not isinstance(raw_rules, dict):
+    if raw_rules is None:
+        raw_rules = {}
+    elif not isinstance(raw_rules, dict):
         raise ValueError(
             "'rules' must map each rule name to its settings, as in "
             "{my-rule: {find: ..., message: ...}}, not hold a "

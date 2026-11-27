@@ -522,10 +522,15 @@ def test_flow_multiline_chain(tmp_path, sql_rule):
     # Rules written as a list of entries, the shape of many other linters.
     ({"rules": [{"id": "no-eval", "find": "eval($X)", "message": "eval"}]},
      r"'rules' must map each rule name to its settings"),
+    ({"rules": []}, r"'rules' must map each rule name to its settings"),
+    ({"rules": ""}, r"'rules' must map each rule name to its settings"),
     ({"rules": "eval($X)"}, r"'rules' must map each rule name to its settings"),
     # A rule name with nothing under it.
     ({"rules": {"no-eval": None}}, r"rule 'no-eval' must be a mapping"),
     ({"rules": {"no-eval": "eval($X)"}}, r"rule 'no-eval' must be a mapping"),
+    # Policies written as a mapping instead of a list, or holding a non-mapping.
+    ({"policies": {"my-policy": {"checks": []}}}, r"'policies' must be a list"),
+    ({"policies": ["not-a-mapping"]}, r"policy entry 0 must be a mapping"),
 ])
 def test_misshapen_rules_are_rejected(document, complaint):
     """Each of these used to load as no rules at all, so a lint run printed
@@ -590,6 +595,17 @@ def test_receiver_sink_fires_on_a_tainted_receiver(tmp_path):
     assert _flow_lines(tmp_path, source, flows_to="$P.strip()") == [4]
     # An argument sink is placed as before.
     assert _flow_lines(tmp_path, source, flows_to="eval($CODE)") == [6]
+
+
+def test_subscript_base_sink_fires_on_a_tainted_container(tmp_path):
+    source = (
+        "def handler():\n"
+        "    data = input('x')\n"
+        "    clean = 'constant'\n"
+        "    _ = data[0]\n"
+        "    _ = clean[0]\n"
+    )
+    assert _flow_lines(tmp_path, source, flows_to="$P[0]") == [4]
 
 
 def test_receiver_sink_fires_through_an_attribute_of_the_tainted_value(tmp_path):

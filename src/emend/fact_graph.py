@@ -452,12 +452,16 @@ def _string_end(text: str, start: int) -> int:
 
 
 def _top_level(text: str, start: int, stop_at: str) -> int:
-    """Index of the first of *stop_at* outside every bracket and string, or -1."""
+    """Index of the first of *stop_at* outside every bracket, string, and comment, or -1."""
     depth, index = 0, start
     while index < len(text):
         char = text[index]
         if char in "\"'":
             index = _string_end(text, index)
+            continue
+        if char == "#":
+            newline = text.find("\n", index)
+            index = len(text) if newline == -1 else newline + 1
             continue
         if depth == 0 and char in stop_at:
             return index
@@ -467,6 +471,32 @@ def _top_level(text: str, start: int, stop_at: str) -> int:
             depth -= 1
         index += 1
     return -1
+
+
+def _sole_string_literal(value: str) -> tuple[int, int] | None:
+    """Return ``(start, end)`` if *value* holds only one string literal plus whitespace/comments."""
+    index, length = 0, len(value)
+    while index < length:
+        if value[index].isspace():
+            index += 1
+        elif value[index] == "#":
+            newline = value.find("\n", index)
+            index = length if newline == -1 else newline + 1
+        else:
+            break
+    if index >= length or value[index] not in "\"'":
+        return None
+    end = _string_end(value, index)
+    rest = end
+    while rest < length:
+        if value[rest].isspace():
+            rest += 1
+        elif value[rest] == "#":
+            newline = value.find("\n", rest)
+            rest = length if newline == -1 else newline + 1
+        else:
+            return None
+    return index, end
 
 
 def _literals_as_ids(script: str, id_of: Callable[[str], int]) -> str:
@@ -509,15 +539,15 @@ def _literals_as_ids(script: str, id_of: Callable[[str], int]) -> str:
                         pieces.append(name + colon)
                 elif position < len(columns):
                     column = columns[position]
-                literal = value.strip()
-                if (column in interned and literal[:1] in ("\"", "'")
-                        and _string_end(literal, 0) == len(literal)):
+                span = _sole_string_literal(value) if column in interned else None
+                if span is not None:
+                    lit_start, lit_end = span
                     try:
-                        text = ast.literal_eval(literal)
+                        text = ast.literal_eval(value[lit_start:lit_end])
                     except (SyntaxError, ValueError):
                         text = None
                     if isinstance(text, str):
-                        value = value.replace(literal, str(id_of(text)))
+                        value = value[:lit_start] + str(id_of(text)) + value[lit_end:]
                 pieces.append(value)
                 pieces.append(script[stop])
                 position, start = position + 1, stop + 1
@@ -1685,6 +1715,8 @@ class FactGraph:
         *max_depth* keeps callers at most that many calls away: 1 is the
         direct callers.  ``None`` follows every chain.
         """
+        if max_depth is not None and max_depth <= 0:
+            return set()
         if max_depth is None:
             query = (
                 "reaches[a] := scope_call_by_callee[$qn, a, _, _, _, _, _]\n"

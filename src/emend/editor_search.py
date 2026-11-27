@@ -1368,25 +1368,34 @@ class EditorSearchEngine:
     ) -> SearchResult:
         t0 = time.monotonic()
         items: list[dict] = []
+        truncated = False
         graph = self._published_references()
         if graph is not None:
             try:
-                names = [qualified_name]
-                if not graph.reference_locations(qualified_name, limit=1):
+                rows = graph.reference_locations(
+                    qualified_name, ref_kind=ref_kind, limit=limit + 1,
+                )
+                if rows:
+                    all_items = [self._reference_item(qualified_name, *row) for row in rows]
+                elif ref_kind is not None and graph.reference_locations(qualified_name, limit=1):
+                    all_items = []
+                else:
                     # A picker hands over the name a symbol has within its
                     # file, and a cursor word is barer still; references are
                     # stored under the full name.
                     names = graph.qualified_names_of(qualified_name)
-                items = sorted(
-                    (
-                        self._reference_item(name, *row)
-                        for name in names
-                        for row in graph.reference_locations(
-                            name, ref_kind=ref_kind, limit=limit,
-                        )
-                    ),
-                    key=lambda item: (item["file_path"], item["line"], item["col"]),
-                )[:limit]
+                    all_items = sorted(
+                        (
+                            self._reference_item(name, *row)
+                            for name in names
+                            for row in graph.reference_locations(
+                                name, ref_kind=ref_kind, limit=limit + 1,
+                            )
+                        ),
+                        key=lambda item: (item["file_path"], item["line"], item["col"]),
+                    )
+                truncated = len(all_items) > limit
+                items = all_items[:limit]
             except BUG_EXCEPTIONS:
                 raise
             except Exception:
@@ -1397,7 +1406,7 @@ class EditorSearchEngine:
             items=items,
             elapsed_ms=elapsed,
             mode="reference",
-            truncated=len(items) >= limit,
+            truncated=truncated,
             query=qualified_name,
         )
 

@@ -4499,6 +4499,7 @@ impl LanguageConfig {
                 identifier_node: "identifier".to_string(),
                 skip_identifiers: vec!["True".to_string(), "False".to_string(), "None".to_string(), "self".to_string(), "cls".to_string()],
                 receiver_names: vec!["self".to_string(), "cls".to_string()],
+                parent_receiver: "super".to_string(),
                 destructure_nodes: vec!["tuple".to_string(), "list".to_string(), "pattern_list".to_string(), "tuple_pattern".to_string()],
                 attribute_access_nodes: vec!["subscript".to_string(), "attribute".to_string()],
                 delete_nodes: vec!["delete_statement".to_string()],

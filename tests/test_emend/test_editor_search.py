@@ -447,11 +447,14 @@ class TestReferenceSearch:
     def test_limit_keeps_the_first_paths(self, referenced_project):
         with _engine(referenced_project) as engine:
             result = engine.search_references("lib.greet", limit=2)
+            exact = engine.search_references("lib.greet", limit=4)
         assert _locations(result) == [
             ("app.py", 1, 16, "import"),
             ("app.py", 5, 4, "call"),
         ]
         assert result.truncated
+        assert len(exact.items) == 4
+        assert not exact.truncated
 
     def test_in_file_name_finds_the_definitions_references(self, tmp_path):
         """The picker offers a symbol by its name within the file

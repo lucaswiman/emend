@@ -457,7 +457,7 @@ Which calls are resolved: a call to a function, including an imported one, and
 a call that constructs a class with its own constructor, through the project's
 call graph; a call on ``self`` to a method of the same class or of a base class
 in the same file; ``super().method()`` to the base class's method; and a call
-on any other object (``box.value()``) when exactly one function in the same
+on any other object (``box.value()``) when exactly one method in the same
 file has that name. Any other call is opaque.
 
 Sanitizers without an effect retain the argument-validation contract: a

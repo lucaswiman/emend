@@ -1539,6 +1539,8 @@ def _call_chain() -> FactGraph:
 def test_transitive_callers_stop_at_the_requested_depth():
     graph = _call_chain()
     assert graph.transitive_callers("pkg.d") == {"pkg.a", "pkg.b", "pkg.c", "pkg.side"}
+    assert graph.transitive_callers("pkg.d", max_depth=0) == set()
+    assert graph.transitive_callers("pkg.d", max_depth=-1) == set()
     assert graph.transitive_callers("pkg.d", max_depth=1) == {"pkg.c"}
     assert graph.transitive_callers("pkg.d", max_depth=2) == {"pkg.b", "pkg.c", "pkg.side"}
     assert graph.transitive_callers("pkg.d", max_depth=10) == graph.transitive_callers("pkg.d")

@@ -522,3 +522,35 @@ def test_fresh_generation_is_published_compact(tmp_path):
         conn.execute("VACUUM INTO ?", (str(rewritten),))
     assert published.stat().st_size > 500_000
     assert published.stat().st_size == rewritten.stat().st_size
+
+
+def test_unavailable_type_engine_keeps_backing_file_for_detached_facts(tmp_path, monkeypatch):
+    """When a type engine is unavailable, ``query_facts(include_types=True)``
+    must not return a graph whose backing file was already unlinked."""
+    from emend import type_oracle
+
+    _project(tmp_path)
+
+    class UnavailableOracle(type_oracle.TypeOracle):
+        def is_available(self):
+            return False
+
+        def infer_file(self, path, project_root=None):
+            raise AssertionError("unavailable oracle should not be invoked")
+
+        def clear_cache(self):
+            pass
+
+    monkeypatch.setattr(type_oracle, "create_type_oracle", lambda **kw: UnavailableOracle())
+    store = AnalysisStore(tmp_path)
+    try:
+        typed = store.query_facts(include_types=True)
+        assert Path(typed._db_path).exists()
+        detached = store.detached_facts(typed)
+        try:
+            assert _names(detached) == ["original"]
+        finally:
+            detached.close()
+    finally:
+        store.close()
+    assert _generations(tmp_path) == []
