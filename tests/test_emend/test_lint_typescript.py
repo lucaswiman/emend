@@ -93,6 +93,124 @@ def test_ts_lint_flow_rule(tmp_path):
     assert violations[0].rule_name == "xss"
 
 
+def test_ts_lint_flow_follows_a_method_call_on_the_value(tmp_path):
+    """The value a method is called on is an input of the call."""
+    ts_file = tmp_path / "handler.ts"
+    ts_file.write_text(
+        "function handler(): void {\n"
+        '    const data = prompt("x");\n'
+        "    eval(data.trim());\n"
+        "    const trimmed = data.trim().toLowerCase();\n"
+        "    eval(trimmed);\n"
+        '    eval("constant".toUpperCase());\n'
+        "    eval(other.trim());\n"
+        "    data.run();\n"
+        "}\n"
+    )
+
+    def lines(flows_to):
+        rule = LintRule(
+            name="flow", find="", message="tainted",
+            flows_from="prompt($X)", flows_to=flows_to,
+        )
+        return sorted(
+            v.line for v in run_lint([rule], [str(ts_file)], language="typescript")
+        )
+
+    assert lines("eval($CODE)") == [3, 5]
+    # A sink may capture the value the method is called on.
+    assert lines("$TARGET.run()") == [8]
+
+
+def test_ts_lint_flow_keeps_taint_on_the_attribute_across_methods(tmp_path):
+    """``this.raw`` is an attribute of the object a method is called on."""
+    ts_file = tmp_path / "box.ts"
+    ts_file.write_text(
+        "class Box {\n"
+        "    store(item: string): void {\n"
+        "        this.raw = item;\n"
+        "    }\n"
+        "    value(): string {\n"
+        "        return this.raw;\n"
+        "    }\n"
+        "    constant(): string {\n"
+        '        return "fixed";\n'
+        "    }\n"
+        "}\n"
+        "function handler(): void {\n"
+        "    const b = make();\n"
+        '    b.store(prompt("x"));\n'
+        "    eval(b.value());\n"
+        "    eval(b.constant());\n"
+        "    eval(b.raw);\n"
+        "    eval(b.other);\n"
+        "    const c = make();\n"
+        '    c.raw = prompt("y");\n'
+        "    eval(c.value());\n"
+        "    eval(c.constant());\n"
+        "}\n"
+    )
+    rule = LintRule(
+        name="flow", find="", message="tainted",
+        flows_from="prompt($X)", flows_to="eval($CODE)",
+    )
+    lines = sorted(v.line for v in run_lint([rule], [str(ts_file)], language="typescript"))
+    assert lines == [15, 17, 21]
+
+
+def test_ts_lint_flow_follows_super_without_explicit_this(tmp_path):
+    """A subclass method that only calls ``super`` still binds ``this``."""
+    ts_file = tmp_path / "child.ts"
+    ts_file.write_text(
+        "class Base {\n"
+        "    store(item: string): void {\n"
+        "        this.raw = item;\n"
+        "    }\n"
+        "    value(): string {\n"
+        "        return this.raw;\n"
+        "    }\n"
+        "    constant(): string {\n"
+        '        return "fixed";\n'
+        "    }\n"
+        "}\n"
+        "class Child extends Base {\n"
+        "    store(item: string): void {\n"
+        "        super.store(item);\n"
+        "    }\n"
+        "    value(): string {\n"
+        "        return super.value();\n"
+        "    }\n"
+        "    run(): void {\n"
+        '        this.store(prompt("x"));\n'
+        "        eval(this.value());\n"
+        "        eval(this.constant());\n"
+        "        eval(this.raw);\n"
+        "        eval(this.other);\n"
+        "    }\n"
+        "    put(item: string): void {\n"
+        "        super.store(item);\n"
+        "    }\n"
+        "    get(): string {\n"
+        "        return super.value();\n"
+        "    }\n"
+        "}\n"
+        "function handler(): void {\n"
+        "    const c = make();\n"
+        '    c.put(prompt("y"));\n'
+        "    eval(c.get());\n"
+        "    eval(c.constant());\n"
+        "    eval(c.raw);\n"
+        "    eval(c.other);\n"
+        "}\n"
+    )
+    rule = LintRule(
+        name="flow", find="", message="tainted",
+        flows_from="prompt($X)", flows_to="eval($CODE)",
+    )
+    lines = sorted(v.line for v in run_lint([rule], [str(ts_file)], language="typescript"))
+    assert lines == [21, 23, 36, 38]
+
+
 # --- Fix / replace mode ---
 
 

@@ -33,7 +33,7 @@ from emend.symbol_projection import SymbolInfo, _symbol_info_view
 from emend.sqlite_writer import SQLiteWriter
 
 
-EXTRACTION_ARTIFACT_VERSION = "23"
+EXTRACTION_ARTIFACT_VERSION = "25"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 TYPE_RESULT_VERSION = 5  # FileTypes now carries failure diagnostics.
 logger = logging.getLogger(__name__)
@@ -174,6 +174,7 @@ class AnalysisStore:
         # own immutable graph so asking for types never mutates the fast base
         # generation or invalidates readers that still hold it.
         self._typed_graph: tuple[tuple[str, str, str], object] | None = None
+        self._ephemeral_typed: list[object] = []
         self._type_oracle: tuple[tuple[str, str], object] | None = None
         self._observed_files: dict[
             str, tuple[int, int, int, int, int, str, str, str]
@@ -417,6 +418,11 @@ class AnalysisStore:
             typed_graph.close()
             self._unlink(typed_path)
             self._typed_graph = None
+        for ephemeral in self._ephemeral_typed:
+            ephemeral_path = self._graph_path(ephemeral)
+            ephemeral.close()
+            self._unlink(ephemeral_path)
+        self._ephemeral_typed.clear()
         if self._disk_graph is not None:
             disk_path = self._graph_path(self._disk_graph)
             self._disk_graph.close()
@@ -1437,10 +1443,13 @@ class AnalysisStore:
             # produce a result for this coherent overlay generation.
             paths: list[Path] = []
         else:
-            paths = [Path(revision.file_path) for revision in graph.snapshot.files]
+            paths = [
+                Path(revision.file_path) for revision in graph.snapshot.files
+                if revision.language in oracle.languages
+            ]
 
         base_path = self._graph_path(graph)
-        if base_path is None:
+        if base_path is None or not available or not paths:
             return graph
         typed, typed_path = self._clone_graph(base_path, graph.snapshot)
         typed.bind_snapshot(
@@ -1472,6 +1481,10 @@ class AnalysisStore:
             except Exception:
                 logger.debug("Could not populate type bindings", exc_info=True)
                 complete = False
+        if not complete and not type_facts:
+            typed.close()
+            self._unlink(typed_path)
+            return graph
         try:
             typed.replace_types_batch(type_facts)
         except BaseException:
@@ -1499,7 +1512,9 @@ class AnalysisStore:
             # open handle valid after unlinking the private backing file.
             self._unlink(previous_path)
         if not complete:
-            self._unlink(typed_path)
+            # Keep the backing file alive while callers (including detached
+            # snapshots) still read it; release it when the store closes.
+            self._ephemeral_typed.append(typed)
         return typed
 
     @contextmanager

@@ -18,12 +18,13 @@
   `facts.db` shrinks from 755 MB to 407 MB; a cold index, dead-code analysis
   and the update after an edit are faster. Commands, the Python API and query
   results still take and return text. **Custom CozoScript** (policy `datalog`
-  checks) now sees ids in the path and qualified-name columns, so a string
-  literal there no longer matches: look the id up first, as in
-  `*intern["pkg.mod.func", id], *call[id, callee, _, _, _, _, _]`, and bind
-  `*interned[id, text]` before a string function or `:order`. See "Interned
-  paths and qualified names" in the technical details. The fact database is
-  rebuilt once after upgrading.
+  checks) now sees ids in the path and qualified-name columns. A string
+  literal written in such a column, as in `*call[caller, "os.system", ...]`,
+  still works: it stands for its id. A comparison (`callee == "os.system"`),
+  a string function or `:order` on such a column sees the id, so bind the text
+  first with `*interned[id, text]`, or the id with `*intern["pkg.mod.func", id]`.
+  See "Interned paths and qualified names" in the technical details. The fact
+  database is rebuilt once after upgrading.
 - Whole-project `analyze trace` and flow rules now finish on large projects:
   call and container linking no longer rescan every occurrence per call site.
 - Faster pattern linting and warm queries: language lookup no longer rescans
@@ -70,6 +71,53 @@
   1.6 s).
 - A freshly built `facts.db` is compacted before it is published (Django:
   407 MB to 367 MB).
+- Flow rules and `analyze trace` follow a value through a method called on it.
+  `eval(data.strip())` and `clean = data.strip(); eval(clean)` were not
+  reported for a tainted `data`: only arguments counted as inputs of a call,
+  so any method call laundered the value. **Expect new findings** where taint
+  reaches a sink through a method call. The fact database is rebuilt once
+  after upgrading.
+- A sink or sanitizer may capture the value a method is called on.
+  `flows-to: "$QUERY.execute()"` never fired, and `not-through:
+  "$TEXT.escaped()"` never sanitized.
+- Flow analysis tracks taint per attribute. `box.raw = tainted` taints
+  `box.raw`, not `box` or `box.other`, and the attribute keeps its taint when
+  the object crosses a resolved call: as the value a method is called on, as an
+  argument, as a return value, and back out of a method that stored into it.
+  A resolved constructor taints only the attributes it stores into. Where the
+  analysis cannot see which part of an object is read or written (an opaque
+  call, a base class outside the project) it falls back to the whole object.
+  See "Attributes and containers" in the linting guide. **Findings change in
+  both directions.** New: taint that crosses a call inside an attribute, a read
+  below a tainted attribute (`box.raw.strip()`), and a container read whole
+  after an element store (`params["q"] = tainted; execute(sql % params)`).
+  Gone: `Box(tainted).untouched_attribute`, a store into the object a name
+  held before it was rebound, and `box.other` after `box.items.append(tainted)`.
+- Instance attributes are no longer confused with locals. In Python `self.raw`
+  was recorded as the variable `raw`, so a clean store to the attribute cleaned
+  a tainted local of the same name and the reverse. In TypeScript and Rust
+  `this.raw` and `self.raw` were not recorded at all; they are now.
+- A call on `self` resolves to a method of the same class or of a base class
+  in the same file, and `super().method()` to the base class's method. Two
+  classes that each define `get` or `__init__` used to leave every such call
+  unresolved.
+- Flow rules checked along control paths (a rule whose sanitizer is called
+  somewhere, or a source in code connected to a `finally`) finish on a large
+  project. The check covered every function call-connected to the source,
+  which is most of a project, and kept a liveness set per occurrence: one
+  narrow rule over Django did not finish in seven minutes, and a run of six
+  rules passed 11 GB of memory. It now covers the functions the value reaches
+  (four whole-project flow rules over Django: 30 s, 3.3 GB).
+- `analyze facts --transitive` no longer crashes with a `TypeError`, and its
+  depth bound counts the shortest call chain.
+- A rules file whose `rules` is a list, or whose rule is not a mapping, is an
+  error. It was read as a file with no rules, so `emend check` passed.
+- `emend tool index` builds the search index for every language in the
+  project. It indexed Python only unless `--language` was given, and handed a
+  type engine files of languages it does not check.
+- Editor reference search accepts the name a symbol has within its file
+  (`Widget.render`, as the picker shows it) as well as its full qualified
+  name; the former found nothing.
 
 ## 0.5.6
 

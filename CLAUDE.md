@@ -35,7 +35,7 @@
 
 | File | Purpose |
 |------|---------|
-| `fact_graph.py` | Relational fact model and Datalog query layer. Fact dataclasses (`SymbolFact`, `CallFact`, `ReferenceFact`, `DefUseFact`, `CfgBlockFact`, …); `FactGraph` class: `replace_extracted()`/`remove_files()` write extracted facts (`update_files()`, `build_from_files()`, `build_from_project()` and `from_json()` are legacy entry points with no production caller); Datalog query methods (`refs_datalog`, `callers_datalog`, `callees_datalog`, `graph_datalog`, `dead_code_unified`, `unreachable_blocks_datalog`); flow occurrences are stored per file in the `flow_blob` relation and read with `flow_events()`/`flow_edges()`; JSON serialisation. File paths and qualified names are stored as integer ids (`Id` columns in `_SCHEMA`, `intern`/`interned` dictionary relations): writes encode them by column name, the Rust bridge decodes query results back to text, and a query input compared with an `Id` column must be converted with `FactGraph._id()`/`_ids()` (a string compared with an id silently matches nothing). |
+| `fact_graph.py` | Relational fact model and Datalog query layer. Fact dataclasses (`SymbolFact`, `CallFact`, `ReferenceFact`, `DefUseFact`, `CfgBlockFact`, …); `FactGraph` class: `replace_extracted()`/`remove_files()` write extracted facts (`update_files()`, `build_from_files()`, `build_from_project()` and `from_json()` are legacy entry points with no production caller); Datalog query methods (`refs_datalog`, `callers_datalog`, `callees_datalog`, `graph_datalog`, `dead_code_unified`, `unreachable_blocks_datalog`); flow occurrences are stored per file in the `flow_blob` relation and read with `flow_events()`/`flow_edges()`; JSON serialisation. File paths and qualified names are stored as integer ids (`Id` columns in `_SCHEMA`, `intern`/`interned` dictionary relations): writes encode them by column name, the Rust bridge decodes query results back to text, and a query input compared with an `Id` column must be converted with `FactGraph._id()`/`_ids()` (a string compared with an id silently matches nothing; `run_query` converts a literal written in an `Id` column position, internal scripts do not). |
 | `trace.py` | Trace/taint analysis. `TraceConfig`, `TraceSource`, `TraceSink` (optional `effect: writes($X)/reads($X)`), `TraceSanitizer` (`quantifier: all_paths/some_path`), `TraceScopeSanitizer` (scope-bounded kills), `TraceViolation` (aliases of the `checks/flow.py` types). Thin adapter: `run_trace_analysis()` and `run_interprocedural_trace()` both call `checks.flow.evaluate_compiled_flow()`. YAML `presets:` key for auto-loading framework rules. |
 | `trace_presets.py` | Framework preset loader: `get_preset()` reads `src/emend/presets/*.yaml` (Flask, Django, SQLAlchemy, FastAPI, Express, Axum, Diesel, Next.js, React, …); `merge_configs()` composes multiple configs. |
 | `lint.py` | Lint public API layer (~560 lines). Pattern-based rules, flow rules (`flows-from`/`flows-to`/`not-through`), `deadcode` rule, `duplicate-code` rule. Loads from `.emend/rules.yaml`. Bulk of the implementation now lives in `checks/` submodules; full reduction to a thin shim is deferred post-release. |
@@ -277,6 +277,19 @@ Path-sensitivity, per-variable sanitisation, scope-bounded sanitisers
 `checks/flow.py` over the flow events and edges that Rust
 `build_flow_facts` (`rust/src/cfg.rs`) emits; the `FactGraph` stores them
 per file in the `flow_blob` relation. They are not Datalog rules.
+
+Taint is tracked per attribute. Flow facts keep the receiver (`self`, `cls`,
+`this`: `receiver_names` under `[cfg]`) as the root of an access path. A
+`store` edge links a write below an object (`b.raw = x`) to later reads of the
+object, `param_out` and `arg_out` occurrences mark an object at the end of a
+callee and after a call, and an `arg_return` edge carries the callee's stores
+back to the caller. Both walks in `checks/flow.py` carry the tainted *part* of
+an occurrence (`""` for the whole value, `.raw` for one attribute); the rules
+are in `_field_step`. Where the part cannot be seen (an opaque call, an
+unresolved constructor) the whole value is tainted. Calls on the receiver are
+resolved by class in `build_analysis_from_tree` (`rust/src/cfg.rs`);
+constructors resolve to `constructor_methods` under `[trace]` in
+`_add_cross_file_calls`.
 
 ### Impact analysis
 

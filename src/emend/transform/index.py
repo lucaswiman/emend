@@ -992,7 +992,7 @@ def warm_caches(
     jobs: int | None = None,
     callback: Callable[[str, str], None] | None = None,
     type_engine: str | None = "pyrefly",
-    language: str | None = "python",
+    language: str | None = None,
     build_fts: bool = True,
     build_duplicates: bool = False,
     include_environment: bool = False,
@@ -1009,7 +1009,9 @@ def warm_caches(
     Args:
         project_path: Root directory of the project.
         jobs: Max parallelism (defaults to CPU count).
-        language: Restrict indexed files to this language; ``None`` indexes all languages.
+        language: Restrict indexed files to this language; ``None``, the
+            default, indexes every language.  The type engine is given only
+            the files of the languages it checks.
         callback: Called with ``(phase, file_path)`` for progress reporting.
         type_engine: Type inference engine for the type-cache phase.
             Defaults to ``"pyrefly"``. ``"auto"`` detects from project config
@@ -1208,7 +1210,9 @@ def warm_caches(
                 f"Install it (pyrefly, ty, or pyright) and re-run, or pass "
                 f"--type-engine=none to skip type indexing."
             )
-        paths = [Path(f) for f, _ in file_contents]
+        from emend.language_registry import detect_language
+        paths = [Path(f) for f, _ in file_contents
+                 if detect_language(f) in oracle.languages]
         announce_phase("Analysis inputs")
     t_facts = time.monotonic()
     with (oracle.precompute_batch(paths, Path(project_root))

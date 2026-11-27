@@ -13,6 +13,7 @@ The backing store is CozoDB with the SQLite engine, giving us:
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import logging
@@ -424,6 +425,140 @@ def _interned_positions(relation: str, columns: list[str]) -> tuple[int, ...]:
     return tuple(index for index, column in enumerate(columns) if column in interned)
 
 
+def _relation_columns(schema: str) -> dict[str, list[str]]:
+    """Map each relation to its columns, keys first, in stored order."""
+    return {
+        relation: re.findall(r"(\w+):\s*\w+", columns)
+        for relation, columns in re.findall(r"\{:create (\w+) \{([^}]*)\}\}", schema)
+    }
+
+
+_RELATION_COLUMNS = _relation_columns(_SCHEMA)
+_STORED_ATOM = re.compile(r"\*(\w+)\s*([\[{])")
+_CLOSERS = {"[": "]", "{": "}", "(": ")"}
+
+
+def _string_end(text: str, start: int) -> int:
+    """Index just past the string literal that opens at *start*."""
+    quote, index = text[start], start + 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+        elif text[index] == quote:
+            return index + 1
+        else:
+            index += 1
+    return len(text)
+
+
+def _top_level(text: str, start: int, stop_at: str) -> int:
+    """Index of the first of *stop_at* outside every bracket, string, and comment, or -1."""
+    depth, index = 0, start
+    while index < len(text):
+        char = text[index]
+        if char in "\"'":
+            index = _string_end(text, index)
+            continue
+        if char == "#":
+            newline = text.find("\n", index)
+            index = len(text) if newline == -1 else newline + 1
+            continue
+        if depth == 0 and char in stop_at:
+            return index
+        if char in _CLOSERS:
+            depth += 1
+        elif char in "]})":
+            depth -= 1
+        index += 1
+    return -1
+
+
+def _sole_string_literal(value: str) -> tuple[int, int] | None:
+    """Return ``(start, end)`` if *value* holds only one string literal plus whitespace/comments."""
+    index, length = 0, len(value)
+    while index < length:
+        if value[index].isspace():
+            index += 1
+        elif value[index] == "#":
+            newline = value.find("\n", index)
+            index = length if newline == -1 else newline + 1
+        else:
+            break
+    if index >= length or value[index] not in "\"'":
+        return None
+    end = _string_end(value, index)
+    rest = end
+    while rest < length:
+        if value[rest].isspace():
+            rest += 1
+        elif value[rest] == "#":
+            newline = value.find("\n", rest)
+            rest = length if newline == -1 else newline + 1
+        else:
+            return None
+    return index, end
+
+
+def _literals_as_ids(script: str, id_of: Callable[[str], int]) -> str:
+    """Write the id for a string literal that sits in an ``Id`` column.
+
+    ``*call[caller, "os.system", ...]`` names a callee, but the column holds
+    ids, so the literal would match nothing and say nothing.  Only a literal
+    that is the whole of a column's position in a stored-relation atom is
+    replaced; comparisons and string functions still need ``*interned``.
+    """
+    pieces: list[str] = []
+    index = 0
+    while index < len(script):
+        char = script[index]
+        if char in "\"'":
+            end = _string_end(script, index)
+        elif char == "#":
+            end = script.find("\n", index)
+            end = len(script) if end == -1 else end
+        else:
+            atom = _STORED_ATOM.match(script, index) if char == "*" else None
+            interned = _INTERNED_COLUMNS.get(atom.group(1)) if atom else None
+            close = _top_level(script, atom.end(), _CLOSERS[atom.group(2)]) if interned else -1
+            if close == -1:
+                pieces.append(char)
+                index += 1
+                continue
+            columns = _RELATION_COLUMNS[atom.group(1)]
+            pieces.append(script[index:atom.end()])
+            position, start = 0, atom.end()
+            while start <= close:
+                comma = _top_level(script, start, ",")
+                stop = close if comma == -1 or comma > close else comma
+                argument = script[start:stop]
+                column, value = None, argument
+                if atom.group(2) == "{":
+                    name, colon, bound = argument.partition(":")
+                    if colon and name.strip().isidentifier():
+                        column, value = name.strip(), bound
+                        pieces.append(name + colon)
+                elif position < len(columns):
+                    column = columns[position]
+                span = _sole_string_literal(value) if column in interned else None
+                if span is not None:
+                    lit_start, lit_end = span
+                    try:
+                        text = ast.literal_eval(value[lit_start:lit_end])
+                    except (SyntaxError, ValueError):
+                        text = None
+                    if isinstance(text, str):
+                        value = value[:lit_start] + str(id_of(text)) + value[lit_end:]
+                pieces.append(value)
+                pieces.append(script[stop])
+                position, start = position + 1, stop + 1
+            end = close + 1
+            index = end
+            continue
+        pieces.append(script[index:end])
+        index = end
+    return "".join(pieces)
+
+
 def _init_schema(client: Any) -> None:
     """Create stored relations if they don't exist."""
     for stmt in _SCHEMA_INIT.strip().split("\n\n"):
@@ -657,11 +792,15 @@ class FactGraph:
         The result has keys ``headers`` (list of column names) and
         ``rows`` (list of row tuples).  Path and qualified-name columns hold
         ids inside the script, but the rows carry their text, in the order of
-        that text unless the script has its own ``:order``.  To compare such a
-        column with text, look its id up: ``*intern["pkg.mod.func", id]``.
+        that text unless the script has its own ``:order``.  A string literal
+        written in such a column of a stored relation, as in
+        ``*call[caller, "os.system", ...]``, stands for its id.  Anywhere else
+        (a comparison, a string function) look the id or the text up:
+        ``*intern["pkg.mod.func", id]``, ``*interned[id, text]``.
         ``decode=False`` returns the stored ids.
         """
-        return self._client.run(cozoscript, read_only=True, decode=decode)
+        script = _literals_as_ids(cozoscript, self._id)
+        return self._client.run(script, read_only=True, decode=decode)
 
     def _id(self, text: str) -> int:
         """The stored id of a path or qualified name; -1, which no row holds, if unknown."""
@@ -1570,14 +1709,33 @@ class FactGraph:
 
     # -- Transitive closures (Datalog! No more Python BFS) ---------------
 
-    def transitive_callers(self, symbol_qn: str) -> set[str]:
-        """Compute the transitive set of callers of *symbol_qn* via Datalog."""
-        result = self._run_namespaced(
-            "reaches[a] := scope_call_by_callee[$qn, a, _, _, _, _, _]\n"
-            "reaches[a] := reaches[mid], scope_call_by_callee[mid, a, _, _, _, _, _]\n"
-            "?[a] := reaches[a]",
-            {"qn": self._id(symbol_qn)},
-        )
+    def transitive_callers(self, symbol_qn: str, max_depth: int | None = None) -> set[str]:
+        """Compute the transitive set of callers of *symbol_qn* via Datalog.
+
+        *max_depth* keeps callers at most that many calls away: 1 is the
+        direct callers.  ``None`` follows every chain.
+        """
+        if max_depth is not None and max_depth <= 0:
+            return set()
+        if max_depth is None:
+            query = (
+                "reaches[a] := scope_call_by_callee[$qn, a, _, _, _, _, _]\n"
+                "reaches[a] := reaches[mid], scope_call_by_callee[mid, a, _, _, _, _, _]\n"
+                "?[a] := reaches[a]"
+            )
+            params: dict[str, Any] = {"qn": self._id(symbol_qn)}
+        else:
+            # The shortest distance to each caller decides whether it is in
+            # range, and lets the recursion stop on a cycle.
+            query = (
+                "reaches[a, min(depth)] := scope_call_by_callee[$qn, a, _, _, _, _, _], "
+                "depth = 1\n"
+                "reaches[a, min(depth)] := reaches[mid, nearer], nearer < $max_depth, "
+                "scope_call_by_callee[mid, a, _, _, _, _, _], depth = nearer + 1\n"
+                "?[a] := reaches[a, _]"
+            )
+            params = {"qn": self._id(symbol_qn), "max_depth": int(max_depth)}
+        result = self._run_namespaced(query, params)
         return {r[0] for r in result["rows"]} - {symbol_qn}
 
     def transitive_callees(self, symbol_qn: str) -> set[str]:
@@ -2205,6 +2363,21 @@ class FactGraph:
             if len(rows) >= limit or len(names) < wanted:
                 return rows
             wanted *= 8
+
+    def qualified_names_of(self, name: str) -> list[str]:
+        """Full names of the definitions known as *name* within their file.
+
+        *name* is a definition's path within its file (``Class.method``) or
+        its bare name (``method``); a bare name is every definition called
+        that, at any depth.
+        """
+        rows = self._client.run(
+            "?[full] := "
+            "*search_symbol[_, full, bare, local, kind, _, _, _, _, _, _, _], "
+            'kind != "reference", (local == $name or bare == $name)',
+            {"name": name},
+        )["rows"]
+        return sorted({row[0] for row in rows})
 
     def references_to_names_containing(
         self, fragment: str, *, limit: int, file_paths: Iterable[str] | None = None,

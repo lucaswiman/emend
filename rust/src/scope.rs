@@ -1090,6 +1090,17 @@ pub struct CfgSection {
     /// Identifier names to skip (keywords parsed as identifiers).
     #[serde(default)]
     pub skip_identifiers: Vec<String>,
+    /// Names of the value a method is called on (`self`, `cls`, `this`).
+    /// Flow facts keep them as the root of an access path (`self.raw`).
+    #[serde(default)]
+    pub receiver_names: Vec<String>,
+    /// The receiver every function has without declaring it (`this`).
+    #[serde(default)]
+    pub implicit_receiver: String,
+    /// The name that stands for the receiver seen as its parent class
+    /// (`super`): `super().save()` is a call on the receiver itself.
+    #[serde(default)]
+    pub parent_receiver: String,
     /// Node types for destructuring targets (tuple/list unpacking).
     #[serde(default)]
     pub destructure_nodes: Vec<String>,
@@ -4487,6 +4498,8 @@ impl LanguageConfig {
                 expression_statement_node: "expression_statement".to_string(),
                 identifier_node: "identifier".to_string(),
                 skip_identifiers: vec!["True".to_string(), "False".to_string(), "None".to_string(), "self".to_string(), "cls".to_string()],
+                receiver_names: vec!["self".to_string(), "cls".to_string()],
+                parent_receiver: "super".to_string(),
                 destructure_nodes: vec!["tuple".to_string(), "list".to_string(), "pattern_list".to_string(), "tuple_pattern".to_string()],
                 attribute_access_nodes: vec!["subscript".to_string(), "attribute".to_string()],
                 delete_nodes: vec!["delete_statement".to_string()],

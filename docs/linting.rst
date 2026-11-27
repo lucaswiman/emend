@@ -392,10 +392,73 @@ For each function in the file, emend:
 1. Finds all matches of the source pattern within the function
 2. Extracts variable names from the source match (assignment targets and captures)
 3. Propagates taint through assignments: if a tainted variable appears on the RHS
-   of an assignment, the LHS becomes tainted
+   of an assignment, the LHS becomes tainted. The result of a call is tainted
+   when an argument is, or when the value the method is called on is:
+   ``data.strip()`` is as tainted as ``data``
 4. Checks if any tainted variable appears in a sink pattern match
 5. If any configured sanitizer (``not-through``) matches on the source-to-sink
    path, including at either endpoint, the violation is suppressed
+
+A sink or sanitizer may capture the value a method is called on as well as an
+argument: ``flows-to: "$QUERY.execute()"`` reports a tainted ``$QUERY``, and
+``not-through: "$TEXT.escaped()"`` validates ``$TEXT``.
+
+Attributes and containers
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Taint lives on an access path, not on a whole object:
+
+.. code-block:: python
+
+   box.raw = request.GET.get("q")
+   cursor.execute(box.raw)      # reported
+   cursor.execute(box.other)    # not reported: another attribute
+   cursor.execute(box)          # not reported: the sink was not given ``raw``
+
+A tainted object taints everything read from it (``box = tainted`` taints
+``box.raw``), but a tainted attribute does not taint the object that holds it.
+
+The attribute keeps its taint when the object crosses a call that emend
+resolves to a function in the project: as the value a method is called on, as
+an argument, as a return value, and back out of a callee that stored into it.
+
+.. code-block:: python
+
+   class Box:
+       def __init__(self, raw):
+           self.raw = raw            # Box(tainted) taints ``.raw`` only
+           self.kind = "plain"
+
+       def value(self):
+           return self.raw
+
+       def kind_name(self):
+           return self.kind
+
+   box = Box(request.GET.get("q"))
+   cursor.execute(box.value())       # reported
+   cursor.execute(box.kind_name())   # not reported
+
+Where emend cannot see which part of an object is read or written, it falls
+back to the whole object:
+
+* A call it cannot resolve, given an object with a tainted attribute, returns
+  a tainted value: ``render(box)``, ``box.inherited_elsewhere()``, ``f"{box}"``.
+* A constructor it cannot resolve, or one that hands the new object to a call
+  it cannot resolve (a base class outside the project, ``setattr(self, ...)``),
+  taints the whole object when an argument is tainted.
+* Storing into an element taints the container read whole: after
+  ``params["q"] = tainted``, ``params`` is tainted, ``params["q"]`` is, and
+  ``params["page"]`` is not. ``append`` and the other mutating methods listed
+  under ``[trace.container_mutations]`` in the language configuration behave
+  the same way.
+
+Which calls are resolved: a call to a function, including an imported one, and
+a call that constructs a class with its own constructor, through the project's
+call graph; a call on ``self`` to a method of the same class or of a base class
+in the same file; ``super().method()`` to the base class's method; and a call
+on any other object (``box.value()``) when exactly one method in the same
+file has that name. Any other call is opaque.
 
 Sanitizers without an effect retain the argument-validation contract: a
 successful call validates the captured value. For functions that return a

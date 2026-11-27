@@ -1703,7 +1703,116 @@ pub fn build_cfgs_from_tree(
 struct CallRecord {
     result: u32,
     callee: String,
-    args: Vec<u32>,
+    args: Vec<(u32, Option<String>)>,
+    /// The read of the object the method is called on (`b.value` in `b.value()`).
+    receiver: Option<u32>,
+    /// The object each argument names once the call has returned, by argument.
+    outs: Vec<Option<(u32, Option<String>)>>,
+    receiver_out: Option<u32>,
+    dispatch: Dispatch,
+    /// The class the calling function belongs to.
+    class: Option<String>,
+}
+
+/// What a call is made on, which decides where its method is looked up.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Dispatch {
+    /// A plain function, or a method of some other object.
+    Plain,
+    /// `self.save()`: a method of the caller's own class or of its bases.
+    OnReceiver,
+    /// `super().save()`: a method of the caller's bases.
+    OnParent,
+}
+
+/// The class a function is defined in, with the names of that class's bases.
+fn enclosing_class(node: tree_sitter::Node, lang: &LanguageConfig, source: &[u8]) -> Option<(String, Vec<String>)> {
+    let symbols = &lang.symbols;
+    let text = |node: tree_sitter::Node| node.utf8_text(source).unwrap_or("").to_string();
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        // A nested function inside a method is not itself a method of the class.
+        if lang.cfg.function_nodes.iter().any(|kind| kind == parent.kind()) {
+            return None;
+        }
+        if parent.kind() == symbols.class_node() {
+            let name = text(parent.child_by_field_name(symbols.name_field())?);
+            let mut bases = Vec::new();
+            let heritage = parent.child_by_field_name(symbols.superclasses_field()).or_else(|| {
+                let mut cursor = parent.walk();
+                let found = parent.children(&mut cursor)
+                    .find(|child| child.kind() == symbols.superclasses_field());
+                found
+            });
+            if let Some(heritage) = heritage {
+                let pm = &lang.pattern_matching;
+                let keyword = &pm.keyword_argument;
+                let mut pending = vec![heritage];
+                while let Some(node) = pending.pop() {
+                    if !keyword.is_empty() && node.kind() == keyword { continue; }
+                    if matches!(node.kind(), "implements_clause" | "type_arguments" | "type_parameters") {
+                        continue;
+                    }
+                    // `Base[T]` in Python: keep `Base`, not its type arguments.
+                    if !pm.subscript.is_empty() && node.kind() == pm.subscript {
+                        if let Some(base) = node.child_by_field_name(&pm.value_field)
+                            .or_else(|| node.child_by_field_name(&pm.object_field))
+                        {
+                            pending.push(base);
+                        }
+                        continue;
+                    }
+                    if node.child_count() == 0 {
+                        if node.is_named() && node.kind().contains("identifier") { bases.push(text(node)); }
+                        continue;
+                    }
+                    // `module.Base` names `Base`.
+                    if !pm.attribute.is_empty() && node.kind() == pm.attribute {
+                        if let Some(attr) = node.child_by_field_name(&pm.attr_field) { bases.push(text(attr)); }
+                        continue;
+                    }
+                    let mut cursor = node.walk();
+                    let mut children: Vec<_> = node.children(&mut cursor).collect();
+                    children.reverse();
+                    pending.extend(children);
+                }
+            }
+            return Some((name, bases));
+        }
+        if Some(parent.kind()) == symbols.member_container_node() {
+            return Some((text(symbols.member_container_owner(parent)?), Vec::new()));
+        }
+        current = parent.parent();
+    }
+    None
+}
+
+/// The end of every object a path is read from, and of the path itself:
+/// `b`, `b.inner` and `b.inner["k"]` for `b.inner["k"]`.
+fn path_prefixes(path: &str) -> Vec<usize> {
+    let mut ends = Vec::new();
+    let (mut depth, mut quote) = (0usize, None);
+    for (index, byte) in path.bytes().enumerate() {
+        if let Some(open) = quote {
+            if byte == open { quote = None; }
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' if depth > 0 => quote = Some(byte),
+            b'[' => { if depth == 0 { ends.push(index); } depth += 1; }
+            b']' => depth = depth.saturating_sub(1),
+            b'.' if depth == 0 => ends.push(index),
+            _ => {}
+        }
+    }
+    ends.push(path.len());
+    ends
+}
+
+/// Whether `path` is read from the object at `object`: `b.raw` from `b`.
+fn is_below(path: &str, object: &str) -> bool {
+    path.len() > object.len() && path.starts_with(object)
+        && matches!(path.as_bytes()[object.len()], b'.' | b'[')
 }
 
 fn flow_scopes<'a>(node: tree_sitter::Node<'a>, cfg: &CfgSection, out: &mut Vec<tree_sitter::Node<'a>>) {
@@ -1791,6 +1900,8 @@ struct FlowExtractor<'a> {
     events: Vec<FlowEvent>,
     edges: Vec<FlowEdge>,
     calls: Vec<CallRecord>,
+    /// The name of this function's receiver, once its parameter is seen.
+    receiver_name: Option<String>,
 }
 
 impl<'a> FlowExtractor<'a> {
@@ -1807,8 +1918,27 @@ impl<'a> FlowExtractor<'a> {
         self.lang.cfg.function_nodes.iter().any(|kind| kind == node.kind())
     }
 
+    /// `self`, `cls` or `this`: the value a method is called on.
+    fn is_receiver(&self, node: tree_sitter::Node) -> bool {
+        let names = &self.lang.cfg.receiver_names;
+        !names.is_empty() && node.child_count() == 0
+            && names.iter().any(|name| name == self.text(node))
+    }
+
+    /// `super` or `super()`: the receiver, seen as its parent class.
+    fn is_parent_receiver(&self, node: tree_sitter::Node) -> bool {
+        let name = &self.lang.cfg.parent_receiver;
+        if name.is_empty() { return false; }
+        if node.child_count() == 0 { return self.text(node) == name; }
+        let pm = &self.lang.pattern_matching;
+        !pm.call.is_empty() && node.kind() == pm.call
+            && node.child_by_field_name(&pm.func_field).or_else(|| node.named_child(0))
+                .is_some_and(|callee| callee.child_count() == 0 && self.text(callee) == name)
+    }
+
     fn path(&self, node: tree_sitter::Node) -> Option<String> {
         let pm = &self.lang.pattern_matching;
+        if self.is_receiver(node) { return Some(self.text(node).into()); }
         if node.kind() == pm.identifier || pm.extra_identifiers.iter().any(|k| k == node.kind()) {
             let name = self.text(node);
             return (!self.lang.cfg.skip_identifiers.iter().any(|s| s == name)).then(|| name.into());
@@ -1872,7 +2002,7 @@ impl<'a> FlowExtractor<'a> {
     }
 
     fn parameter_name<'b>(&self, node: tree_sitter::Node<'b>) -> Option<tree_sitter::Node<'b>> {
-        if node.kind() == self.lang.cfg.identifier_node { return Some(node); }
+        if node.kind() == self.lang.cfg.identifier_node || self.is_receiver(node) { return Some(node); }
         let field = &self.lang.bindings.parameters.name_field;
         if !field.is_empty() {
             if let Some(found) = node.child_by_field_name(field).and_then(|n| self.parameter_name(n)) {
@@ -1882,6 +2012,27 @@ impl<'a> FlowExtractor<'a> {
         Self::children(node).into_iter().find_map(|child| self.parameter_name(child))
     }
 
+    /// Whether `function` references the implicit receiver (`this`) or parent
+    /// receiver (`super`) in its own scope, ignoring comments, strings, and
+    /// nested function definitions.
+    fn uses_implicit_receiver(&self, function: tree_sitter::Node) -> bool {
+        let pm = &self.lang.pattern_matching;
+        let mut pending = Self::children(function);
+        while let Some(child) = pending.pop() {
+            if self.is_function(child) { continue; }
+            if child.kind() == "comment"
+                || (!pm.string.is_empty() && child.kind() == pm.string)
+                || self.lang.cfg.string_nodes.iter().any(|kind| kind == child.kind())
+            {
+                continue;
+            }
+            if self.is_receiver(child) || self.is_parent_receiver(child) { return true; }
+            let mut cursor = child.walk();
+            pending.extend(child.children(&mut cursor).filter(|n| n.is_named()));
+        }
+        false
+    }
+
     fn parameters(&mut self, function: tree_sitter::Node) {
         let field = self.lang.symbols.parameters_field();
         let params = function.child_by_field_name(field).or_else(|| {
@@ -1889,16 +2040,30 @@ impl<'a> FlowExtractor<'a> {
                 child.kind() == field || matches!(child.kind(), "parameters" | "formal_parameters")
             })
         });
-        let Some(params) = params else { return };
         let mut index = 0;
-        for param in Self::children(params) {
+        let mut receiver = false;
+        for param in params.map(Self::children).unwrap_or_default() {
             if let Some(name) = self.parameter_name(param) {
                 if let Some(path) = self.path(name) {
-                    self.emit(name, "param_in", Some(path), None, Some(index));
+                    // The receiver is bound by the call, not by position.
+                    let is_receiver = !receiver && self.is_receiver(name);
+                    self.emit(name, "param_in", Some(path), None, (!is_receiver).then_some(index));
                     self.events.last_mut().unwrap().arg_name = Some(self.text(name).to_string());
-                    index += 1;
+                    if is_receiver {
+                        receiver = true;
+                        self.receiver_name = Some(self.text(name).to_string());
+                    } else { index += 1; }
                 }
             }
+        }
+        let implicit = self.lang.cfg.implicit_receiver.clone();
+        if !receiver && !implicit.is_empty() && self.uses_implicit_receiver(function) {
+            self.emit_control(self.cfg.entry, "param_in");
+            let event = self.events.last_mut().unwrap();
+            event.var = Some(implicit.clone());
+            event.arg_name = Some(implicit.clone());
+            event.access_path = Some(implicit.clone());
+            self.receiver_name = Some(implicit);
         }
     }
 
@@ -1928,8 +2093,25 @@ impl<'a> FlowExtractor<'a> {
         let pm = &self.lang.pattern_matching;
         let callee_node = node.child_by_field_name(&pm.func_field).or_else(|| node.named_child(0));
         let mut callee_values = Vec::new();
-        let callee = callee_node.and_then(|n| { callee_values.extend(self.expr(n)); self.path(n) })
+        let mut callee = callee_node.and_then(|n| { callee_values.extend(self.expr(n)); self.path(n) })
             .unwrap_or_else(|| "<dynamic>".into());
+        let member = callee_node.filter(|n| !pm.attribute.is_empty() && n.kind() == pm.attribute);
+        let member_object = member.and_then(|member| member.child_by_field_name(&pm.object_field));
+        let mut dispatch = match member_object {
+            Some(object) if self.is_receiver(object) => Dispatch::OnReceiver,
+            _ => Dispatch::Plain,
+        };
+        if let (Some(member), Some(object), Some(receiver)) = (member, member_object, self.receiver_name.clone()) {
+            if self.is_parent_receiver(object) {
+                // `super().save()` is `self.save()` looked up in the bases:
+                // read the receiver here, as a call on it would.
+                if let Some(method) = member.child_by_field_name(&pm.attr_field) {
+                    callee = format!("{}.{}", receiver, self.text(method));
+                    callee_values.push(self.emit(member, "use", Some(callee.clone()), None, None));
+                    dispatch = Dispatch::OnParent;
+                }
+            }
+        }
         let mut args = node.child_by_field_name(&pm.args_field).map(Self::children).unwrap_or_default();
         args.sort_by_key(|arg| arg.start_byte());
         let values: Vec<Vec<u32>> = args.iter().map(|arg| self.expr(*arg)).collect();
@@ -1937,10 +2119,12 @@ impl<'a> FlowExtractor<'a> {
         for (index, (arg, inputs)) in args.iter().zip(values).enumerate() {
             let path = self.path(*arg);
             let id = self.emit(*arg, "call_arg", path, None, Some(index as u32));
-            self.events.last_mut().unwrap().arg_name = arg.child_by_field_name("name")
-                .map(|name| self.text(name).to_string());
+            let arg_name = (!pm.keyword_argument.is_empty() && arg.kind() == pm.keyword_argument)
+                .then(|| arg.child_by_field_name("name").map(|name| self.text(name).to_string()))
+                .flatten();
+            self.events.last_mut().unwrap().arg_name = arg_name.clone();
             for input in inputs { self.edge(input, id, "transfer"); }
-            arg_events.push(id);
+            arg_events.push((id, arg_name));
         }
         let call = self.emit(node, "call", Some(callee.clone()), None, None);
         let call_event = self.events.last_mut().unwrap();
@@ -1949,14 +2133,64 @@ impl<'a> FlowExtractor<'a> {
         // linking; ordinary value events keep ``var`` as the root binding.
         call_event.var = Some(callee.clone());
         let first_id = self.events[0].id;
-        for id in &arg_events { self.events[(*id - first_id) as usize].call_id = Some(call); }
+        for (id, _) in &arg_events { self.events[(*id - first_id) as usize].call_id = Some(call); }
         // Callee/argument evaluation is sequenced by control edges. It is not
         // an unconditional value transfer through a known function: resolved
         // calls flow through param_in/return_out instead.
-        let _ = callee_values;
         let result = self.emit(node, "call_result", None, Some(call), None);
-        for &arg in &arg_events { self.edge(arg, result, "call_input"); }
-        self.calls.push(CallRecord { result, callee, args: arg_events });
+        for &(arg, _) in &arg_events { self.edge(arg, result, "call_input"); }
+        // The value a method is called on is an input like any argument:
+        // `data.strip()` is made of `data`.  A plain callee is not.
+        let pm = &self.lang.pattern_matching;
+        let mut receiver = None;
+        let mut receiver_object = None;
+        if let Some(member) = callee_node
+            .filter(|n| !pm.attribute.is_empty() && n.kind() == pm.attribute)
+        {
+            // The callee's values are the read of a whole path (`data.strip`)
+            // or what its object evaluates to (`make()` in `make().strip`).
+            // The member name after a computed object is not a value.
+            let object = member.child_by_field_name(&pm.object_field);
+            let receivers: Vec<u32> = callee_values.iter().copied().filter(|value| {
+                let event = &self.events[(*value - first_id) as usize];
+                let whole = event.start_byte == member.start_byte()
+                    && event.end_byte == member.end_byte();
+                if whole && event.role == "use" { receiver = Some(*value); }
+                whole || object.is_some_and(|object| {
+                    event.start_byte >= object.start_byte() && event.end_byte <= object.end_byte()
+                })
+            }).collect();
+            for receiver in receivers { self.edge(receiver, result, "call_input"); }
+            receiver_object = object.filter(|_| receiver.is_some());
+        }
+        // The read of a named receiver belongs to this call, as an argument
+        // does: a resolved call binds it to the callee's own receiver.
+        if let Some(receiver) = receiver {
+            self.events[(receiver - first_id) as usize].call_id = Some(call);
+        }
+        // A callee may store into an object it is given.  What each named
+        // argument refers to after the call is an occurrence of its own, so
+        // that those stores have somewhere to arrive.
+        let receiver_out = receiver_object.and_then(|object| {
+            let path = if dispatch == Dispatch::OnParent { self.receiver_name.clone()? } else { self.path(object)? };
+            Some(self.emit(object, "arg_out", Some(path), Some(call), None))
+        });
+        let outs: Vec<Option<(u32, Option<String>)>> = args.iter().enumerate().map(|(index, arg)| {
+            let is_kw = !pm.keyword_argument.is_empty() && arg.kind() == pm.keyword_argument;
+            let value = arg.child_by_field_name(&pm.value_field)
+                .filter(|_| is_kw)
+                .unwrap_or(*arg);
+            let path = self.path(value)?;
+            let id = self.emit(value, "arg_out", Some(path), Some(call), Some(index as u32));
+            let arg_name = is_kw
+                .then(|| arg.child_by_field_name("name").map(|name| self.text(name).to_string()))
+                .flatten();
+            self.events.last_mut().unwrap().arg_name = arg_name.clone();
+            Some((id, arg_name))
+        }).collect();
+        self.calls.push(CallRecord {
+            result, callee, args: arg_events, receiver, outs, receiver_out, dispatch, class: None,
+        });
         vec![result]
     }
 
@@ -2122,6 +2356,40 @@ impl<'a> FlowExtractor<'a> {
 
     fn binding(event: &FlowEvent) -> Option<&str> { event.access_path.as_deref().or(event.var.as_deref()) }
     fn is_def(event: &FlowEvent) -> bool { matches!(event.role.as_str(), "def" | "param_in" | "mutation") }
+    /// What an object refers to after a call it was passed to: a definition
+    /// that joins the ones already reaching instead of replacing them.
+    fn is_weak_def(event: &FlowEvent) -> bool { event.role == "arg_out" }
+    /// The object an occurrence denotes: a receiver read `b.value` denotes `b`.
+    fn object_path(event: &FlowEvent) -> Option<&str> {
+        let path = Self::binding(event)?;
+        if event.role == "use" && event.call_id.is_some() {
+            return path_prefixes(path).into_iter().rev().nth(1).map(|end| &path[..end]);
+        }
+        Some(path)
+    }
+
+    fn define(
+        state: &mut std::rc::Rc<HashMap<String, HashSet<u32>>>, event: &FlowEvent,
+        weak: &HashSet<u32>, bound: &HashMap<String, Vec<String>>,
+    ) {
+        let Some(name) = Self::binding(event) else { return };
+        if Self::is_def(event) {
+            let state = std::rc::Rc::make_mut(state);
+            // A new object has none of the stores made into the old one.
+            for below in event.var.as_deref().and_then(|root| bound.get(root)).into_iter().flatten()
+                .filter(|below| is_below(below, name))
+            {
+                state.remove(below.as_str());
+            }
+            state.insert(name.into(), HashSet::from([event.id]));
+        } else if Self::is_weak_def(event) {
+            // One call supersedes the previous one on the same object; the
+            // chain between them carries what the earlier calls stored.
+            let defs = std::rc::Rc::make_mut(state).entry(name.into()).or_default();
+            defs.retain(|def| !weak.contains(def));
+            defs.insert(event.id);
+        }
+    }
 
     fn reaching_edges(&mut self) {
         use std::rc::Rc;
@@ -2134,8 +2402,21 @@ impl<'a> FlowExtractor<'a> {
         // Reaching definitions only observe reads and binding writes. Bypass
         // single-successor evaluations/empty joins in this projection, while
         // retaining every original occurrence in the public control graph.
+        let weak: HashSet<u32> = self.events.iter().filter(|event| Self::is_weak_def(event))
+            .map(|event| event.id).collect();
+        // Every path a function binds below a root (including `arg_out` from
+        // calls on nested objects like `box.inner.store(x)`), to find the
+        // stores made into an object and clear them when the object is rebound.
+        let mut bound: HashMap<String, Vec<String>> = HashMap::new();
+        for event in self.events.iter().filter(|event| Self::is_def(event) || Self::is_weak_def(event)) {
+            if let (Some(root), Some(name)) = (event.var.as_deref(), Self::binding(event)) {
+                if name.len() > root.len() { bound.entry(root.into()).or_default().push(name.into()); }
+            }
+        }
+        for names in bound.values_mut() { names.sort_unstable(); names.dedup(); }
         let transparent: Vec<_> = self.events.iter().enumerate().map(|(i, event)|
-            successors[i].len() == 1 && !Self::is_def(event) && event.role != "use").collect();
+            successors[i].len() == 1 && !Self::is_def(event) && !Self::is_weak_def(event)
+                && !matches!(event.role.as_str(), "use" | "param_out")).collect();
         let mut redirect = vec![None; self.events.len()];
         for start in 0..self.events.len() {
             if redirect[start].is_some() { continue; }
@@ -2227,12 +2508,7 @@ impl<'a> FlowExtractor<'a> {
                     }
                 }
                 incoming[index] = state.clone();
-                for &i in segment {
-                    let event = &self.events[i];
-                    if Self::is_def(event) {
-                        if let Some(name) = Self::binding(event) { Rc::make_mut(&mut state).insert(name.into(), HashSet::from([event.id])); }
-                    }
-                }
+                for &i in segment { Self::define(&mut state, &self.events[i], &weak, &bound); }
                 if !Rc::ptr_eq(&outgoing[index], &state) && outgoing[index] != state {
                     outgoing[index] = state; changed = true;
                 }
@@ -2242,17 +2518,43 @@ impl<'a> FlowExtractor<'a> {
         for (segment, mut state) in segments.iter().zip(incoming) {
             for &i in segment {
                 let event = &self.events[i];
-                if matches!(event.role.as_str(), "use" | "mutation") {
-                    let binding = Self::binding(event);
-                    for name in binding.into_iter().chain(event.var.as_deref().filter(|&name| Some(name) != binding)) {
-                        for &def in state.get(name).into_iter().flatten() {
+                let role = event.role.as_str();
+                if matches!(role, "use" | "mutation") {
+                    // A read sees the definitions of its own path and of every
+                    // object it is read from: `b.inner.raw` sees `b` and `b.inner`.
+                    if let Some(path) = Self::binding(event) {
+                        for end in path_prefixes(path) {
+                            for &def in state.get(&path[..end]).into_iter().flatten() {
+                                additions.push(FlowEdge { from: def, to: event.id, kind: "reaching".into() });
+                            }
+                        }
+                    }
+                } else if matches!(role, "arg_out" | "param_out") {
+                    // What earlier calls stored into the object is still in
+                    // it: after the next call, and when the function is done.
+                    if let Some(path) = Self::binding(event) {
+                        for &def in state.get(path).into_iter().flatten()
+                            .filter(|&&def| weak.contains(&def) && def != event.id)
+                        {
                             additions.push(FlowEdge { from: def, to: event.id, kind: "reaching".into() });
                         }
                     }
                 }
-                if Self::is_def(event) {
-                    if let Some(name) = Self::binding(event) { Rc::make_mut(&mut state).insert(name.into(), HashSet::from([event.id])); }
+                // A store below an object is part of the object: `b.raw = x`
+                // reaches a later `b`, `return b` and the end of a function
+                // that was given `b`.
+                if matches!(role, "use" | "param_out") {
+                    if let (Some(root), Some(object)) = (event.var.as_deref(), Self::object_path(event)) {
+                        for name in bound.get(root).into_iter().flatten()
+                            .filter(|name| is_below(name, object))
+                        {
+                            for &def in state.get(name.as_str()).into_iter().flatten() {
+                                additions.push(FlowEdge { from: def, to: event.id, kind: "store".into() });
+                            }
+                        }
+                    }
                 }
+                Self::define(&mut state, event, &weak, &bound);
             }
         }
         self.edges.extend(additions);
@@ -2312,6 +2614,7 @@ fn extract_scope(
         block_spans: BlockSpans::new(cfg.blocks.iter().enumerate().map(|(order, block)|
             (block.start_byte, block.end_byte, (block.end_byte.saturating_sub(block.start_byte), order), block.id.0)).collect()),
         ordinal: 0, events: Vec::new(), edges: Vec::new(), calls: Vec::new(),
+        receiver_name: None,
     };
     extractor.emit_control(cfg.entry, "function_entry");
     if let Some(function) = function { extractor.parameters(function); }
@@ -2327,6 +2630,26 @@ fn extract_scope(
             extractor.edge(*returned, completion, "transfer");
             completed.push(completion);
         }
+    }
+    // What a parameter's object holds when the function is done, for the
+    // caller that passed it.  Only an object the function stored into, or
+    // handed on to another call, can differ from what came in.
+    let handed_on: HashSet<String> = extractor.events.iter()
+        .filter(|event| event.role == "arg_out"
+            || (event.role == "mutation" && event.access_path != event.var))
+        .filter_map(|event| event.var.clone()).collect();
+    let parameters: Vec<_> = extractor.events.iter()
+        .filter(|event| event.role == "param_in")
+        .filter(|event| event.var.as_ref().is_some_and(|name| handed_on.contains(name)))
+        .map(|event| (event.access_path.clone(), event.arg_index, event.arg_name.clone()))
+        .collect();
+    for (path, arg_index, arg_name) in parameters {
+        extractor.emit_completion(body, "param_out", cfg.exit);
+        let event = extractor.events.last_mut().unwrap();
+        event.var = path.clone();
+        event.access_path = path;
+        event.arg_index = arg_index;
+        event.arg_name = arg_name;
     }
     let exit = extractor.emit_completion(body, "function_exit", cfg.exit);
     for returned in completed { extractor.edge(returned, exit, "transfer"); }
@@ -2371,24 +2694,106 @@ pub fn build_analysis_from_tree(
     let mut scopes = Vec::new();
     flow_scopes(root, &lang.cfg, &mut scopes);
     let cfgs: Vec<_> = scopes.iter().map(|&node| build_cfg(node, bytes, &lang.cfg)).collect();
-    let mut functions: HashMap<String, Vec<(Vec<u32>, Vec<u32>)>> = HashMap::new();
+    struct Callee {
+        params: Vec<(u32, Option<String>)>,
+        receiver: Option<u32>,
+        /// The exit occurrence of each positional parameter, and of the receiver.
+        outs: Vec<Option<u32>>,
+        receiver_out: Option<u32>,
+        returns: Vec<u32>,
+        class: Option<String>,
+    }
+    let mut functions: HashMap<String, Vec<Callee>> = HashMap::new();
+    let mut bases: HashMap<String, Vec<String>> = HashMap::new();
     for (node, cfg) in scopes.into_iter().zip(&cfgs) {
         let Some(body) = node.child_by_field_name(&lang.cfg.body_field) else { continue };
         let name = cfg.func_name.clone();
         let start = node.start_byte();
-        let (e, d, c) = extract_scope(bytes, lang, cfg, name.clone(), start, body, Some(node), &mut next_id);
-        let params = e.iter().filter(|v| v.role == "param_in").map(|v| v.id).collect();
-        let returns = e.iter().filter(|v| v.role == "function_exit").map(|v| v.id).collect();
-        functions.entry(name).or_default().push((params, returns));
+        let (e, d, mut c) = extract_scope(bytes, lang, cfg, name.clone(), start, body, Some(node), &mut next_id);
+        let class = enclosing_class(node, lang, bytes).map(|(class, parents)| {
+            bases.entry(class.clone()).or_insert(parents);
+            class
+        });
+        for call in &mut c { call.class = class.clone(); }
+        let exit_of = |index: Option<u32>| e.iter()
+            .find(|v| v.role == "param_out" && v.arg_index == index).map(|v| v.id);
+        let positional: Vec<_> = e.iter().filter(|v| v.role == "param_in" && v.arg_index.is_some()).collect();
+        functions.entry(name).or_default().push(Callee {
+            params: positional.iter().map(|v| (v.id, v.arg_name.clone())).collect(),
+            receiver: e.iter().find(|v| v.role == "param_in" && v.arg_index.is_none()).map(|v| v.id),
+            outs: positional.iter().map(|v| exit_of(v.arg_index)).collect(),
+            receiver_out: exit_of(None),
+            returns: e.iter().filter(|v| v.role == "function_exit").map(|v| v.id).collect(),
+            class,
+        });
         events.extend(e); edges.extend(d); calls.extend(c);
     }
+    // A call on the receiver is a method of the caller's class or, failing
+    // that, of its bases in this file; a call on the parent starts at the
+    // bases.  Neither falls back to a function that merely shares the name.
+    let method_of = |call: &CallRecord, named: &'_ Vec<Callee>| -> Option<usize> {
+        let class = call.class.as_deref()?;
+        let mut pending: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
+        if call.dispatch == Dispatch::OnParent {
+            pending.extend(bases.get(class).into_iter().flatten().map(String::as_str));
+        } else {
+            pending.push_back(class);
+        }
+        let mut seen = HashSet::new();
+        while let Some(current) = pending.pop_front() {
+            if !seen.insert(current) || seen.len() > 64 { continue; }
+            let mut owned = named.iter().enumerate()
+                .filter(|(_, callee)| callee.class.as_deref() == Some(current));
+            if let Some((index, _)) = owned.next() {
+                return owned.next().is_none().then_some(index);
+            }
+            pending.extend(bases.get(current).into_iter().flatten().map(String::as_str));
+        }
+        None
+    };
+    let match_param = |index: usize, arg_name: &Option<String>, params: &[(u32, Option<String>)]| -> Option<usize> {
+        if let Some(name) = arg_name {
+            params.iter().position(|(_, p_name)| p_name.as_deref() == Some(name.as_str()))
+        } else {
+            (index < params.len()).then_some(index)
+        }
+    };
     for call in calls {
         let name = call.callee.rsplit('.').next().unwrap_or(&call.callee);
-        let Some(target) = functions.get(name).filter(|v| v.len() == 1).map(|v| &v[0]) else { continue };
-        for (&arg, &param) in call.args.iter().zip(&target.0) {
-            edges.push(FlowEdge { from: arg, to: param, kind: "call_arg".into() });
+        let Some(named) = functions.get(name) else { continue };
+        let target = if call.dispatch == Dispatch::Plain {
+            let mut matching = named.iter().filter(|callee| {
+                let is_method = callee.class.is_some() || callee.receiver.is_some();
+                call.receiver.is_some() == is_method
+            });
+            matching.next().filter(|_| matching.next().is_none())
+        } else {
+            method_of(&call, named).map(|index| &named[index])
+        };
+        let Some(target) = target else { continue };
+        for (index, (arg, arg_name)) in call.args.iter().enumerate() {
+            if let Some(param_idx) = match_param(index, arg_name, &target.params) {
+                edges.push(FlowEdge { from: *arg, to: target.params[param_idx].0, kind: "call_arg".into() });
+            }
         }
-        for &ret in &target.1 {
+        if let (Some(receiver), Some(param)) = (call.receiver, target.receiver) {
+            edges.push(FlowEdge { from: receiver, to: param, kind: "call_arg".into() });
+        }
+        // What the callee stored into an object it was given comes back to
+        // the caller's name for that object.
+        for (index, out) in call.outs.iter().enumerate() {
+            if let Some((out_id, arg_name)) = out {
+                if let Some(param_idx) = match_param(index, arg_name, &target.params) {
+                    if let Some(exit_id) = target.outs[param_idx] {
+                        edges.push(FlowEdge { from: exit_id, to: *out_id, kind: "arg_return".into() });
+                    }
+                }
+            }
+        }
+        if let (Some(out), Some(exit)) = (call.receiver_out, target.receiver_out) {
+            edges.push(FlowEdge { from: exit, to: out, kind: "arg_return".into() });
+        }
+        for &ret in &target.returns {
             edges.push(FlowEdge { from: ret, to: call.result, kind: "call_return".into() });
         }
     }
@@ -2478,6 +2883,105 @@ mod tests {
     }
 
     #[test]
+    fn a_method_call_takes_its_receiver_as_an_input() {
+        let source = "def f(data):\n    a = data.strip()\n    b = make().strip()\n    c = helper(data)\n";
+        let facts = build_flow_facts(source, "py");
+        let text = |id: u32| facts.events.iter().find(|e| e.id == id).map(|e| e.text.clone()).unwrap();
+        let inputs = |result: &str| -> Vec<String> {
+            let result = facts.events.iter()
+                .find(|e| e.role == "call_result" && e.text == result).unwrap();
+            let mut names: Vec<String> = facts.edges.iter()
+                .filter(|e| e.to == result.id && e.kind == "call_input")
+                .map(|e| text(e.from)).collect();
+            names.sort();
+            names
+        };
+        assert_eq!(inputs("data.strip()"), ["data.strip"]);
+        // A receiver that is itself a call: its result is the input.
+        assert_eq!(inputs("make().strip()"), ["make()"]);
+        // A plain function is not an input of its own call.
+        assert_eq!(inputs("helper(data)"), ["data"]);
+        assert!(inputs("make()").is_empty());
+    }
+
+    #[test]
+    fn path_prefixes_end_at_each_object_a_path_is_read_from() {
+        let ends = |path: &str| path_prefixes(path).into_iter().map(|end| path[..end].to_string()).collect::<Vec<_>>();
+        assert_eq!(ends("b"), ["b"]);
+        assert_eq!(ends("b.inner.raw"), ["b", "b.inner", "b.inner.raw"]);
+        // A dot or bracket inside a subscript is part of the key.
+        assert_eq!(ends("d[\"a.b\"].x"), ["d", "d[\"a.b\"]", "d[\"a.b\"].x"]);
+        assert_eq!(ends("d[m[0]][k]"), ["d", "d[m[0]]", "d[m[0]][k]"]);
+    }
+
+    #[test]
+    fn an_instance_attribute_keeps_the_receiver_as_its_root() {
+        let source = "class Box:\n    def store(self, raw):\n        self.raw = raw\n        return self.raw\n";
+        let facts = build_flow_facts(source, "py");
+        let events: Vec<_> = facts.events.iter().filter(|e| e.func_name == "store").collect();
+        let event = |role: &str, path: &str| events.iter().copied()
+            .find(|e| e.role == role && e.access_path.as_deref() == Some(path))
+            .unwrap_or_else(|| panic!("no {role} of {path}"));
+        // `self.raw` is not the local `raw`.
+        event("mutation", "self.raw");
+        event("use", "self.raw");
+        // The receiver is bound by the call, so it takes no argument position.
+        assert_eq!(event("param_in", "self").arg_index, None);
+        assert_eq!(event("param_in", "raw").arg_index, Some(0));
+        // The store is still in the object when the method is done.
+        let (stored, exit) = (event("mutation", "self.raw").id, event("param_out", "self").id);
+        assert!(facts.edges.iter().any(|e| e.from == stored && e.to == exit && e.kind == "store"));
+    }
+
+    #[test]
+    fn a_store_reaches_later_reads_of_the_object_until_it_is_replaced() {
+        let source = "def f(t):\n    b.raw = t\n    b.raw = 1\n    g(b)\n    b.other = t\n    return b\n";
+        let facts = build_flow_facts(source, "py");
+        let text = |id: u32| facts.events.iter().find(|e| e.id == id).unwrap();
+        let stores_into = |role: &str| -> Vec<String> {
+            let mut rows: Vec<String> = facts.edges.iter().filter(|e| e.kind == "store")
+                .filter(|e| text(e.to).role == role && text(e.to).access_path.as_deref() == Some("b"))
+                .map(|e| format!("{}@{}", text(e.from).access_path.clone().unwrap(), text(e.from).start_line + 1))
+                .collect();
+            rows.sort();
+            rows
+        };
+        // `g(b)` sees only the second store; `return b` sees both attributes.
+        assert_eq!(stores_into("use"), ["b.other@5", "b.raw@3", "b.raw@3"]);
+    }
+
+    #[test]
+    fn a_call_leaves_an_occurrence_for_each_object_it_was_given() {
+        let source = "class Box:\n    def store(self, item):\n        self.raw = item\n\ndef fill(box, item):\n    box.raw = item\n\ndef f(b, t):\n    b.store(t)\n    fill(b, 1)\n    return b.raw\n";
+        let facts = build_flow_facts(source, "py");
+        let event = |id: u32| facts.events.iter().find(|e| e.id == id).unwrap();
+        let describe = |id: u32| format!("{}:{}:{}", event(id).func_name, event(id).role,
+            event(id).access_path.clone().unwrap_or_default());
+        let edges = |kind: &str| -> Vec<String> {
+            let mut rows: Vec<String> = facts.edges.iter().filter(|e| e.kind == kind)
+                .map(|e| format!("{} -> {}", describe(e.from), describe(e.to))).collect();
+            rows.sort();
+            rows
+        };
+        // What each callee stored comes back to the caller's `b`.
+        assert_eq!(edges("arg_return"), [
+            "fill:param_out:box -> f:arg_out:b",
+            "store:param_out:self -> f:arg_out:b",
+        ]);
+        // The value a method is called on is bound to the callee's receiver.
+        assert!(edges("call_arg").contains(&"f:use:b.store -> store:param_in:self".to_string()));
+        // Each call supersedes the one before; the read sees the latest.
+        let outs: Vec<u32> = facts.events.iter()
+            .filter(|e| e.role == "arg_out" && e.access_path.as_deref() == Some("b")).map(|e| e.id).collect();
+        assert_eq!(outs.len(), 2);
+        let read = facts.events.iter().find(|e| e.role == "use" && e.access_path.as_deref() == Some("b.raw")).unwrap().id;
+        let reaching = |to: u32| -> Vec<u32> { facts.edges.iter()
+            .filter(|e| e.kind == "reaching" && e.to == to && outs.contains(&e.from)).map(|e| e.from).collect() };
+        assert_eq!(reaching(outs[1]), [outs[0]]);
+        assert_eq!(reaching(read), [outs[1]]);
+    }
+
+    #[test]
     fn resolved_calls_do_not_implicitly_copy_arguments_to_results() {
         let source = "def safe(value):\n    return 0\ndef f():\n    return safe(source())\n";
         let facts = build_flow_facts(source, "py");
@@ -2501,5 +3005,50 @@ mod tests {
         assert!(facts.events.iter().any(|e| {
             e.role == "call_arg" && e.arg_name.as_deref() == Some("value")
         }));
+    }
+
+    #[test]
+    fn same_file_keyword_arguments_link_by_name_not_position() {
+        let source = "def f(clean, raw):\n    return raw\ndef g(t):\n    return f(raw=t, clean=1)\n";
+        let facts = build_flow_facts(source, "py");
+        let event = |id: u32| facts.events.iter().find(|e| e.id == id).unwrap();
+        let links: Vec<(String, String)> = facts.edges.iter()
+            .filter(|e| e.kind == "call_arg")
+            .map(|e| (
+                event(e.from).arg_name.clone().unwrap_or_default(),
+                event(e.to).arg_name.clone().unwrap_or_default(),
+            ))
+            .collect();
+        assert_eq!(links, vec![
+            ("raw".to_string(), "raw".to_string()),
+            ("clean".to_string(), "clean".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn typescript_implicit_receiver_ignores_comments_and_strings_but_sees_super() {
+        let source = "\
+class Base {
+    store(x: string): void { this.raw = x; }
+}
+class Child extends Base {
+    store(x: string): void { super.store(x); }
+}
+function plain(): string {
+    // do this
+    return \"this\";
+}
+";
+        let facts = build_flow_facts(source, "ts");
+        let has_this_param = |func: &str| facts.events.iter().any(|e| {
+            e.func_name == func && e.role == "param_in" && e.access_path.as_deref() == Some("this")
+        });
+        // Both Base.store (uses `this`) and Child.store (uses `super`) get `this` param_in.
+        let store_this_count = facts.events.iter().filter(|e| {
+            e.func_name == "store" && e.role == "param_in" && e.access_path.as_deref() == Some("this")
+        }).count();
+        assert_eq!(store_this_count, 2);
+        // `plain` only mentions `this` in a comment and string literal.
+        assert!(!has_this_param("plain"));
     }
 }

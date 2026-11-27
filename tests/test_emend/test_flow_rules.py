@@ -511,3 +511,179 @@ def test_flow_multiline_chain(tmp_path, sql_rule):
     assert w is not None
     assert w.source_line == 2
     assert w.sink_line == 6
+
+
+# ---------------------------------------------------------------------------
+# A rules document in the wrong shape is an error, not an empty rule set
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("document, complaint", [
+    # Rules written as a list of entries, the shape of many other linters.
+    ({"rules": [{"id": "no-eval", "find": "eval($X)", "message": "eval"}]},
+     r"'rules' must map each rule name to its settings"),
+    ({"rules": []}, r"'rules' must map each rule name to its settings"),
+    ({"rules": ""}, r"'rules' must map each rule name to its settings"),
+    ({"rules": "eval($X)"}, r"'rules' must map each rule name to its settings"),
+    # A rule name with nothing under it.
+    ({"rules": {"no-eval": None}}, r"rule 'no-eval' must be a mapping"),
+    ({"rules": {"no-eval": "eval($X)"}}, r"rule 'no-eval' must be a mapping"),
+    # Policies written as a mapping instead of a list, or holding a non-mapping.
+    ({"policies": {"my-policy": {"checks": []}}}, r"'policies' must be a list"),
+    ({"policies": ["not-a-mapping"]}, r"policy entry 0 must be a mapping"),
+])
+def test_misshapen_rules_are_rejected(document, complaint):
+    """Each of these used to load as no rules at all, so a lint run printed
+    nothing and exited 0."""
+    from emend.checks.rules_config import compile_rules_document
+
+    with pytest.raises(ValueError, match=complaint):
+        compile_rules_document(document)
+
+
+def test_lint_reports_a_misshapen_rules_file(tmp_path):
+    from typer.testing import CliRunner
+
+    from emend.cli import app
+
+    (tmp_path / "app.py").write_text("eval(input())\n")
+    rules = tmp_path / "rules.yaml"
+    rules.write_text("rules:\n  - id: no-eval\n    find: eval($X)\n    message: eval\n")
+
+    result = CliRunner().invoke(app, ["lint", str(tmp_path), "--config", str(rules)])
+
+    assert result.exit_code != 0, result.output
+    assert "'rules' must map each rule name to its settings" in result.output
+    assert "not hold a list" in result.output
+
+
+def test_empty_rules_section_is_still_no_rules():
+    from emend.checks.rules_config import compile_rules_document
+
+    for document in ({}, {"rules": None}, {"rules": {}}):
+        compiled = compile_rules_document(document)
+        assert not compiled.pattern_rules and not compiled.flow_rules
+
+
+# ---------------------------------------------------------------------------
+# A sink or sanitizer whose metavariable is the receiver of a method call
+# ---------------------------------------------------------------------------
+
+
+def _flow_lines(tmp_path, source, *, flows_to, not_through=None, flows_from="input($X)"):
+    path = tmp_path / "app.py"
+    path.write_text(source)
+    rule = LintRule(
+        name="flow", find="", message="tainted", flows_from=flows_from,
+        flows_to=flows_to, not_through=not_through,
+    )
+    return sorted(violation.line for violation in run_lint([rule], [str(path)]))
+
+
+def test_receiver_sink_fires_on_a_tainted_receiver(tmp_path):
+    """``$P.strip()`` names the value the method is called on.  A use of a
+    variable as a receiver is recorded for the whole ``data.strip``, so the
+    sink found no occurrence inside ``data`` and was never placed."""
+    source = (
+        "def handler():\n"
+        "    data = input('x')\n"
+        "    clean = 'constant'\n"
+        "    data.strip()\n"
+        "    clean.strip()\n"
+        "    eval(data)\n"
+    )
+    assert _flow_lines(tmp_path, source, flows_to="$P.strip()") == [4]
+    # An argument sink is placed as before.
+    assert _flow_lines(tmp_path, source, flows_to="eval($CODE)") == [6]
+
+
+def test_subscript_base_sink_fires_on_a_tainted_container(tmp_path):
+    source = (
+        "def handler():\n"
+        "    data = input('x')\n"
+        "    clean = 'constant'\n"
+        "    _ = data[0]\n"
+        "    _ = clean[0]\n"
+    )
+    assert _flow_lines(tmp_path, source, flows_to="$P[0]") == [4]
+
+
+def test_receiver_sink_fires_through_an_attribute_of_the_tainted_value(tmp_path):
+    source = (
+        "def handler():\n"
+        "    payload = input('x')\n"
+        "    payload.body.decode()\n"
+        "    other.body.decode()\n"
+    )
+    assert _flow_lines(tmp_path, source, flows_to="$P.decode()") == [3]
+
+
+def test_taint_follows_a_method_call_on_the_tainted_value(tmp_path):
+    """``data.strip()`` is made of ``data``.  The receiver was not an input of
+    its call, so any method call laundered the value."""
+    source = (
+        "def handler():\n"
+        "    data = input('x')\n"
+        "    eval(data.strip())\n"
+        "    trimmed = data.strip().lower()\n"
+        "    eval(trimmed)\n"
+        "    eval(str(data).encode())\n"
+        "    eval('constant'.upper())\n"
+        "    eval(other.strip())\n"
+        "    eval(helpers.clean('constant'))\n"
+    )
+    assert _flow_lines(tmp_path, source, flows_to="eval($CODE)") == [3, 5, 6]
+
+
+def test_receiver_sanitizer_works_like_an_argument_sanitizer(tmp_path):
+    """``escape(data)`` and ``data.escaped()`` both leave ``data`` clean."""
+    by_argument = (
+        "def handler():\n"
+        "    data = input('x')\n"
+        "    safe = escape(data)\n"
+        "    eval(safe)\n"
+        "    eval(data)\n"
+    )
+    by_receiver = by_argument.replace("escape(data)", "data.escaped()")
+    for source in (by_argument, by_receiver):
+        assert _flow_lines(tmp_path, source, flows_to="eval($CODE)") == [4, 5]
+    assert _flow_lines(
+        tmp_path, by_argument, flows_to="eval($CODE)", not_through=["escape($X)"],
+    ) == []
+    assert _flow_lines(
+        tmp_path, by_receiver, flows_to="eval($CODE)", not_through=["$P.escaped()"],
+    ) == []
+    # A sanitizer called on something else leaves the value tainted.
+    unrelated = by_receiver.replace("data.escaped()", "other.escaped()")
+    assert _flow_lines(
+        tmp_path, unrelated, flows_to="eval($CODE)", not_through=["$P.escaped()"],
+    ) == [5]
+
+
+def test_receiver_return_sanitizer_cleans_only_the_returned_copy(tmp_path):
+    """``{pattern: "$P.escaped()", effect: returns}`` cleans what the call
+    returns and leaves the value it was called on tainted, as ``escape($X)``
+    does for its argument."""
+    from emend.trace import (
+        TraceConfig, TraceSanitizer, TraceSink, TraceSource, run_trace_analysis,
+    )
+
+    by_argument = (
+        "def handler():\n"
+        "    data = input('x')\n"
+        "    safe = escape(data)\n"
+        "    eval(safe)\n"
+        "    eval(data)\n"
+    )
+    by_receiver = by_argument.replace("escape(data)", "data.escaped()")
+    path = tmp_path / "app.py"
+    for source, pattern in ((by_argument, "escape($X)"), (by_receiver, "$P.escaped()")):
+        path.write_text(source)
+        config = TraceConfig(
+            labels=["value"],
+            sources=[TraceSource(pattern="input($X)", label="value")],
+            sinks=[TraceSink(pattern="eval($CODE)", label="value", message="tainted")],
+            sanitizers=[TraceSanitizer(pattern, "value", effect="returns")],
+        )
+        found = run_trace_analysis([str(path)], config)
+        assert sorted({violation.line for violation in found}) == [5], pattern

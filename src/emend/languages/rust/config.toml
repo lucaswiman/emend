@@ -282,6 +282,9 @@ body_field = "body"
 expression_statement_node = "expression_statement"
 identifier_node = "identifier"
 skip_identifiers = ["self", "Self", "true", "false"]
+# The value a method is called on.  Flow facts keep it as the root of an
+# access path (`self.raw`) and bind it at a resolved call.
+receiver_names = ["self"]
 destructure_nodes = ["tuple_pattern", "struct_pattern", "slice_pattern"]
 attribute_access_nodes = ["field_expression", "index_expression"]
 

@@ -124,3 +124,129 @@ def test_container_mutation_linking_scans_events_a_constant_number_of_times(
     assert tables[0].scans <= 4, (
         f"{tables[0].scans} full event scans for {CALL_SITES + 1} mutations"
     )
+
+
+def test_control_path_walk_covers_only_functions_the_value_reaches(tmp_path, monkeypatch):
+    """A project's functions are mostly one call-connected component.  The
+    control-path walk keeps a liveness set per occurrence, so walking the
+    whole component for one source is quadratic in the size of the project."""
+    from emend.checks.flow import FlowSanitizer
+
+    chain = 60
+    source = "".join(
+        f"def step_{index}():\n    return step_{index + 1}()\n\n" for index in range(chain)
+    ) + (
+        f"def step_{chain}():\n    return 0\n\n"
+        "def handler():\n"
+        "    clean(0)\n"
+        "    step_0()\n"
+        "    value = source()\n"
+        "    sink(value)\n"
+    )
+    path = tmp_path / "app.py"
+    path.write_text(source)
+
+    walked: list[int] = []
+    build = flow._component_value_path_walker
+
+    def counting(sanitizers, scopes, returns, values, control, events, *rest):
+        walked.append(len({event.func_id for event in events.values()}))
+        return build(sanitizers, scopes, returns, values, control, events, *rest)
+
+    monkeypatch.setattr(flow, "_component_value_path_walker", counting)
+    config = CompiledFlowConfig(
+        sources=[FlowSource("source()", "value")],
+        sinks=[FlowSink("sink($X)", "value", "unsafe")],
+        # A sanitizer that is called somewhere makes the rule one that is
+        # checked along control paths.
+        sanitizers=[FlowSanitizer("clean($X)", "value")],
+    )
+    found = evaluate_flow_config(
+        config, [str(path)], interprocedural=True, project_path=str(tmp_path))
+
+    assert [row.line for row in found] == [chain * 3 + 8]
+    # The value never leaves ``handler``; the chain it calls is not walked.
+    assert walked == [1]
+
+
+def test_a_call_into_an_unwalked_function_that_never_returns_ends_the_path(tmp_path):
+    """The function that always raises is not walked, because no tainted
+    value reaches it, but control still does not come back from it."""
+    from emend.checks.flow import FlowSanitizer
+
+    path = tmp_path / "app.py"
+    path.write_text(
+        "def fail():\n"
+        "    raise ValueError()\n"
+        "\n"
+        "def fail_through():\n"
+        "    fail()\n"
+        "\n"
+        "def returns():\n"
+        "    return 0\n"
+        "\n"
+        "def unreachable():\n"
+        "    clean(0)\n"
+        "    value = source()\n"
+        "    fail_through()\n"
+        "    sink(value)\n"
+        "\n"
+        "def reachable():\n"
+        "    value = source()\n"
+        "    returns()\n"
+        "    sink(value)\n"
+    )
+    config = CompiledFlowConfig(
+        sources=[FlowSource("source()", "value")],
+        sinks=[FlowSink("sink($X)", "value", "unsafe")],
+        sanitizers=[FlowSanitizer("clean($X)", "value")],
+    )
+    found = evaluate_flow_config(
+        config, [str(path)], interprocedural=True, project_path=str(tmp_path))
+    assert [row.line for row in found] == [19]
+
+
+def test_returns_normally_memoizes_diamond_call_graphs(tmp_path, monkeypatch):
+    """A deep diamond of unwalked functions must be analyzed linearly, not
+    re-walked along every path through the DAG."""
+    from emend.checks.flow import FlowSanitizer
+
+    depth = 18
+    lines = ["def leaf():\n    raise ValueError()\n\n"]
+    for level in range(depth):
+        prev = "leaf" if level == 0 else f"d_{level - 1}"
+        lines.append(
+            f"def d_{level}():\n"
+            f"    if flag:\n"
+            f"        {prev}()\n"
+            f"    {prev}()\n\n"
+        )
+    lines.append(
+        "def handler():\n"
+        "    clean(0)\n"
+        "    value = source()\n"
+        f"    d_{depth - 1}()\n"
+        "    sink(value)\n"
+    )
+    path = tmp_path / "diamond.py"
+    path.write_text("".join(lines))
+
+    calls = 0
+    orig = flow._CallComponents._returns_normally
+
+    def counting(self, function, control_adjacency, active):
+        nonlocal calls
+        calls += 1
+        return orig(self, function, control_adjacency, active)
+
+    monkeypatch.setattr(flow._CallComponents, "_returns_normally", counting)
+    config = CompiledFlowConfig(
+        sources=[FlowSource("source()", "value")],
+        sinks=[FlowSink("sink($X)", "value", "unsafe")],
+        sanitizers=[FlowSanitizer("clean($X)", "value")],
+    )
+    found = evaluate_flow_config(
+        config, [str(path)], interprocedural=True, project_path=str(tmp_path))
+    assert found == []
+    # Without memoization on recursive calls, a depth-18 diamond visits 2^19 nodes.
+    assert calls < depth * 4
