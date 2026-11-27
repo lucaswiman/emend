@@ -488,3 +488,52 @@ def test_reexports_are_named_under_the_module_root_not_the_checkout(tmp_path):
     assert ("src/view.ts", 2, 16, "definition") in show
     assert [location[0] for location in helpers] == ["src/index.ts"]
     assert leaked == []
+
+
+def test_symbol_in_an_index_file_is_found_through_every_import_spelling(tmp_path):
+    """``./widgets``, ``./widgets/index`` and ``../widgets`` all import from
+    ``widgets/index.ts``.  The fact snapshot names that module after the file
+    and the scope resolver after the directory; references (facts) and rename
+    (resolver) must each still reach every import."""
+    from emend.analysis_store import AnalysisStore
+    from emend.component_selector import parse_extended_selector
+    from emend.transform import rename_symbol
+
+    project = tmp_path / "project"
+    (project / "src" / "widgets").mkdir(parents=True)
+    (project / "src" / "pages").mkdir()
+    (project / "pyproject.toml").write_text("[project]\nname = 'index-files'\n")
+    index = project / "src" / "widgets" / "index.ts"
+    index.write_text("export function make(): void {}\n")
+    (project / "src" / "app.ts").write_text(
+        "import { make } from './widgets';\n"
+        "import { make as again } from './widgets/index';\n"
+        "export function app(): void { make(); again(); }\n"
+    )
+    (project / "src" / "pages" / "home.ts").write_text(
+        "import { make } from '../widgets';\nexport function page(): void { make(); }\n"
+    )
+    store = AnalysisStore.open(project)
+    try:
+        graph = store.query_facts()
+        (name,) = graph.qualified_names_of("make")
+        locations = graph.reference_locations(name)
+    finally:
+        store.close()
+    assert sorted({(path, kind) for path, _line, _col, kind in locations}) == [
+        ("src/app.ts", "call"), ("src/app.ts", "import"),
+        ("src/pages/home.ts", "call"), ("src/pages/home.ts", "import"),
+        ("src/widgets/index.ts", "definition"),
+    ]
+
+    diffs = rename_symbol(
+        parse_extended_selector(f"{index}::make"), "build", project_path=str(project),
+    )
+    changed = "\n".join(diffs.values())
+    for expected in (
+        "+import { build } from './widgets';",
+        "+import { build as again } from './widgets/index';",
+        "+import { build } from '../widgets';",
+        "+export function build(): void {}",
+    ):
+        assert expected in changed
