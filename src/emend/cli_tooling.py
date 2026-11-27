@@ -76,7 +76,7 @@ def index_cmd(
         print(f"  Indexed at:      {info.get('indexed_at', 'unknown')}", file=sys.stderr)
         print(f"  Files:           {info.get('file_manifest_count', 0)}", file=sys.stderr)
         print(f"  Symbols:         {info.get('symbol_index_count', 0)}", file=sys.stderr)
-        print(f"  References:      {info.get('reference_index_count', 0)}", file=sys.stderr)
+        print(f"  References:      {info.get('reference_count', 0)}", file=sys.stderr)
         head_str = " (HEAD changed)" if info.get("git_head_changed") else ""
         stale = info.get("changed_files", 0) + info.get("new_files", 0)
         if stale:
@@ -144,7 +144,6 @@ def index_cmd(
     new_indexed = stats["indexed"]
     new_qn = stats["qn_cached"]
     new_sym = stats.get("sym_cached", 0)
-    new_ref = stats.get("ref_cached", 0)
     new_types = int(stats.get("type_cached", 0))
     engine_name = str(stats.get("type_engine", ""))
 
@@ -157,8 +156,6 @@ def index_cmd(
         detail = indexed_qn
     if new_sym:
         detail += f", symbols: {new_sym}"
-    if new_ref:
-        detail += f", refs: {new_ref}"
     if new_types:
         type_detail = f"types: {new_types}"
         if engine_name:

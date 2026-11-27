@@ -65,7 +65,9 @@ def test_source_root_change_refreshes_editor_projection_without_content_edits(tm
             assert _ensure_index_fresh(str(tmp_path))
             assert batches.call_count == count
     assert batches.call_count == 2
-    symbols.assert_not_called()
+    # The cold build took its symbols from the fact pass, so the first refresh
+    # parses the file for them; the second finds that projection stored.
+    assert symbols.call_count == 1
 
 
 @pytest.mark.parametrize("failure", [None, "extraction", "writer"])
@@ -321,19 +323,16 @@ def test_cache_migration_preserves_editor_rows_and_freshness(tmp_path):
             "SELECT s.name FROM symbol_fts f JOIN symbol_index s ON f.rowid = s.rowid "
             "WHERE symbol_fts MATCH 'hello'"
         ).fetchall() == [("hello",)]
-        assert conn.execute("SELECT * FROM reference_index").fetchall() == [
-            ("a.hello", "b.py", 3, 4, "call")
-        ]
         assert conn.execute("SELECT * FROM venv_files").fetchall() == [
             ("lib.py", 1, 2, 3, 4, 5)
         ]
-        conn.execute("INSERT INTO reference_index VALUES ('b.world', 'a.py', 5, 6, 'read')")
         conn.execute("INSERT INTO venv_files VALUES ('other.py', 6, 7, 8, 9, 10)")
         # Reduced-schema writes must work on upgraded caches too.
         conn.execute("INSERT INTO symbol_index (file_path, name) VALUES ('b.py', 'world')")
         assert conn.execute("SELECT rowid FROM symbol_index WHERE name='world'").fetchone() == (43,)
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert not tables & {"import_graph", "dsl_symbols", "dsl_links"}
+        # References are read from the fact graph: the old table is dropped.
+        assert not tables & {"import_graph", "dsl_symbols", "dsl_links", "reference_index"}
 
 
 def test_cache_migration_copy_failure_preserves_rows_and_outer_transaction(tmp_path):
@@ -389,7 +388,7 @@ class TestIndexBatchCacheHit:
                 [(str(tmp_path / "a.py"), SOURCE)])
         assert _index_batch(args)[:4] == (1, 1, 0, 1)
         assert _db_row_count(db_path, "qn_index") == 1
-        assert _index_batch(args) == (0, 0, 1, 0, 0)
+        assert _index_batch(args) == (0, 0, 1, 0)
         assert _db_row_count(db_path, "qn_index") == 1
         with sqlite3.connect(db_path) as conn:
             content_hash = hashlib.md5(SOURCE.encode(), usedforsecurity=False).digest()
@@ -693,7 +692,7 @@ class TestErrorFileCaching:
 
 
 # ---------------------------------------------------------------------------
-# New index tables: symbol_index, import_graph, reference_index
+# Index tables: symbol_index and the import query
 # ---------------------------------------------------------------------------
 
 
@@ -832,52 +831,6 @@ def test_import_query_uses_canonical_facts(tmp_path):
     warm_caches(str(project), type_engine="none")
     assert query_import_graph(str(project), "os") == []
     assert query_import_graph(str(project), "json") == [str(path)]
-
-
-class TestReferenceIndex:
-    """Tests for the reference_index table."""
-
-    def test_reference_index_populated(self, tmp_path):
-        """Indexing populates the reference_index with QN references."""
-        from emend.transform import _index_batch
-
-        db_path = tmp_path / "parse.db"
-        source = (
-            "def helper(): return 1\n"
-            "\n"
-            "def main():\n"
-            "    x = helper()\n"
-            "    return x\n"
-        )
-        batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), str(tmp_path), batch))
-
-        count = _db_row_count(db_path, "reference_index")
-        # Should have references for helper, main, x, etc.
-        assert count > 0
-
-    def test_reference_index_has_call_kind(self, tmp_path):
-        """Reference index records call sites with ref_kind='call'."""
-        from emend.transform import _index_batch
-
-        db_path = tmp_path / "parse.db"
-        source = (
-            "def process(): return 1\n"
-            "\n"
-            "result = process()\n"
-        )
-        batch = [(str(tmp_path / "mod.py"), source)]
-        _index_batch((str(db_path), str(tmp_path), batch))
-
-        conn = sqlite3.connect(str(db_path))
-        calls = conn.execute(
-            "SELECT target_qn, line, ref_kind FROM reference_index "
-            "WHERE ref_kind = 'call'"
-        ).fetchall()
-        conn.close()
-
-        # The call to process() should be recorded
-        assert len(calls) >= 1
 
 
 class TestFileManifest:
@@ -1081,3 +1034,421 @@ def test_cache_initializer_drops_qualified_name_rows_in_the_old_row_format(tmp_p
         columns = [row[1] for row in conn.execute("PRAGMA table_info(qn_index)")]
         assert columns == ["file_path", "hash", "names"]
         assert conn.execute("SELECT count(*) FROM qn_index").fetchone() == (0,)
+
+
+class TestCacheFootprintAfterIndexing:
+    """An index build gives back the disk space it no longer needs."""
+
+    def test_index_leaves_an_empty_write_ahead_log(self, tmp_path):
+        """SQLite keeps the log at its largest size while any connection is
+        open, so a build empties it instead of leaving megabytes behind."""
+        from emend.transform import warm_caches
+
+        proj = make_project_dir(tmp_path)
+        (proj / "a.py").write_text(SOURCE)
+        warm_caches(str(proj), type_engine=None)
+
+        cache = proj / ".emend" / "cache"
+        assert (cache / "parse.db").stat().st_size > 0
+        for name in ("parse.db-wal", "analysis-artifacts.db-wal"):
+            log = cache / name
+            assert not log.exists() or log.stat().st_size == 0, name
+
+    def test_index_reclaims_the_space_of_a_dropped_table(self, tmp_path):
+        """Dropping the old reference table frees its pages inside the file;
+        the build that follows an upgrade returns them to the file system."""
+        from emend.transform import warm_caches
+
+        proj = make_project_dir(tmp_path)
+        (proj / "a.py").write_text(SOURCE)
+        cache = proj / ".emend" / "cache"
+        cache.mkdir()
+        db_path = cache / "parse.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "CREATE TABLE reference_index (target_qn TEXT NOT NULL, "
+                "file_path TEXT NOT NULL, line INTEGER NOT NULL, "
+                "col INTEGER NOT NULL, ref_kind TEXT NOT NULL)"
+            )
+            conn.executemany(
+                "INSERT INTO reference_index VALUES (?, ?, ?, 0, 'read')",
+                ((f"pkg.module.name_{n}", "/a/long/path/to/some/file.py", n)
+                 for n in range(100_000)),
+            )
+        assert db_path.stat().st_size > 4_000_000
+
+        warm_caches(str(proj), type_engine=None)
+
+        assert db_path.stat().st_size < 500_000
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute("SELECT name FROM symbol_index").fetchall() == [("hello",)]
+
+    def test_compaction_leaves_a_busy_database_alone(self, tmp_path):
+        """Another connection in the middle of a read keeps its snapshot."""
+        from emend.transform.cache import compact_cache_database
+
+        db_path = tmp_path / "parse.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE t (v)")
+            conn.executemany("INSERT INTO t VALUES (?)", ((n,) for n in range(1000)))
+        reader = sqlite3.connect(db_path)
+        try:
+            cursor = reader.execute("SELECT v FROM t")
+            assert cursor.fetchone() == (0,)
+            compact_cache_database(db_path)
+            assert len(cursor.fetchall()) == 999
+        finally:
+            reader.close()
+
+    def test_compaction_ignores_a_missing_database(self, tmp_path):
+        from emend.transform.cache import compact_cache_database
+
+        compact_cache_database(tmp_path / "absent.db")
+        assert not (tmp_path / "absent.db").exists()
+
+
+# ---------------------------------------------------------------------------
+# Symbol rows come from the fact pass; the standalone collector is the fallback
+# ---------------------------------------------------------------------------
+
+SYMBOL_SAMPLES = {
+    "shapes.py": (
+        "import abc\n"
+        "\n"
+        "LIMIT = 3\n"
+        "\n"
+        "\n"
+        "class Shape(abc.ABC, object):\n"
+        "    sides: int = 0\n"
+        "\n"
+        "    @property\n"
+        "    def area(self) -> float:\n"
+        "        return 0.0\n"
+        "\n"
+        "    async def load(self, source: dict[str, int], *args, key=(1, 2), **kwargs) -> None:\n"
+        "        def inner(value):\n"
+        "            return value\n"
+        "        return inner(source)\n"
+        "\n"
+        "\n"
+        "def build(kind, size: int = 1):\n"
+        "    class Local:\n"
+        "        def method(self):\n"
+        "            pass\n"
+        "    return Local\n"
+        "\n"
+        "\n"
+        "def no_parameters():\n"
+        "    return LIMIT\n"
+    ),
+    "widgets.ts": (
+        "export interface Options { size: number }\n"
+        "export class Widget extends Base implements Options {\n"
+        "  size = 1;\n"
+        "  render(target: string, options?: Options): void {}\n"
+        "}\n"
+        "export function make(kind: string): Widget { return new Widget(); }\n"
+        "const helper = (a: number, b: number) => a + b;\n"
+    ),
+    # A relative path import is named after the project's roots, which fact
+    # extraction does not have: its names must come from the scope resolver.
+    "view.ts": (
+        "import { render } from './widgets';\n"
+        "export * from './shared';\n"
+        "export function show(target: string): void { render(target); }\n"
+    ),
+    "engine.rs": (
+        "pub struct Engine { power: u32 }\n"
+        "impl Engine {\n"
+        "    pub fn start(&self, key: &str) -> bool { true }\n"
+        "}\n"
+        "pub trait Runs { fn run(&mut self); }\n"
+        "pub fn build(power: u32) -> Engine { Engine { power } }\n"
+    ),
+}
+
+
+def _mentioned_names(db_path: Path) -> dict[str, list[str]]:
+    from emend import cache_codec
+
+    with sqlite3.connect(db_path) as conn:
+        return {
+            path: cache_codec.decode(names)
+            for path, names in conn.execute("SELECT file_path, names FROM qn_index")
+        }
+
+
+def _symbol_rows(db_path: Path) -> list[tuple]:
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            "SELECT file_path, name, qualified_name, module_qn, kind, line, end_line, "
+            "depth, parent, bases, signature, returns, decorators "
+            "FROM symbol_index ORDER BY rowid"
+        ).fetchall()
+
+
+@pytest.mark.parametrize("name", sorted(SYMBOL_SAMPLES))
+def test_fact_pass_search_rows_match_the_standalone_derivation(tmp_path, name):
+    """Both ways of deriving a file's symbols and names give the same rows."""
+    from emend.analysis_extraction import _extract_file_facts
+    from emend.analysis_store import AnalysisStore
+    from emend.transform import _index_batch
+
+    project = make_project_dir(tmp_path)
+    path = project / name
+    path.write_text(SYMBOL_SAMPLES[name])
+    store = AnalysisStore.open(project)
+    (revision,) = store.disk_snapshot().files
+    extracted = _extract_file_facts(revision, name, SYMBOL_SAMPLES[name])
+
+    standalone, shared = tmp_path / "standalone.db", tmp_path / "shared.db"
+    batch = [(str(path), SYMBOL_SAMPLES[name])]
+    _index_batch((str(standalone), str(project), batch))
+    _index_batch(
+        (str(shared), str(project), batch),
+        extracted={str(path): extracted},
+    )
+
+    rows = _symbol_rows(standalone)
+    assert rows
+    assert _symbol_rows(shared) == rows
+    names = _mentioned_names(standalone)
+    assert names[str(path)]
+    assert _mentioned_names(shared) == names
+
+
+def _record_scope_indexing(monkeypatch) -> list[str]:
+    """Return a list that receives each file the scope resolver is given."""
+    from emend import emend_core
+
+    indexed: list[str] = []
+    resolver = emend_core.PyScopeResolver
+
+    class Recording:
+        def __init__(self, *args):
+            self._resolver = resolver(*args)
+
+        def index_file(self, path, source):
+            indexed.append(Path(path).name)
+            return self._resolver.index_file(path, source)
+
+        def __getattr__(self, name):
+            return getattr(self._resolver, name)
+
+    monkeypatch.setattr(emend_core, "PyScopeResolver", Recording)
+    return indexed
+
+
+def test_cold_index_takes_symbols_and_names_from_the_fact_pass(tmp_path, monkeypatch):
+    """A cold build parses each file once, for its facts."""
+    import emend.analysis_store as analysis_store
+    from emend.transform import warm_caches
+
+    project = make_project_dir(tmp_path)
+    (project / "a.py").write_text(SOURCE)
+    (project / "b.py").write_text(
+        "from a import hello\n"
+        "\n"
+        "\n"
+        "class Thing:\n"
+        "    def go(self, speed):\n"
+        "        return hello()\n"
+    )
+
+    def collect(path, source):
+        raise AssertionError(f"symbols of {path.name} were collected a second time")
+
+    monkeypatch.setattr(analysis_store, "collect_symbol_info", collect)
+    indexed = _record_scope_indexing(monkeypatch)
+    warm_caches(str(project), type_engine=None)
+
+    assert indexed == []
+    names = _mentioned_names(project / ".emend" / "cache" / "parse.db")
+    assert set(names[str(project / "a.py")]) == {"a.hello"}
+    assert {"a.hello", "b.Thing", "b.Thing.go"} <= set(names[str(project / "b.py")])
+
+    with sqlite3.connect(project / ".emend" / "cache" / "parse.db") as conn:
+        rows = conn.execute(
+            "SELECT name, qualified_name, kind, parent, signature "
+            "FROM symbol_index ORDER BY qualified_name"
+        ).fetchall()
+    assert rows == [
+        ("Thing", "Thing", "class", None, None),
+        ("go", "Thing.go", "method", "Thing", "def go(self, speed)"),
+        ("hello", "hello", "function", None, None),
+    ]
+
+
+def test_relative_path_imports_are_named_once_for_facts_and_search(tmp_path, monkeypatch):
+    """A relative path import is named against the module root.  Fact
+    extraction is given that root, so its names are the scope resolver's and
+    the file is not analysed a second time for them."""
+    from emend.transform import warm_caches
+
+    project = make_project_dir(tmp_path)
+    (project / "src").mkdir()
+    (project / "src" / "helpers.ts").write_text("export function run(): void {}\n")
+    (project / "src" / "view.ts").write_text(
+        "import { run } from './helpers';\nexport function show(): void { run(); }\n"
+    )
+    (project / "src" / "index.ts").write_text(
+        "export * from './helpers';\nexport { show } from './view';\n"
+    )
+    indexed = _record_scope_indexing(monkeypatch)
+    warm_caches(str(project), type_engine=None, language=None)
+
+    # Only ``index.ts`` goes back to the scope resolver: it names an index
+    # file's module after its directory, the fact snapshot after the file.
+    assert indexed == ["index.ts"]
+    names = _mentioned_names(project / ".emend" / "cache" / "parse.db")
+    assert "helpers/run" in names[str(project / "src" / "view.ts")]
+    assert {"helpers", "view/show"} <= set(names[str(project / "src" / "index.ts")])
+    assert not [name for file_names in names.values() for name in file_names
+                if tmp_path.name in name]
+
+
+def test_search_index_is_rebuilt_when_facts_are_already_current(tmp_path):
+    """Facts that need no parse leave no symbols to share: the collector runs."""
+    from emend.transform import warm_caches
+
+    project = make_project_dir(tmp_path)
+    (project / "a.py").write_text(SOURCE)
+    warm_caches(str(project), type_engine=None)
+    db_path = project / ".emend" / "cache" / "parse.db"
+    before = _symbol_rows(db_path)
+    assert [row[1] for row in before] == ["hello"]
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{db_path}{suffix}").unlink(missing_ok=True)
+
+    warm_caches(str(project), type_engine=None)
+
+    assert _symbol_rows(db_path) == before
+
+
+# ---------------------------------------------------------------------------
+# Symbol storage: each path once, a full-text index without its own text
+# ---------------------------------------------------------------------------
+
+
+def _objects(conn: sqlite3.Connection) -> dict[str, str]:
+    return dict(conn.execute("SELECT name, type FROM sqlite_master"))
+
+
+class TestSymbolStorage:
+    def _indexed(self, tmp_path) -> Path:
+        from emend.transform import warm_caches
+
+        project = make_project_dir(tmp_path)
+        (project / "a.py").write_text(SOURCE)
+        (project / "b.py").write_text(
+            "class Thing:\n    def go(self, speed):\n        pass\n\n\ndef stop():\n    pass\n"
+        )
+        warm_caches(str(project), type_engine=None)
+        return project
+
+    def test_each_path_is_stored_once(self, tmp_path):
+        """A symbol row names its file by id; ``symbol_index`` is the view
+        that readers and older writers keep using."""
+        project = self._indexed(tmp_path)
+        with sqlite3.connect(project / ".emend" / "cache" / "parse.db") as conn:
+            objects = _objects(conn)
+            assert objects["symbol_index"] == "view"
+            assert objects["symbol"] == objects["symbol_file"] == "table"
+            assert conn.execute("SELECT path FROM symbol_file ORDER BY path").fetchall() == [
+                (str(project / "a.py"),), (str(project / "b.py"),),
+            ]
+            assert {type(row[0]) for row in conn.execute("SELECT file_id FROM symbol")} == {int}
+            assert conn.execute(
+                "SELECT file_path, qualified_name FROM symbol_index ORDER BY qualified_name"
+            ).fetchall() == [
+                (str(project / "b.py"), "Thing"),
+                (str(project / "b.py"), "Thing.go"),
+                (str(project / "a.py"), "hello"),
+                (str(project / "b.py"), "stop"),
+            ]
+
+    def test_view_accepts_the_writes_a_table_did(self, tmp_path):
+        from emend.transform.cache import _initialize_cache_connection
+
+        with sqlite3.connect(tmp_path / "parse.db") as conn:
+            _initialize_cache_connection(conn)
+            conn.executemany(
+                "INSERT INTO symbol_index "
+                "(file_path, name, qualified_name, kind, line, end_line, signature) "
+                "VALUES (?, ?, ?, 'function', ?, ?, ?)",
+                [
+                    ("/p/a.py", "one", "one", 1, 2, "def one(x)"),
+                    ("/p/a.py", "two", "two", 4, 5, None),
+                    ("/p/b.py", "three", "three", 1, 2, None),
+                ],
+            )
+            assert conn.execute("SELECT COUNT(*) FROM symbol_file").fetchone() == (2,)
+            assert conn.execute(
+                "SELECT rowid, file_path, name, depth, signature FROM symbol_index ORDER BY rowid"
+            ).fetchall() == [
+                (1, "/p/a.py", "one", 1, "def one(x)"),
+                (2, "/p/a.py", "two", 1, None),
+                (3, "/p/b.py", "three", 1, None),
+            ]
+            conn.execute("DELETE FROM symbol_index WHERE file_path = ?", ("/p/a.py",))
+            assert conn.execute("SELECT name FROM symbol_index").fetchall() == [("three",)]
+            conn.execute("DELETE FROM symbol_index")
+            assert conn.execute("SELECT COUNT(*) FROM symbol").fetchone() == (0,)
+
+    def test_old_table_is_converted_in_place(self, tmp_path):
+        """Rows keep their rowids, so full-text rows written before the
+        upgrade still point at them."""
+        from emend.transform.cache import _initialize_cache_connection
+
+        with sqlite3.connect(tmp_path / "parse.db") as conn:
+            conn.executescript("""
+                CREATE TABLE symbol_index (
+                    file_path TEXT NOT NULL, name TEXT NOT NULL, qualified_name TEXT NOT NULL,
+                    module_qn TEXT, kind TEXT NOT NULL, line INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL, depth INTEGER NOT NULL DEFAULT 1, parent TEXT,
+                    bases TEXT, signature TEXT, returns TEXT, decorators TEXT);
+                CREATE INDEX idx_sym_name ON symbol_index(name);
+                CREATE INDEX idx_sym_qn ON symbol_index(qualified_name);
+                CREATE INDEX idx_sym_file ON symbol_index(file_path);
+                CREATE INDEX idx_sym_kind ON symbol_index(kind);
+                INSERT INTO symbol_index (rowid, file_path, name, qualified_name, kind, line, end_line, depth, parent, bases)
+                    VALUES (7, '/p/a.py', 'go', 'Thing.go', 'method', 3, 4, 2, 'Thing', NULL),
+                           (9, '/p/a.py', 'Thing', 'Thing', 'class', 1, 4, 1, NULL, 'Base'),
+                           (12, '/p/b.py', 'stop', 'stop', 'function', 1, 2, 1, NULL, NULL);
+                CREATE VIRTUAL TABLE symbol_fts USING fts5(name, qualified_name, signature, tokenize='trigram');
+                INSERT INTO symbol_fts (rowid, name, qualified_name, signature)
+                    SELECT rowid, name, qualified_name, '' FROM symbol_index;
+            """)
+            _initialize_cache_connection(conn)
+            _initialize_cache_connection(conn)
+
+            assert _objects(conn)["symbol_index"] == "view"
+            assert "idx_sym_kind" not in _objects(conn)
+            assert conn.execute(
+                "SELECT rowid, file_path, name, qualified_name, kind, line, end_line, depth, parent, bases "
+                "FROM symbol_index ORDER BY rowid"
+            ).fetchall() == [
+                (7, "/p/a.py", "go", "Thing.go", "method", 3, 4, 2, "Thing", None),
+                (9, "/p/a.py", "Thing", "Thing", "class", 1, 4, 1, None, "Base"),
+                (12, "/p/b.py", "stop", "stop", "function", 1, 2, 1, None, None),
+            ]
+            assert conn.execute(
+                "SELECT s.qualified_name FROM symbol_fts f JOIN symbol_index s ON f.rowid = s.rowid "
+                "WHERE symbol_fts MATCH 'thing' ORDER BY s.rowid"
+            ).fetchall() == [("Thing.go",), ("Thing",)]
+
+    def test_full_text_index_keeps_no_copy_of_the_text(self, tmp_path):
+        project = self._indexed(tmp_path)
+        from emend.editor_search import EditorSearchEngine
+
+        engine = EditorSearchEngine(str(project))
+        try:
+            assert [item["name"] for item in engine.search_symbols("hing").items] == ["Thing"]
+        finally:
+            engine.close()
+        with sqlite3.connect(project / ".emend" / "cache" / "parse.db") as conn:
+            objects = _objects(conn)
+            assert conn.execute("SELECT COUNT(*) FROM symbol_fts").fetchone() == (4,)
+        assert "symbol_fts_data" in objects
+        assert "symbol_fts_content" not in objects

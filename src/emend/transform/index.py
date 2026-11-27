@@ -15,6 +15,7 @@ from emend.project_config import module_context_snapshot
 
 if TYPE_CHECKING:
     import sqlite3
+    from emend.analysis_snapshot import ExtractedFile
     from emend.type_oracle import TypeBatchInputs, TypeOracle
 
 logger = logging.getLogger(__name__)
@@ -106,7 +107,6 @@ def _write_index_rows(
     conn: sqlite3.Connection,
     qn_rows: list[tuple[str, bytes, bytes]],
     sym_rows: list[tuple],
-    ref_rows: list[tuple],
 ) -> None:
     """Bulk-write collected index rows to the SQLite cache.
 
@@ -114,64 +114,81 @@ def _write_index_rows(
     a second indexing pass replaces stale rows. Failed writes roll back and
     propagate so callers cannot publish a successful freshness marker.
     """
-    has_data = qn_rows or sym_rows or ref_rows
-    if not has_data:
+    if not qn_rows and not sym_rows:
         return
     with conn:
         if qn_rows:
             revised_paths = list({row[0] for row in qn_rows})
-            for table, column in (
-                ("qn_index", "file_path"),
-                ("symbol_index", "file_path"),
-                ("reference_index", "file_path"),
-            ):
-                conn.executemany(
-                    f"DELETE FROM {table} WHERE {column} = ?",
-                    ((path,) for path in revised_paths),
-                )
+            conn.executemany(
+                "DELETE FROM qn_index WHERE file_path = ?",
+                ((path,) for path in revised_paths),
+            )
+            conn.executemany(
+                "DELETE FROM symbol WHERE file_id = "
+                "(SELECT id FROM symbol_file WHERE path = ?)",
+                ((path,) for path in revised_paths),
+            )
             conn.executemany(
                 "INSERT OR REPLACE INTO qn_index(file_path, hash, names) "
                 "VALUES (?, ?, ?)",
                 qn_rows,
             )
         if sym_rows:
+            # The ``symbol_index`` view takes the same rows through a trigger;
+            # a whole file's rows go faster straight into its tables.
+            file_ids = {}
+            for path in {row[0] for row in sym_rows}:
+                conn.execute(
+                    "INSERT OR IGNORE INTO symbol_file (path) VALUES (?)", (path,)
+                )
+                file_ids[path] = conn.execute(
+                    "SELECT id FROM symbol_file WHERE path = ?", (path,)
+                ).fetchone()[0]
             conn.executemany(
-                "INSERT INTO symbol_index "
-                "(file_path, name, qualified_name, kind, "
+                "INSERT INTO symbol "
+                "(file_id, name, qualified_name, kind, "
                 "line, end_line, depth, parent, bases, signature, returns) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                sym_rows,
-            )
-        if ref_rows:
-            conn.executemany(
-                "INSERT INTO reference_index "
-                "(target_qn, file_path, line, col, ref_kind) "
-                "VALUES (?, ?, ?, ?, ?)",
-                ref_rows,
+                ((file_ids[row[0]], *row[1:]) for row in sym_rows),
             )
 
 
-def _index_batch(args: tuple[str, str, list[tuple[str, str]]], *, schema_initialized: bool = False) -> tuple[int, int, int, int, int]:
-    """Own one connection per worker batch, with one transaction per file."""
+def _index_batch(
+    args: tuple[str, str, list[tuple[str, str]]],
+    *,
+    schema_initialized: bool = False,
+    extracted: dict[str, ExtractedFile] | None = None,
+) -> tuple[int, int, int, int]:
+    """Own one connection per worker batch, with one transaction per file.
+
+    *extracted* maps a file to its fact extraction, which read the file's
+    symbols and names from the parse it already made.  A file without an
+    entry is parsed for them here.
+    """
     import sqlite3
     from .cache import _initialize_cache_connection
 
     if not args[2]:
-        return (0, 0, 0, 0, 0)
+        return (0, 0, 0, 0)
     with closing(sqlite3.connect(args[0], timeout=30)) as conn:
         if schema_initialized:
             conn.execute("PRAGMA synchronous=NORMAL")
         else:
             _initialize_cache_connection(conn)
-        return _index_batch_rows(args, conn)
+        return _index_batch_rows(args, conn, extracted=extracted)
 
 
 @module_context_snapshot()
-def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, int, int]:
+def _index_batch_rows(
+    args, conn: sqlite3.Connection, *,
+    extracted: dict[str, ExtractedFile] | None = None,
+) -> tuple[int, int, int, int]:
     """Worker function for per-file indexing.
 
-    Parses a batch of files, resolves qualified names,
-    collects symbol definitions and reference entries. Each completed file is
+    Stores each file's mentioned names and symbol definitions.  A file whose
+    facts were just extracted brings both from that parse; any other file is
+    parsed here.  References are not indexed: the fact graph is their only
+    store.  Each completed file is
     written atomically to SQLite before deriving the next, overlapping writes
     with other workers' analysis.
 
@@ -181,7 +198,7 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
         args: (db_path, project_root, [(file_path, content), ...])
 
     Returns:
-        (parse_count, qn_count, skipped_count, sym_count, ref_count).
+        (parse_count, qn_count, skipped_count, sym_count).
     """
     from emend import cache_codec
     from emend.analysis_store import collect_symbol_info as _collect_symbols_ts
@@ -202,13 +219,12 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
 
     skipped = 0
     processed = 0
-    row_counts = [0] * 3
+    row_counts = [0] * 2
     for scope_hash, py_file, content in file_hashes:
-        # The QN cache is the core index. The derived tables (symbol_index,
-        # reference_index) may legitimately have zero rows for a
-        # given file (e.g. a file with only assignments has no symbols) and are
-        # written in lockstep with the QN cache, so we re-derive all of them
-        # exactly when the QN cache entry is missing.
+        # The QN cache is the core index. A file may legitimately have no
+        # symbol_index rows (e.g. an empty module), and they are written in
+        # lockstep with the QN cache, so both are re-derived exactly when the
+        # QN cache entry is missing.
         if (str(Path(py_file).resolve()), scope_hash) in cached_qn:
             skipped += 1
             continue
@@ -216,11 +232,11 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
         processed += 1
         qn_rows: list[tuple[str, bytes, bytes]] = []
         sym_rows: list[tuple] = []
-        ref_rows: list[tuple] = []
 
-        # Use Rust scope resolver for QN and reference collection
-        # (replaces expensive MetadataWrapper + _QNCollector + _RefIndexCollector).
-        scope_indexed = False
+        shared = None if extracted is None else extracted.get(py_file)
+
+        # The names the configured scope resolver finds in the file.
+        all_qnames = None
         try:
             from emend.language_registry import detect_language
             from emend.project_config import module_resolution_context
@@ -236,28 +252,42 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
                     str(root_module) if root_module else None,
                 )
             scope_resolver = scope_resolvers[resolver_key]
-            scope_resolver.index_file(py_file, content)
-            scope_indexed = True
+            # Fact extraction resolves the same scopes against the same
+            # project and module roots.  Its names are this resolver's when
+            # the rest agrees too: no crate root here (facts are extracted
+            # without one) and the same module name.
+            if (
+                shared is not None
+                and shared.search_qnames is not None
+                and root_module is None
+                and scope_resolver.module_name_for_file(py_file)
+                == shared.revision.module_name
+            ):
+                all_qnames = set(shared.search_qnames)
+            else:
+                scope_resolver.index_file(py_file, content)
+                all_qnames = set(scope_resolver.all_qnames_in_file(py_file))
         except Exception:
             logger.debug("scope indexing failed for %s", py_file, exc_info=True)
 
-        if scope_indexed:
-            try:
-                all_qnames = set(scope_resolver.all_qnames_in_file(py_file))
-            except Exception:
-                logger.debug("qname collection failed for %s", py_file, exc_info=True)
-            else:
-                qn_blob = cache_codec.encode(sorted(all_qnames))
-                qn_rows.append((str(Path(py_file).resolve()), scope_hash, qn_blob))
+        if all_qnames is not None:
+            qn_blob = cache_codec.encode(sorted(all_qnames))
+            qn_rows.append((str(Path(py_file).resolve()), scope_hash, qn_blob))
 
-        try:
-            syms_for_file = _collect_symbols_ts(Path(py_file), content)
-        except BUG_EXCEPTIONS:
-            raise
-        except Exception:
-            logger.debug("symbol collection failed for %s", py_file, exc_info=True)
+        if shared is not None:
+            # Fact extraction already parsed this revision for its symbols.
+            sym_rows.extend((py_file, *row) for row in shared.search_symbols)
             syms_for_file = []
+        else:
+            try:
+                syms_for_file = _collect_symbols_ts(Path(py_file), content)
+            except BUG_EXCEPTIONS:
+                raise
+            except Exception:
+                logger.debug("symbol collection failed for %s", py_file, exc_info=True)
+                syms_for_file = []
 
+        # Keep these rows equal to ``search_symbol_rows`` in fact_rows.rs.
         for sym in syms_for_file:
             parts = sym.path.split("::", 1)
             dotted = parts[1] if len(parts) > 1 else sym.name
@@ -279,18 +309,9 @@ def _index_batch_rows(args, conn: sqlite3.Connection) -> tuple[int, int, int, in
                 sym.returns,
             ))
 
-        if scope_indexed:
-            try:
-                file_refs = scope_resolver.references_in_file(py_file)
-            except Exception:
-                logger.debug("reference collection failed for %s", py_file, exc_info=True)
-                file_refs = []
-            for qn_str, line, col, offset, end_offset, kind, _ann in file_refs:
-                ref_rows.append((qn_str, py_file, line, col, kind))
-
         # Keep a file's freshness marker and derived rows in one transaction.
         # Do not retain a worker's entire batch before starting disk writes.
-        rows = (qn_rows, sym_rows, ref_rows)
+        rows = (qn_rows, sym_rows)
         _write_index_rows(conn, *rows)
         row_counts = [count + len(batch) for count, batch in zip(row_counts, rows)]
 
@@ -509,13 +530,9 @@ def _ensure_index_fresh_impl(
         # Clean up deleted files
         for deleted_path in scan.deleted:
             try:
-                for table, column in (
-                    ("qn_index", "file_path"),
-                    ("symbol_index", "file_path"),
-                    ("reference_index", "file_path"),
-                ):
+                for table in ("qn_index", "symbol_index"):
                     conn.execute(
-                        f"DELETE FROM {table} WHERE {column} = ?",
+                        f"DELETE FROM {table} WHERE file_path = ?",
                         (str(Path(deleted_path).resolve()),),
                     )
                 conn.execute(
@@ -558,9 +575,18 @@ def _ensure_index_fresh(
 
 
 def ensure_search_index(project_path: str) -> bool:
-    """Finish a requested index refresh, including cold and large updates."""
+    """Finish a requested index refresh, including cold and large updates.
+
+    Editor reference lookups read the fact graph as last published, so a
+    refresh brings the facts up to date as well as the search tables.
+    """
     if not _ensure_index_fresh(project_path):
         warm_caches(project_path, type_engine=None, build_fts=False, language=None)
+    else:
+        from .project_iter import _find_project_root
+        from emend.analysis_store import AnalysisStore
+
+        AnalysisStore.open(_find_project_root(project_path)).query_facts()
     return True
 
 
@@ -926,7 +952,11 @@ def get_index_status(project_path: str) -> dict | None:
                 info[scoped] = info[scoped_key]
 
         # Counts
-        for table in ("file_manifest", "symbol_index", "reference_index"):
+        from emend.analysis_store import AnalysisStore
+
+        graph = AnalysisStore.open(project_root).published_facts()
+        info["reference_count"] = graph.reference_count() if graph is not None else 0
+        for table in ("file_manifest", "symbol_index"):
             try:
                 info[f"{table}_count"] = conn.execute(
                     f"SELECT COUNT(*) FROM {table}"
@@ -1029,7 +1059,7 @@ def warm_caches(
 
     stats: dict[str, int | str] = {
         "files": len(file_contents), "indexed": 0, "qn_cached": 0,
-        "skipped": 0, "sym_cached": 0, "ref_cached": 0,
+        "skipped": 0, "sym_cached": 0,
         "type_cached": 0, "type_engine": "",
         "fts_indexed": 0, "dup_cached": 0,
     }
@@ -1053,7 +1083,7 @@ def warm_caches(
         for path, digest in _qn_cache_markers(conn, indexed_paths):
             cached_qn.setdefault(path, set()).add(digest)
 
-    def prepare_file(revision, content):
+    def prepare_file(revision, content, extracted):
         if revision.file_path in indexed_paths:
             if revision.file_path in cached_qn:
                 # Configuration can change after the parent probe, even when
@@ -1062,16 +1092,20 @@ def warm_caches(
                     content.encode(), usedforsecurity=False,
                 ).digest(), revision.file_path, project_root)
                 if scope_hash in cached_qn[revision.file_path]:
-                    return (0, 0, 1, 0, 0)
-            return _index_batch((db_path, project_root,
-                                 [(revision.file_path, content)]), schema_initialized=True)
+                    return (0, 0, 1, 0)
+            return _index_batch(
+                (db_path, project_root, [(revision.file_path, content)]),
+                schema_initialized=True,
+                extracted=None if extracted is None else {
+                    revision.file_path: extracted,
+                },
+            )
         return None
 
     def prepared_file(revision, result):
         if result is not None:
             for key, count in zip(
-                ("indexed", "qn_cached", "skipped", "sym_cached",
-                 "ref_cached"), result,
+                ("indexed", "qn_cached", "skipped", "sym_cached"), result,
             ):
                 stats[key] += count
         if callback:
@@ -1222,6 +1256,9 @@ def warm_caches(
             logger.debug("warm_caches: duplicate analysis failed", exc_info=True)
             stats["dup_cached"] = 0
 
+    from .cache import compact_cache_database
+    for database in (db_path, store.artifact_path):
+        compact_cache_database(database)
     return stats
 
 

@@ -72,6 +72,13 @@ class ExtractedFile:
     revision: FileRevision
     qnames: frozenset[str] = frozenset()
     rows: dict[str, list[list[object]]] = field(default_factory=dict)
+    # What the editor's search index keeps about the file, read from the same
+    # parse.  Neither is a fact.  ``search_symbols`` rows are ``(name, dotted
+    # path, kind, line, end line, depth, enclosing class, bases, signature,
+    # return type)``.  ``search_qnames`` is every name the file mentions;
+    # ``None`` means they were not collected.
+    search_symbols: tuple[tuple, ...] = ()
+    search_qnames: tuple[str, ...] | None = None
 
     def __getitem__(self, key: str) -> list[list[object]]:
         return self.rows[key]

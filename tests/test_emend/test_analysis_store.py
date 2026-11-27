@@ -1360,3 +1360,57 @@ def test_disk_type_engine_returns_empty_overlay_view(tmp_path, monkeypatch):
 
     assert typed.source_text(source) == "value = 'overlay'\n"
     assert typed.types_for("value") == []
+
+
+def test_scan_paths_are_resolved_like_path_resolve(tmp_path):
+    """Directories are resolved once each; the result is what resolving every
+    path would give, through directory and file symlinks alike."""
+    from emend.analysis_store import _canonical_paths
+
+    real = tmp_path / "real"
+    (real / "pkg").mkdir(parents=True)
+    (real / "pkg" / "a.py").write_text("A = 1\n")
+    (real / "pkg" / "b.py").write_text("B = 1\n")
+    (real / "pkg" / "alias.py").symlink_to(real / "pkg" / "a.py")
+    (tmp_path / "linked").symlink_to(real, target_is_directory=True)
+    paths = [
+        str(tmp_path / "linked" / "pkg" / "a.py"),
+        str(tmp_path / "linked" / "pkg" / "b.py"),
+        str(real / "pkg" / "alias.py"),
+        str(real / "pkg" / ".." / "pkg" / "b.py"),
+        str(real / "pkg" / "missing.py"),
+    ]
+    assert list(_canonical_paths(paths)) == [str(Path(path).resolve()) for path in paths]
+
+
+@pytest.mark.parametrize("language, separator", [("python", "."), ("rust", "::"), ("typescript", "/")])
+def test_scan_names_modules_as_the_path_based_rule_does(tmp_path, language, separator):
+    """The scan names thousands of files, so it works on text; the answer is
+    the path-based rule's for every shape of file name."""
+    from emend.project_config import module_name_under_root, module_names_under_root
+
+    root = tmp_path / "proj"
+    source_root = root / "src"
+    relative = [
+        "src/pkg/mod.py", "src/pkg/__init__.py", "src/__init__.py", "src/top.py",
+        "src/pkg/sub/mod.rs", "src/pkg/sub/lib.rs", "src/mod.rs", "src/a/index.ts",
+        "src/pkg/name.with.dots.py", "src/pkg/.hidden", "src/pkg/.hidden.py",
+        "src/pkg/noext", "src/pkg/trailing.", "src/pkg/..py", "src/pkg/a.b/c.d.ts",
+        "tests/test_mod.py", "tests/__init__.py", "setup.py", "tests/deep/er/x.rs",
+    ]
+    paths = [str(root / name) for name in relative]
+    expected = [
+        module_name_under_root(Path(path), root, source_root, language, separator)
+        for path in paths
+    ]
+    name_of = module_names_under_root(root, source_root, language, separator)
+    assert [name_of(path) for path in paths] == expected
+    assert {"top", "pkg" + separator + "name.with.dots"} <= set(expected)
+
+
+def test_scan_module_name_outside_the_project_is_an_error(tmp_path):
+    from emend.project_config import module_names_under_root
+
+    name_of = module_names_under_root(tmp_path / "proj", tmp_path / "proj" / "src", "python", ".")
+    with pytest.raises(ValueError):
+        name_of(str(tmp_path / "elsewhere" / "mod.py"))

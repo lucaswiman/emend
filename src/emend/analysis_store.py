@@ -16,12 +16,13 @@ from pathlib import Path
 import re
 import secrets
 import socket
+import shutil
 import sqlite3
 import threading
 import time
 import weakref
 import zlib
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 
 from emend import cache_codec
 from emend.analysis_snapshot import AnalysisSnapshot, ExtractedFile, FileRevision, TypeFact
@@ -32,7 +33,7 @@ from emend.symbol_projection import SymbolInfo, _symbol_info_view
 from emend.sqlite_writer import SQLiteWriter
 
 
-EXTRACTION_ARTIFACT_VERSION = "22"
+EXTRACTION_ARTIFACT_VERSION = "23"
 TYPE_FACTS_ARTIFACT_VERSION = "1"
 TYPE_RESULT_VERSION = 5  # FileTypes now carries failure diagnostics.
 logger = logging.getLogger(__name__)
@@ -102,6 +103,22 @@ def _close_live_stores() -> None:
 
 
 atexit.register(_close_live_stores)
+
+
+def _canonical_paths(paths: Iterable[str]) -> Iterator[str]:
+    """Resolve every path, resolving each directory once.
+
+    Resolving a path asks the file system about every directory level, so
+    doing it per file repeats the same questions for a whole directory.
+    """
+    directories: dict[str, str] = {}
+    for path in paths:
+        directory, name = os.path.split(os.path.abspath(path))
+        resolved = directories.get(directory)
+        if resolved is None:
+            resolved = directories[directory] = os.path.realpath(directory)
+        candidate = os.path.join(resolved, name)
+        yield os.path.realpath(candidate) if os.path.islink(candidate) else candidate
 
 
 def collect_symbol_info(filepath: Path, source: str) -> list[SymbolInfo]:
@@ -562,19 +579,16 @@ class AnalysisStore:
             language: get_module_separator(language, configs.get(language))
             for language in registry[1]
         }
-        from emend.project_config import module_name_under_root, module_resolution_context
+        from emend.project_config import module_names_under_root, module_resolution_context
 
-        files = sorted(
-            str(Path(path).resolve())
-            for path in collect_all_source_files(
-                str(self.project_root), languages=list(registry[1]), registry=registry
-            )
-        )
+        files = sorted(_canonical_paths(collect_all_source_files(
+            str(self.project_root), languages=list(registry[1]), registry=registry
+        )))
         # Every path above is canonical and so is the project root; resolving
         # them again per file costs a system call per directory level.
         root = self.project_root.resolve()
         root_text = str(root)
-        module_roots: dict[str, Path] = {}
+        module_namers: dict[str, Callable[[str], str]] = {}
         contents: dict[str, str] = {}
         revisions: list[FileRevision] = []
         observed: dict[str, tuple[int, int, int, int, int, str, str, str]] = {}
@@ -586,15 +600,13 @@ class AnalysisStore:
                 continue
             old = previous.get(file_path)
             language = detect_language(file_path, registry=registry) or "python"
-            module_root = module_roots.get(language)
-            if module_root is None:
-                module_root = module_roots[language] = module_resolution_context(
-                    root, language,
-                )[0]
-            module_name = module_name_under_root(
-                Path(file_path), root, module_root, language,
-                module_separators.get(language) or get_module_separator(language),
-            )
+            module_name_of = module_namers.get(language)
+            if module_name_of is None:
+                module_name_of = module_namers[language] = module_names_under_root(
+                    root, module_resolution_context(root, language)[0], language,
+                    module_separators.get(language) or get_module_separator(language),
+                )
+            module_name = module_name_of(file_path)
             identity = self._stat_identity(stat)
             if old is not None and old[:5] == identity:
                 content_hash = old[5]
@@ -839,8 +851,9 @@ class AnalysisStore:
 
         *needs_facts* names the revisions whose facts a consumer will store.
         Any other revision whose import list is already remembered is not
-        parsed: its ``extracted`` is ``None``.  ``prepare`` still runs for every
-        revision, on the worker that handles it.
+        parsed: its ``extracted`` is ``None``.  ``prepare(revision, content,
+        extracted)`` still runs for every revision, on the worker that handles
+        it and after that revision's parse, if it had one.
         """
         from emend.analysis_extraction import _extract_file_facts
 
@@ -882,12 +895,14 @@ class AnalysisStore:
 
         def handle(item):
             revision, stored_path, content = item
-            preparation = prepare(revision, content) if prepare is not None else None
             imports = known_imports.get(revision.file_path)
             extracted = None
             if imports is None:
                 extracted = _extract_file_facts(revision, stored_path, content)
                 imports = self._file_imports(extracted)
+            preparation = (
+                prepare(revision, content, extracted) if prepare is not None else None
+            )
             return revision, extracted, imports, preparation
 
         from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -962,13 +977,43 @@ class AnalysisStore:
             lock.close()
 
     @staticmethod
-    def _copy_sqlite(source_path: Path, destination_path: Path) -> None:
-        """Copy a coherent SQLite generation, including uncheckpointed WAL."""
+    def _backup_sqlite(source_path: Path, destination_path: Path) -> None:
         with (
             closing(sqlite3.connect(source_path)) as source,
             closing(sqlite3.connect(destination_path)) as destination,
         ):
             source.backup(destination)
+
+    @classmethod
+    def _copy_sqlite(cls, source_path: Path, destination_path: Path) -> None:
+        """Copy a coherent SQLite generation, including uncheckpointed WAL.
+
+        A generation is never written in place once it can be seen, so with
+        no log beside it the file is the whole database.  Copying the file is
+        several times faster than SQLite's page-by-page backup, and a file
+        system that can share blocks copies nothing at all.
+        """
+        logs = (Path(f"{source_path}{suffix}") for suffix in ("-wal", "-journal"))
+        if any(log.exists() and log.stat().st_size for log in logs):
+            cls._backup_sqlite(source_path, destination_path)
+        else:
+            shutil.copyfile(source_path, destination_path)
+
+    def _compact_generation(self, path: Path) -> None:
+        """Rewrite a bulk-saved generation with full pages.
+
+        The save leaves about a tenth of every page empty.  Rewriting costs
+        a second on a 400 MB database, once per full build; every later copy
+        and read of the generation is that much smaller.
+        """
+        compact = self._temporary_db_path("facts-next-")
+        try:
+            with closing(sqlite3.connect(path)) as conn:
+                conn.execute("VACUUM INTO ?", (str(compact),))
+            os.replace(compact, path)
+        except BaseException:
+            self._unlink(compact)
+            raise
 
     def _snapshot_copy(self, source_path: Path, prefix: str) -> Path:
         """Create a stable private copy of one SQLite generation."""
@@ -1107,6 +1152,7 @@ class AnalysisStore:
                 prepare_cozo_storage(path)
                 graph._client.backup(str(path))
                 graph.close()
+                self._compact_generation(path)
                 graph = FactGraph(db_path=str(path))
             graph.bind_snapshot(
                 snapshot,
@@ -1609,6 +1655,24 @@ class AnalysisStore:
                 return graph
             return self._typed_facts(graph, type_engine)
 
+    def published_facts(self):
+        """Return the facts this store last saw published, without checking them.
+
+        Interactive lookups use this: it never scans the project, builds
+        facts, or waits for a build.  The answer is as old as the last index.
+        ``None`` means that nothing is published, or that a build holds the
+        store before this process has opened a generation.
+        """
+        graph = self._disk_graph
+        if graph is not None and self._generation_exists(graph):
+            return graph
+        if not self._graph_lock.acquire(blocking=False):
+            return None
+        try:
+            return self._adopt_published_facts()
+        finally:
+            self._graph_lock.release()
+
     def source_snapshot(self) -> AnalysisSnapshot:
         """Return current disk/overlay identity without constructing a graph."""
         with self._source_lock:
@@ -1750,9 +1814,9 @@ class AnalysisStore:
             if not include_overlays and self._disk_graph is not None:
                 graph = self._disk_graph
             snapshot = graph.snapshot
+            stored_imports = graph.imports_by_file()
             imports_by_path = {
-                revision.file_path: [(row.imported_module, row.imported_name)
-                                     for row in graph.imports_in(graph.stored_path(revision.file_path))]
+                revision.file_path: stored_imports.get(self._stored_path(revision), [])
                 for revision in snapshot.files
             }
 

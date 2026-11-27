@@ -349,12 +349,17 @@ def rebuild_fts(conn: sqlite3.Connection) -> int:
         logger.debug("FTS5 trigram not available — skipping FTS build")
         return 0
 
-    # Symbol index
+    # Symbol index.  It stores neither the text, which is read back from
+    # ``symbol_index`` by rowid, nor where in the text each trigram is: that
+    # was three quarters of it.  Without positions it cannot answer a phrase
+    # ``MATCH``, so substring search goes through ``LIKE``, which uses the
+    # trigrams to find candidates and reads the text to decide.
     conn.execute("DROP TABLE IF EXISTS symbol_fts")
     conn.execute(
         "CREATE VIRTUAL TABLE symbol_fts USING fts5("
         "  name, qualified_name, signature,"
-        "  tokenize='trigram'"
+        "  content='symbol_index', content_rowid='rowid',"
+        "  tokenize='trigram', detail=none"
         ")"
     )
     conn.execute(
@@ -420,6 +425,7 @@ class EditorSearchEngine:
             except sqlite3.Error:
                 logger.debug("Search index not ready; using files", exc_info=True)
         self._overlay_owner = object()
+        self._reference_count_cache: tuple[Any, int] | None = None
         self._conn: sqlite3.Connection | None = None
         self._file_inventory: list[str] | None = None
         self._file_inventory_stamp: tuple = ()
@@ -603,6 +609,16 @@ class EditorSearchEngine:
         self._fts_ready = True
         return True
 
+    def _rebuild_fts(self) -> int:
+        """Rebuild the full-text tables after a reindex; return their row count."""
+        from emend.transform.cache import compact_cache_database
+
+        count = self._store.write(rebuild_fts)
+        # The rebuild goes through the write-ahead log, and this process keeps
+        # its connections open, so nothing else would ever empty it.
+        compact_cache_database(self.db_path)
+        return count
+
     # -- background reindex -------------------------------------------------
 
     @property
@@ -623,6 +639,16 @@ class EditorSearchEngine:
             self._index_complete_pending = False
             self._index_error = ''
 
+        # The worker holds the store while it rebuilds facts.  Open the
+        # generation that is already published first, so reference lookups
+        # keep answering from it until the new one replaces it.
+        try:
+            self._published_references()
+        except BUG_EXCEPTIONS:
+            raise
+        except Exception:
+            logger.debug("Could not open published facts", exc_info=True)
+
         thread = threading.Thread(
             target=self._background_reindex_worker,
             daemon=True,
@@ -639,7 +665,7 @@ class EditorSearchEngine:
             from emend.transform.index import ensure_search_index
 
             if ensure_search_index(self.project_root):
-                self._fts_available = self._store.write(rebuild_fts) > 0
+                self._fts_available = self._rebuild_fts() > 0
                 complete = True
         except BUG_EXCEPTIONS:
             raise
@@ -776,6 +802,26 @@ class EditorSearchEngine:
             query, limit=limit, file_scope=file_scope, kind=kind
         )
 
+    @staticmethod
+    def _fts_strategy(column: str) -> str:
+        """SQL for symbols whose *column* contains a query, ignoring ASCII case.
+
+        ``LIKE`` lets the trigram index pick the candidates, but ``_`` and
+        ``%`` in the query are wildcards to it.  ``instr`` on the text keeps
+        only literal matches, before the limit is counted.
+        """
+        return (
+            "SELECT s.rowid, s.name, s.qualified_name, s.kind, s.file_path, "
+            "s.line, s.end_line, s.signature, s.returns, s.depth, s.parent "
+            "FROM symbol_fts f JOIN symbol_index s ON f.rowid = s.rowid "
+            f"WHERE f.{column} LIKE ? AND instr(lower(s.{column}), lower(?)) > 0 "
+            "LIMIT ?"
+        )
+
+    @staticmethod
+    def _fts_parameters(query: str, limit: int) -> tuple:
+        return ("%" + query + "%", query, limit)
+
     def _search_symbols(
         self,
         query: str,
@@ -796,13 +842,6 @@ class EditorSearchEngine:
             "SELECT rowid, name, qualified_name, kind, file_path, "
             "line, end_line, signature, returns, depth, parent "
             "FROM symbol_index"
-        )
-
-        _FTS_JOIN = (
-            "SELECT s.rowid, s.name, s.qualified_name, s.kind, s.file_path, "
-            "s.line, s.end_line, s.signature, s.returns, s.depth, s.parent "
-            "FROM symbol_fts f JOIN symbol_index s ON f.rowid = s.rowid "
-            "WHERE f.{column} MATCH ?"
         )
 
         def _add(sql: str, params: tuple) -> None:
@@ -838,14 +877,10 @@ class EditorSearchEngine:
 
         # FTS5 strategies (needs ≥ 3 chars)
         fts_ok = len(query) >= 3 and self._ensure_fts()
+        fts_parameters = self._fts_parameters(query, per_strategy_limit)
         if fts_ok:
-            fts_q = '"' + query.replace('"', '""') + '"'
-
             # Strategy 5: FTS5 trigram substring on name
-            _add(
-                _FTS_JOIN.format(column="name") + " LIMIT ?",
-                (fts_q, per_strategy_limit),
-            )
+            _add(self._fts_strategy("name"), fts_parameters)
 
         # Strategy 6: qualified-name search for dotted queries
         if "." in query:
@@ -854,17 +889,11 @@ class EditorSearchEngine:
                 ("%" + query + "%", per_strategy_limit),
             )
             if fts_ok:
-                _add(
-                    _FTS_JOIN.format(column="qualified_name") + " LIMIT ?",
-                    (fts_q, per_strategy_limit),
-                )
+                _add(self._fts_strategy("qualified_name"), fts_parameters)
 
         # Strategy 7: signature substring (for parameter-based search)
         if fts_ok:
-            _add(
-                _FTS_JOIN.format(column="signature") + " LIMIT ?",
-                (fts_q, per_strategy_limit),
-            )
+            _add(self._fts_strategy("signature"), fts_parameters)
 
         # Apply post-filters
         items = list(candidates.values())
@@ -1099,6 +1128,34 @@ class EditorSearchEngine:
             truncated=len(items) >= limit,
         )
 
+    def _published_references(self):
+        """The fact graph as last indexed, or ``None`` before any index.
+
+        Reference lookups run while the user types, so they never scan the
+        project or build facts: a reindex brings the graph up to date.
+        """
+        return self._store.published_facts()
+
+    def _reference_count(self) -> int:
+        """Count the published references once per generation: it reads them all."""
+        graph = self._published_references()
+        if graph is None:
+            return 0
+        counted = self._reference_count_cache
+        if counted is None or counted[0] is not graph:
+            counted = self._reference_count_cache = (graph, graph.reference_count())
+        return counted[1]
+
+    def _reference_item(self, name: str, path: str, line: int, col: int, kind: str) -> dict:
+        return {
+            "target_qn": name,
+            # Fact paths are relative to the project; an editor opens absolute ones.
+            "file_path": os.path.join(self.project_root, path),
+            "line": line,
+            "col": col,
+            "ref_kind": kind,
+        }
+
     def _search_literals(
         self,
         literals: list[str],
@@ -1106,37 +1163,25 @@ class EditorSearchEngine:
         limit: int = 50,
         file_scope: str | None = None,
     ) -> SearchResult:
-        """Fall back: search reference_index for literal identifiers."""
-        conn = self._get_conn()
+        """Fall back: find references to names that contain a literal identifier."""
         items: list[dict] = []
-
-        def _escape_like(s: str) -> str:
-            # Escape LIKE metacharacters so ``_`` and ``%`` (common in
-            # identifiers) are matched literally rather than as wildcards.
-            return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-        for lit in literals:
+        graph = self._published_references()
+        if graph is not None:
             try:
-                sql = (
-                    "SELECT target_qn, file_path, line, col, ref_kind "
-                    "FROM reference_index WHERE target_qn LIKE ? ESCAPE '\\'"
+                file_paths = (
+                    graph.stored_paths_containing(file_scope) if file_scope else None
                 )
-                params: list[Any] = ["%" + _escape_like(lit) + "%"]
-                if file_scope:
-                    sql += " AND file_path LIKE ? ESCAPE '\\'"
-                    params.append("%" + _escape_like(file_scope) + "%")
-                sql += " ORDER BY file_path, line LIMIT ?"
-                params.append(limit)
-
-                for row in conn.execute(sql, params):
-                    items.append({
-                        "target_qn": row[0],
-                        "file_path": row[1],
-                        "line": row[2],
-                        "col": row[3],
-                        "ref_kind": row[4],
-                    })
-            except sqlite3.Error:
+                for literal in literals:
+                    # One more than the limit shows whether anything was cut.
+                    items.extend(
+                        self._reference_item(*row)
+                        for row in graph.references_to_names_containing(
+                            literal, limit=limit + 1, file_paths=file_paths,
+                        )
+                    )
+            except BUG_EXCEPTIONS:
+                raise
+            except Exception:
                 logger.debug("Literal reference search failed", exc_info=True)
 
         return SearchResult(
@@ -1322,31 +1367,20 @@ class EditorSearchEngine:
         ref_kind: str | None = None,
     ) -> SearchResult:
         t0 = time.monotonic()
-        conn = self._get_conn()
-
-        sql = (
-            "SELECT target_qn, file_path, line, col, ref_kind "
-            "FROM reference_index WHERE target_qn = ?"
-        )
-        params: list[Any] = [qualified_name]
-        if ref_kind:
-            sql += " AND ref_kind = ?"
-            params.append(ref_kind)
-        sql += " ORDER BY file_path, line LIMIT ?"
-        params.append(limit)
-
         items: list[dict] = []
-        try:
-            for row in conn.execute(sql, params):
-                items.append({
-                    "target_qn": row[0],
-                    "file_path": row[1],
-                    "line": row[2],
-                    "col": row[3],
-                    "ref_kind": row[4],
-                })
-        except sqlite3.Error as exc:
-            logger.debug("Reference query failed: %s", exc)
+        graph = self._published_references()
+        if graph is not None:
+            try:
+                items = [
+                    self._reference_item(qualified_name, *row)
+                    for row in graph.reference_locations(
+                        qualified_name, ref_kind=ref_kind, limit=limit,
+                    )
+                ]
+            except BUG_EXCEPTIONS:
+                raise
+            except Exception:
+                logger.debug("Reference query failed", exc_info=True)
 
         elapsed = round((time.monotonic() - t0) * 1000, 2)
         return SearchResult(
@@ -1475,9 +1509,7 @@ class EditorSearchEngine:
             info["symbol_count"] = conn.execute(
                 "SELECT COUNT(*) FROM symbol_index"
             ).fetchone()[0]
-            info["reference_count"] = conn.execute(
-                "SELECT COUNT(*) FROM reference_index"
-            ).fetchone()[0]
+            info["reference_count"] = self._reference_count()
             info["file_count"] = conn.execute(
                 "SELECT COUNT(*) FROM file_manifest"
             ).fetchone()[0]
@@ -1873,7 +1905,7 @@ class EditorSearchEngine:
 
         fresh = ensure_search_index(self.project_root)
         # Rebuild FTS after any re-indexing
-        fts_count = self._store.write(rebuild_fts)
+        fts_count = self._rebuild_fts()
         self._fts_available = fts_count > 0
         self._search_ready = True
         self._fts_ready = True
@@ -2341,20 +2373,26 @@ class EditorSearchEngine:
                         if b and b not in checked_parents:
                             parents_to_check.append(b)
 
-            # Enrich dotted completions via reference_index: find members referenced on parent
-            if len(items) < limit:
+            # Enrich dotted completions with members that are referenced on the
+            # parent somewhere in the project, even where none is defined.
+            graph = self._published_references() if len(items) < limit else None
+            if graph is not None:
                 try:
-                    ref_sql = (
-                        "SELECT DISTINCT target_qn FROM reference_index "
-                        "WHERE target_qn GLOB ? LIMIT ?"
+                    parents = sorted(checked_parents)
+                    # One pass over the names serves every parent.  Many names
+                    # share a member, so read more of them than items wanted.
+                    names = graph.referenced_names_containing(
+                        [f"{p}.{member_prefix}" for p in parents],
+                        limit=max(200, 10 * limit),
                     )
-                    for p in checked_parents:
-                        ref_pattern = f"*{p}.{member_prefix}*"
-                        for row in conn.execute(ref_sql, (ref_pattern, limit - len(items))):
-                            target_qn = row[0]
+                    for target_qn in names:
+                        if len(items) >= limit:
+                            break
+                        for p in parents:
+                            if f"{p}." not in target_qn:
+                                continue
                             # Extract the member name (segment immediately after the parent)
-                            suffix = target_qn.split(f"{p}.", 1)[-1] if f"{p}." in target_qn else ""
-                            member_name = suffix.split(".")[0] if suffix else ""
+                            member_name = target_qn.split(f"{p}.", 1)[-1].split(".")[0]
                             if member_name and member_name.startswith(member_prefix) and member_name not in seen:
                                 seen.add(member_name)
                                 items.append({
@@ -2363,8 +2401,10 @@ class EditorSearchEngine:
                                     "menu": f"[ref:{target_qn}]",
                                     "score": 800,
                                 })
-                except sqlite3.Error as exc:
-                    logger.debug("Reference-based completion failed: %s", exc)
+                except BUG_EXCEPTIONS:
+                    raise
+                except Exception:
+                    logger.debug("Reference-based completion failed", exc_info=True)
 
             # Fallback: resolve through KB module mappings for cross-project symbols
             if not items:

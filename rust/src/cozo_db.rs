@@ -13,6 +13,7 @@ use cozo::*;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use rayon::slice::ParallelSliceMut;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -36,6 +37,11 @@ const STORED_TEXTS: &str = "q[id] <- $ids ?[id, text] := q[id], *interned[id, te
 const STORED_TEXT: &str = "?[text] := *interned[$id, text]";
 const ALL_IDS: &str = "?[text, id] := *intern[text, id]";
 const ALL_TEXTS: &str = "?[id, text] := *interned[id, text]";
+/// The dictionary in text order, a page at a time: a result is held in memory
+/// whole, and the whole dictionary at once is several times its own size.
+const IDS_PAGE: usize = 20_000;
+const FIRST_IDS: &str = "?[text, id] := *intern[text, id] :limit 20000";
+const NEXT_IDS: &str = "?[text, id] := *intern[text, id], text > $after :limit 20000";
 const PUT_INTERN: &str = "?[text, id] <- $entries :put intern {text => id}";
 const PUT_INTERNED: &str = "?[text, id] <- $entries :put interned {id => text}";
 
@@ -603,6 +609,74 @@ impl PyCozoDb {
             .collect())
     }
 
+    /// The first `limit` stored texts, in text order, that contain any of
+    /// `fragments`, with their ids.
+    ///
+    /// The query engine tests a substring one row at a time, and slowly: it
+    /// spends longer on that than on reading the row.  The whole dictionary
+    /// is read into this handle once instead and searched here.
+    fn search_texts(
+        &self,
+        fragments: &[String],
+        limit: usize,
+        ignore_case: bool,
+    ) -> Result<Vec<(String, i64)>, String> {
+        if fragments.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        if !self.dictionary().all_ids {
+            let mut after: Option<String> = None;
+            loop {
+                let page = match &after {
+                    None => self.read(FIRST_IDS, BTreeMap::new())?,
+                    Some(text) => {
+                        self.read(NEXT_IDS, one_param("after", DataValue::from(text.as_str())))?
+                    }
+                }
+                .rows;
+                let full = page.len() == IDS_PAGE;
+                let mut dictionary = self.dictionary_mut();
+                for row in &page {
+                    if let (Some(text), Some(id)) = (row[0].get_str(), row[1].get_int()) {
+                        dictionary.ids.insert(text.to_string(), id);
+                        if after.as_deref().is_none_or(|last| last < text) {
+                            after = Some(text.to_string());
+                        }
+                    }
+                }
+                if !full {
+                    // A write commits its texts to this map itself, so nothing
+                    // that finished meanwhile is missing from it.
+                    dictionary.all_ids = true;
+                    break;
+                }
+            }
+        }
+        let needles: Vec<String> = if ignore_case {
+            fragments.iter().map(|fragment| fragment.to_lowercase()).collect()
+        } else {
+            fragments.to_vec()
+        };
+        let contains = |text: &str| needles.iter().any(|needle| text.contains(needle.as_str()));
+        let dictionary = self.dictionary();
+        let mut found: Vec<(&String, i64)> = dictionary
+            .ids
+            .par_iter()
+            // A text looked up and not found is remembered here without an id.
+            .filter(|(text, &id)| {
+                id != ABSENT
+                    && if ignore_case { contains(&text.to_lowercase()) } else { contains(text) }
+            })
+            .map(|(text, &id)| (text, id))
+            .collect();
+        if found.len() > limit {
+            found.select_nth_unstable(limit);
+            found.truncate(limit);
+        }
+        found.sort_unstable();
+        Ok(found.into_iter().map(|(text, id)| (text.clone(), id)).collect())
+    }
+
     /// Replace the stored ids in a result by their text.  Unless the script
     /// orders its rows itself, they are then put in the order they would have
     /// had if the relations held the text.
@@ -717,6 +791,22 @@ impl PyCozoDb {
     /// hold.  Nothing is added.
     fn intern_ids(&self, py: Python<'_>, texts: Vec<String>) -> PyResult<Vec<i64>> {
         py.detach(|| self.lookup_ids(&texts)).map_err(|error| {
+            PyRuntimeError::new_err(format!("CozoDB query error: {}", error))
+        })
+    }
+
+    /// The first `limit` stored texts, in text order, that contain any of
+    /// `fragments`, as `(text, id)` pairs.  The first call reads the whole
+    /// dictionary into memory; later ones search it there.
+    #[pyo3(signature = (fragments, limit, *, ignore_case=false))]
+    fn texts_containing(
+        &self,
+        py: Python<'_>,
+        fragments: Vec<String>,
+        limit: usize,
+        ignore_case: bool,
+    ) -> PyResult<Vec<(String, i64)>> {
+        py.detach(|| self.search_texts(&fragments, limit, ignore_case)).map_err(|error| {
             PyRuntimeError::new_err(format!("CozoDB query error: {}", error))
         })
     }

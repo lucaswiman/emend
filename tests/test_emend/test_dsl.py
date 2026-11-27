@@ -1536,3 +1536,35 @@ class TestGraphqlFindInDsl:
         matches = find_in_dsl("type $TYPE", str(f), dsl_type="graphql")
         assert len(matches) >= 1
         assert matches[0].captures.get("TYPE") is not None
+
+
+def test_detection_reads_a_files_comments_and_strings_once(tmp_path, monkeypatch):
+    """Three detectors look at the same file; it is parsed for them once."""
+    from collections import Counter
+
+    from emend import emend_core
+    from emend.dsl import DslKind, detect_dsl_regions
+
+    calls = Counter()
+
+    def counted(name):
+        collect = getattr(emend_core, name)
+
+        def wrapper(source, ext):
+            calls[name] += 1
+            return collect(source, ext)
+
+        monkeypatch.setattr(emend_core, name, wrapper)
+
+    counted("collect_comments")
+    counted("collect_string_literals")
+    path = tmp_path / "queries.py"
+    path.write_text(
+        'QUERY = "SELECT id, email FROM users WHERE id = 1"\n'
+        'PAGE = "{% for user in users %}{{ user.email }}{% endfor %}"\n'
+    )
+
+    regions = detect_dsl_regions(str(path))
+
+    assert {region.dsl for region in regions} >= {DslKind.SQL, DslKind.JINJA}
+    assert calls == {"collect_comments": 1, "collect_string_literals": 1}

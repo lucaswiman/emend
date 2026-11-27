@@ -8,9 +8,11 @@ other processes can see must never be written in place.
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -443,3 +445,80 @@ def test_an_edit_keeps_the_rest_of_the_generation(tmp_path):
     # Texts the generation already held keep their ids.
     assert before.items() <= after.items()
     assert "app.added" in after
+
+
+# ---------------------------------------------------------------------------
+# Copying a generation
+# ---------------------------------------------------------------------------
+
+
+def _database(path, rows, *, journal_mode="delete"):
+    conn = sqlite3.connect(path)
+    conn.execute(f"PRAGMA journal_mode={journal_mode}")
+    conn.execute("CREATE TABLE t (v)")
+    conn.executemany("INSERT INTO t VALUES (?)", [(row,) for row in rows])
+    conn.commit()
+    return conn
+
+
+def _values(path):
+    with closing(sqlite3.connect(path)) as conn:
+        return [row[0] for row in conn.execute("SELECT v FROM t ORDER BY v")]
+
+
+def test_generation_with_no_log_is_copied_as_a_file(tmp_path, monkeypatch):
+    """A finished generation is one file; SQLite's page-by-page backup of it
+    is several times slower than copying the file."""
+    source, copy = tmp_path / "source.db", tmp_path / "copy.db"
+    _database(source, range(500)).close()
+
+    def backup(*args, **kwargs):
+        raise AssertionError("a quiescent database was copied through SQLite")
+
+    monkeypatch.setattr(AnalysisStore, "_backup_sqlite", staticmethod(backup))
+    AnalysisStore._copy_sqlite(source, copy)
+
+    assert copy.read_bytes() == source.read_bytes()
+    assert _values(copy) == list(range(500))
+
+
+def test_generation_with_a_write_ahead_log_is_copied_through_sqlite(tmp_path):
+    """Rows still in the log are part of the database."""
+    source, copy = tmp_path / "source.db", tmp_path / "copy.db"
+    writer = _database(source, range(10), journal_mode="wal")
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.executemany("INSERT INTO t VALUES (?)", [(row,) for row in range(10, 20)])
+        writer.commit()
+        assert (tmp_path / "source.db-wal").stat().st_size > 0
+        AnalysisStore._copy_sqlite(source, copy)
+    finally:
+        writer.close()
+
+    assert _values(copy) == list(range(20))
+
+
+def test_fresh_generation_is_published_compact(tmp_path):
+    """A bulk save leaves a tenth of every page empty.  The published file is
+    rewritten once, so rewriting it again finds nothing to give back."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'compact'\n")
+    for module in range(30):
+        (tmp_path / f"mod_{module:02}.py").write_text("".join(
+            f"def function_{module}_{number}(value):\n"
+            f"    if value > {number}:\n"
+            f"        return function_{module}_{(number + 1) % 40}(value - 1)\n"
+            f"    return value\n\n\n"
+            for number in range(40)
+        ))
+    store = AnalysisStore.open(tmp_path)
+    try:
+        store.query_facts()
+    finally:
+        store.close()
+
+    published = tmp_path / ".emend" / "cache" / "facts.db"
+    rewritten = tmp_path / "rewritten.db"
+    with closing(sqlite3.connect(published)) as conn:
+        conn.execute("VACUUM INTO ?", (str(rewritten),))
+    assert published.stat().st_size > 500_000
+    assert published.stat().st_size == rewritten.stat().st_size

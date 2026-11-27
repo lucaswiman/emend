@@ -25,6 +25,33 @@ def _initialize_cache_connection(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def compact_cache_database(db_path: str | Path) -> None:
+    """Give back the disk space a cache database no longer needs.
+
+    SQLite keeps the write-ahead log at its largest size while any connection
+    is open, and an index build writes tens of megabytes through it.  Pages
+    freed by dropping a table stay inside the database file.  This empties
+    the log, and rewrites the file when most of it is free pages.
+
+    Both need every other connection to be between transactions.  When one
+    is not, nothing waits: a later build reclaims the space.
+    """
+    import sqlite3
+    from contextlib import closing
+
+    if not Path(db_path).is_file():
+        return
+    try:
+        with closing(sqlite3.connect(str(db_path), timeout=0)) as conn:
+            free = conn.execute("PRAGMA freelist_count").fetchone()[0]
+            pages = conn.execute("PRAGMA page_count").fetchone()[0]
+            if free > 256 and free * 2 > pages:
+                conn.execute("VACUUM")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+    except sqlite3.Error:
+        logger.debug("Could not compact %s", db_path, exc_info=True)
+
+
 def _resolve_shared_data_root(project_root: str) -> Path:
     """Return the main checkout root for user-managed shared data.
 
@@ -122,6 +149,92 @@ def _drop_cache_columns(conn: sqlite3.Connection, table: str, obsolete: set[str]
         conn.execute("RELEASE cache_columns")
 
 
+# Every ``symbol_index`` column except the file path.
+_SYMBOL_COLUMNS = (
+    "name", "qualified_name", "module_qn", "kind", "line", "end_line", "depth",
+    "parent", "bases", "signature", "returns", "decorators",
+)
+
+
+def _init_symbol_storage(conn: sqlite3.Connection) -> None:
+    """Create the symbol tables and their ``symbol_index`` view.
+
+    A ``symbol_index`` table from an earlier layout is converted in place.
+    Its rows keep their rowids, which full-text rows refer to.
+    """
+    columns = ", ".join(_SYMBOL_COLUMNS)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS symbol_file ("
+        "id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE)"
+    )
+    # Only what every writer supplies is required: rows converted from a
+    # table written by hand, as tests do, may lack the rest.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS symbol ("
+        "  file_id INTEGER NOT NULL,"
+        "  name TEXT NOT NULL,"
+        "  qualified_name TEXT,"
+        "  module_qn TEXT,"
+        "  kind TEXT,"
+        "  line INTEGER,"
+        "  end_line INTEGER,"
+        "  depth INTEGER NOT NULL DEFAULT 1,"
+        "  parent TEXT,"
+        "  bases TEXT,"
+        "  signature TEXT,"
+        "  returns TEXT,"
+        "  decorators TEXT"
+        ")"
+    )
+    previous = conn.execute(
+        "SELECT type FROM sqlite_master WHERE name = 'symbol_index'"
+    ).fetchone()
+    if previous is not None and previous[0] == "table":
+        present = {row[1] for row in conn.execute("PRAGMA table_info(symbol_index)")}
+        copied = [name for name in _SYMBOL_COLUMNS if name in present]
+        values = ", ".join(
+            f"COALESCE(old.{name}, 1)" if name == "depth" else f"old.{name}"
+            for name in copied
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO symbol_file (path) "
+            "SELECT DISTINCT file_path FROM symbol_index"
+        )
+        conn.execute(
+            f"INSERT INTO symbol (rowid, file_id, {', '.join(copied)}) "
+            f"SELECT old.rowid, file.id, {values} "
+            "FROM symbol_index AS old JOIN symbol_file AS file ON file.path = old.file_path"
+        )
+        # Its indexes go with it; two of their names are reused below.
+        conn.execute("DROP TABLE symbol_index")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sym_name ON symbol(name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sym_qn ON symbol(qualified_name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sym_file ON symbol(file_id)")
+    conn.execute(
+        "CREATE VIEW IF NOT EXISTS symbol_index AS "
+        "SELECT symbol.rowid AS rowid, symbol_file.path AS file_path, "
+        + ", ".join(f"symbol.{name} AS {name}" for name in _SYMBOL_COLUMNS)
+        + " FROM symbol JOIN symbol_file ON symbol_file.id = symbol.file_id"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS symbol_index_insert "
+        "INSTEAD OF INSERT ON symbol_index BEGIN "
+        "INSERT OR IGNORE INTO symbol_file (path) VALUES (NEW.file_path); "
+        f"INSERT INTO symbol (file_id, {columns}) VALUES ("
+        "(SELECT id FROM symbol_file WHERE path = NEW.file_path), "
+        + ", ".join(
+            "COALESCE(NEW.depth, 1)" if name == "depth" else f"NEW.{name}"
+            for name in _SYMBOL_COLUMNS
+        )
+        + "); END"
+    )
+    conn.execute(
+        "CREATE TRIGGER IF NOT EXISTS symbol_index_delete "
+        "INSTEAD OF DELETE ON symbol_index BEGIN "
+        "DELETE FROM symbol WHERE rowid = OLD.rowid; END"
+    )
+
+
 def _init_cache_schema(conn: sqlite3.Connection) -> None:
     """Create all cache tables and indexes if they don't exist (idempotent).
 
@@ -133,18 +246,22 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
     (FTS5 trigram), freshness metadata (file_manifest, index_meta), the QN
     pre-filter cache. Structured analysis facts
     (symbols, references, imports, CFG, def-use, calls) are owned by CozoDB
-    facts.db. ``symbol_index`` and ``reference_index`` remain for editor
-    search.
+    facts.db. ``symbol_index`` remains for editor search; references are
+    read from the fact graph.
+
+    A symbol row names its file by id (``symbol``, ``symbol_file``): a path
+    repeated in every row and again in its index was a third of the table.
+    ``symbol_index`` is a view over the two, with triggers, so it reads and
+    writes like the table it replaced.
     """
     # Preserve symbol rowids: FTS rows refer to them. These fields and tables
     # were populated by old indexers but no longer have consumers.
-    for table in ("import_graph", "dsl_symbols", "dsl_links"):
+    for table in ("import_graph", "dsl_symbols", "dsl_links", "reference_index"):
         conn.execute(f"DROP TABLE IF EXISTS {table}")
     for index in ("idx_sym_hash", "idx_ref_hash", "idx_manifest_hash"):
         conn.execute(f"DROP INDEX IF EXISTS {index}")
     for table, obsolete in (
         ("symbol_index", {"content_hash", "is_entry_point", "is_exported", "has_noqa"}),
-        ("reference_index", {"content_hash"}),
         ("file_manifest", {"mtime_ns", "size", "indexed_at"}),
         ("venv_files", {"content_hash"}),
     ):
@@ -176,50 +293,7 @@ def _init_cache_schema(conn: sqlite3.Connection) -> None:
     )
     if "scope_hash" not in {row[1] for row in conn.execute("PRAGMA table_info(file_manifest)")}:
         conn.execute("ALTER TABLE file_manifest ADD COLUMN scope_hash BLOB")
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS symbol_index ("
-        "  file_path TEXT NOT NULL,"
-        "  name TEXT NOT NULL,"
-        "  qualified_name TEXT NOT NULL,"
-        "  module_qn TEXT,"
-        "  kind TEXT NOT NULL,"
-        "  line INTEGER NOT NULL,"
-        "  end_line INTEGER NOT NULL,"
-        "  depth INTEGER NOT NULL DEFAULT 1,"
-        "  parent TEXT,"
-        "  bases TEXT,"
-        "  signature TEXT,"
-        "  returns TEXT,"
-        "  decorators TEXT"
-        ")"
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_sym_name ON symbol_index(name)")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_sym_qn ON symbol_index(qualified_name)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_sym_file ON symbol_index(file_path)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_sym_kind ON symbol_index(kind)"
-    )
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS reference_index ("
-        "  target_qn TEXT NOT NULL,"
-        "  file_path TEXT NOT NULL,"
-        "  line INTEGER NOT NULL,"
-        "  col INTEGER NOT NULL,"
-        "  ref_kind TEXT NOT NULL"
-        ")"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_ref_qn "
-        "ON reference_index(target_qn)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_ref_file "
-        "ON reference_index(file_path)"
-    )
+    _init_symbol_storage(conn)
     # Duplicate analysis payload cache: one row per unique file
     # content (keyed by MD5 hash). ``data`` is the compressed JSON of the
     # per-file subtree/sequence payload. ``version`` allows cache invalidation

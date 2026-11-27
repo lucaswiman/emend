@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from functools import lru_cache
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -140,6 +141,19 @@ _GQL_QUERY_DEF_RE = re.compile(
 )
 
 
+@lru_cache(maxsize=8)
+def _parsed(collector: str, source: str, ext: str) -> list:
+    """Run one ``emend_core`` collector over a source, once.
+
+    Every detector asks for the same file's comments and string literals, and
+    each answer is a parse.  The few most recent are kept; a file's detectors
+    run one after another.
+    """
+    from emend import emend_core as _rust  # type: ignore[attr-defined]
+
+    return getattr(_rust, collector)(source, ext)
+
+
 def _get_string_literals(
     source: str, file_path: str
 ) -> list[tuple[int, int, int, int, int, int, str]]:
@@ -151,11 +165,9 @@ def _get_string_literals(
 
     Falls back to an empty list if ``emend_core`` is unavailable.
     """
-    from emend import emend_core as _rust  # type: ignore[attr-defined]
-
     ext = Path(file_path).suffix.lstrip(".") or "py"
     try:
-        return _rust.collect_string_literals(source, ext)
+        return _parsed("collect_string_literals", source, ext)
     except Exception:
         logger.debug("collect_string_literals failed for %s", file_path, exc_info=True)
         return []
@@ -168,11 +180,9 @@ def _has_magic_comment(source: str, file_path: str, keyword: str) -> bool:
     simple regex over the raw source only if the Rust extension is unavailable.
     The regex fallback operates on comment text, not source structure.
     """
-    from emend import emend_core as _rust  # type: ignore[attr-defined]
-
     ext = Path(file_path).suffix.lstrip(".") or "py"
     try:
-        comments = _rust.collect_comments(source, ext)
+        comments = _parsed("collect_comments", source, ext)
     except Exception:
         logger.debug("collect_comments failed for %s", file_path, exc_info=True)
         # Fallback: regex on raw source (acceptable for comment text detection)

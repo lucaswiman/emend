@@ -36,6 +36,40 @@
   (Django: 23 s, where rewriting took 90 s).
 - A query on a project with no index stores facts a few files at a time
   instead of holding the whole project's facts in memory first.
+- A much smaller search index. `parse.db` no longer keeps its own copy of
+  every reference (the fact graph has them), stores each file path once, and
+  its full-text index holds neither a copy of the text nor trigram positions.
+  For Django it shrinks from 411 MB plus a 32 MB write-ahead log to 32 MB.
+  An existing index is converted in place and shrinks on the next
+  `emend tool index`.
+- Write-ahead logs are emptied when indexing finishes; they were left at their
+  largest size.
+- A cold index parses each file once. Fact extraction now returns the symbol
+  rows and name set that the search index used to derive with a second parse
+  (Django: 25 s to 19 s).
+- Editor reference search (`references`, the fallback for incomplete patterns,
+  members offered after a dot) reads the fact graph as of the last index.
+  Results are the same for Python. For JavaScript and TypeScript, a reference
+  is now found under the fact graph's dotted name (`util.run`), where the
+  search index had the slash-separated module path (`util/run`). The first
+  such lookup after an index reads the name dictionary into memory.
+- The incomplete-pattern fallback now reports when its results were truncated.
+- JavaScript and TypeScript re-exports (`export * from './x'`,
+  `export { a } from './x'`) are stored under the module's name. They were
+  stored under a name built from the absolute path of the checkout, so a
+  barrel file was missing from the references of what it re-exports. The fact
+  database is rebuilt once after upgrading.
+- `analyze deadcode` is about three times faster on a large project (Django:
+  104 s to 35 s). It made a database query per file and per symbol, and ran
+  its analysis for languages with no symbols.
+- Faster repeated queries. Embedded SQL, Jinja and GraphQL detection parses
+  each file once instead of seven times, the project scan asks the file system
+  about each directory once, and updating facts after an edit copies the
+  database as a file and removes the edited file's rows by file (Django: a
+  warm `analyze refs` 2.7 s to 1.4 s; the first query after an edit 4.3 s to
+  1.6 s).
+- A freshly built `facts.db` is compacted before it is published (Django:
+  407 MB to 367 MB).
 
 ## 0.5.6
 

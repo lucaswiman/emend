@@ -135,6 +135,11 @@ class _SharedGenerationClient:
     def intern_ids(self, texts: list[str]) -> list[int]:
         return self._client.intern_ids(texts)
 
+    def texts_containing(
+        self, fragments: list[str], limit: int, *, ignore_case: bool = False,
+    ) -> list[tuple[str, int]]:
+        return self._client.texts_containing(fragments, limit, ignore_case=ignore_case)
+
     def run_transaction(self, operations: list[tuple[Any, ...]]) -> None:
         self._graph._private_client().run_transaction(operations)
 
@@ -550,6 +555,21 @@ class FactGraph:
                 pass
         return str(resolved)
 
+    def stored_paths_containing(self, fragment: str) -> list[str]:
+        """Stored paths of the files whose absolute path contains *fragment*, ignoring case."""
+        if self._snapshot is None:
+            return []
+        root = Path(self._snapshot.project_root)
+        fragment = fragment.lower()
+        paths = []
+        for revision in self._snapshot.files:
+            if fragment in revision.file_path.lower():
+                try:
+                    paths.append(str(Path(revision.file_path).relative_to(root)))
+                except ValueError:
+                    paths.append(revision.file_path)
+        return paths
+
     def published_snapshot_id(self) -> str | None:
         """Return the generation marker stored alongside the fact relations."""
         try:
@@ -898,6 +918,29 @@ class FactGraph:
         from emend.language_registry import detect_language
         return detect_language(file_path) or ""
 
+    def namespace_lookup(self) -> Callable[[str], str]:
+        """Return ``namespace_for_file`` over one read of the namespaces.
+
+        A query has a fixed cost of a millisecond or more, so a loop over
+        files asks this instead.  The answers are as of this call.
+        """
+        namespaces = dict(self._client.run("?[fp, ns] := *file_namespace[fp, ns]")["rows"])
+        answered: dict[str, str] = {}
+
+        def namespace_of(file_path: str) -> str:
+            namespace = answered.get(file_path)
+            if namespace is None:
+                namespace = namespaces.get(file_path)
+                if namespace is None:
+                    namespace = namespaces.get(self.stored_path(file_path))
+                if namespace is None:
+                    from emend.language_registry import detect_language
+                    namespace = detect_language(file_path) or ""
+                answered[file_path] = namespace
+            return namespace
+
+        return namespace_of
+
     def add_file_namespace(self, fact: FileNamespaceFact) -> None:
         self._put_batch("file_namespace", "file_path, namespace", "file_path => namespace",
                         [[fact.file_path, fact.namespace]])
@@ -955,10 +998,11 @@ class FactGraph:
     def require_unambiguous_symbols(self, qnames, *, namespace=None) -> None:
         """Reject ambiguous bare names before building a destructive plan."""
         seen = set()
+        namespace_of = self.namespace_lookup()
         for symbol in self.symbols():
             qn = symbol.qualified_name
             if qn not in qnames or (namespace is not None and
-                                   self.namespace_for_file(symbol.file_path) != namespace):
+                                   namespace_of(symbol.file_path) != namespace):
                 continue
             if qn in seen:
                 raise ValueError(f"Ambiguous symbol {qn!r}; cannot plan a cascade")
@@ -1285,6 +1329,20 @@ class FactGraph:
             TypeFact(symbol_qn=r[0], type_str=r[1], file_path=r[2], line=r[3], binding_kind=r[4])
             for r in result["rows"]
         ]
+
+    def imports_by_file(self) -> dict[str, list[tuple[str, str | None]]]:
+        """Every file's ``(imported_module, imported_name)`` pairs, in one read.
+
+        Each list is what ``imports_in`` gives for that stored path, in the
+        same order; a file that imports nothing has no entry.
+        """
+        rows = self._client.run(
+            "?[f, mod, name, alias, line] := *import[f, mod, name, line, alias]"
+        )["rows"]
+        imports: dict[str, list[tuple[str, str | None]]] = {}
+        for file_path, module, name, _alias, _line in rows:
+            imports.setdefault(file_path, []).append((module, name or None))
+        return imports
 
     def imports_in(self, file_path: str) -> list[ImportFact]:
         """Return all imports declared in *file_path*."""
@@ -1784,7 +1842,17 @@ class FactGraph:
             "reported[qn, roots], eligible[qn, fp, name, kind, line, end_line, parent]"
         )
 
-        result = self._run_namespaced(query, namespace=namespace)
+        # Scoping each relation to a namespace reads all of it, whatever the
+        # namespace holds.  One without a symbol (a stylesheet, markup) has no
+        # dead symbol to find, so it is not asked.
+        if namespace is not None and not self._client.run(
+            "?[fp] := *symbol[_, fp, _, _, _, _, _], *file_namespace[fp, $namespace] "
+            ":limit 1",
+            {"namespace": namespace},
+        )["rows"]:
+            result = {"rows": []}
+        else:
+            result = self._run_namespaced(query, namespace=namespace)
         dead_symbols = [
             DeadSymbolFact(
                 file_path=r[0], name=r[1], qualified_name=r[2],
@@ -2078,6 +2146,120 @@ class FactGraph:
             for r in result["rows"]
         ]
 
+    # -- Reference lookups for interactive search --------------------------
+    #
+    # These read the stored relation as it is, in every language at once.  A
+    # limited answer does not depend on the order ids were handed out, so it is
+    # the same after a rebuild.
+
+    def reference_locations(
+        self, symbol_qn: str, *, ref_kind: str | None = None, limit: int | None = None,
+    ) -> list[tuple[str, int, int, str]]:
+        """Where *symbol_qn* is named: ``(file_path, line, col, ref_kind)`` rows.
+
+        Rows are in path order, then position, and stop at *limit*.
+        """
+        params: dict[str, Any] = {"qn": self._id(symbol_qn)}
+        kind = ""
+        if ref_kind is not None:
+            kind = ", kind == $kind"
+            params["kind"] = ref_kind
+        rows = self._client.run(
+            "?[path, line, col, kind] := "
+            "*reference{symbol_qn: $qn, file_path: fid, line, col, ref_kind: kind}, "
+            f"*interned[fid, path]{kind} :order path, line, col"
+            + (f" :limit {int(limit)}" if limit is not None else ""),
+            params,
+        )["rows"]
+        return [tuple(row) for row in rows]
+
+    def _referenced_names(
+        self,
+        fragments: list[str],
+        script: str,
+        params: dict[str, Any],
+        *,
+        limit: int,
+        ignore_case: bool,
+    ) -> list[list[Any]]:
+        """Run *script* over the first names, in name order, that hold a fragment.
+
+        *script* reads its candidates from ``names[nid, name]`` and returns at
+        most *limit* rows in an order that starts with the name.  Not every
+        candidate has a row (a path is in the dictionary too, and a name may
+        have no reference in scope), so candidates are taken until enough do.
+
+        The bridge searches the dictionary in memory.  Its first search on a
+        database reads the whole dictionary; the query engine would read it on
+        every search, and test each row far more slowly.
+        """
+        wanted = max(8 * limit, 256)
+        while True:
+            names = self._client.texts_containing(fragments, wanted, ignore_case=ignore_case)
+            if not names:
+                return []
+            rows = self._client.run(
+                "names[nid, name] <- $names\n" + script,
+                {**params, "names": [[nid, name] for name, nid in names]},
+            )["rows"]
+            if len(rows) >= limit or len(names) < wanted:
+                return rows
+            wanted *= 8
+
+    def references_to_names_containing(
+        self, fragment: str, *, limit: int, file_paths: Iterable[str] | None = None,
+    ) -> list[tuple[str, str, int, int, str]]:
+        """References to names that contain *fragment*, ignoring case.
+
+        Rows are ``(symbol_qn, file_path, line, col, ref_kind)`` in path order,
+        then position.  At most *limit* are returned: those of the first
+        matching names in name order, each name's in path order.  *file_paths*
+        keeps only references in those stored paths.
+        """
+        limit = int(limit)
+        params: dict[str, Any] = {}
+        scope = files = ""
+        if file_paths is not None:
+            params["files"] = [[ident] for ident in self._known_ids(file_paths)]
+            if not params["files"]:
+                return []
+            files = "scope[fid] <- $files\n"
+            scope = "scope[fid], "
+        rows = self._referenced_names(
+            [fragment],
+            f"{files}?[name, path, line, col, kind] := names[nid, name], "
+            "*reference{symbol_qn: nid, file_path: fid, line, col, ref_kind: kind}, "
+            f"{scope}*interned[fid, path] "
+            f":order name, path, line, col :limit {limit}",
+            params, limit=limit, ignore_case=True,
+        )
+        return sorted(
+            (tuple(row) for row in rows),
+            key=lambda row: (row[1], row[2], row[3], row[0]),
+        )
+
+    def referenced_names_containing(
+        self, fragments: str | Iterable[str], *, limit: int,
+    ) -> list[str]:
+        """The first referenced names, in name order, that contain a fragment.
+
+        The match is exact about case.
+        """
+        fragments = [fragments] if isinstance(fragments, str) else list(fragments)
+        limit = int(limit)
+        rows = self._referenced_names(
+            fragments,
+            "?[name] := names[nid, name], *reference{symbol_qn: nid} "
+            f":order name :limit {limit}",
+            {}, limit=limit, ignore_case=False,
+        )
+        return [row[0] for row in rows]
+
+    def reference_count(self) -> int:
+        """How many references the graph holds."""
+        rows = self._client.run("?[count(line)] := *reference{line}")["rows"]
+        return int(rows[0][0]) if rows else 0
+
     def callers_datalog(self, symbol_qn: str, *, namespace: str | None = None) -> list[CallFact]:
         """Find all callers of *symbol_qn* via Datalog query.
 
@@ -2366,10 +2548,39 @@ class FactGraph:
         if not stored:
             return
 
+        # A relation whose key starts with the file is looked up by file.
+        # ``file_path in $fps`` is a filter: it reads every row of the
+        # relation, which for one changed file is nearly all of the work.
+        keyed_by_file = {
+            "file_namespace", "search_symbol", "call_by_file", "cfg_edge", "flow_blob",
+            "def_use", "method_call", "cfg_block", "source_loc", "ref_by_block",
+            "noncall_private_member_ref", "reachable_block", "exported_symbol", "import",
+        }
+        # The three call relations hold the same rows under three keys, so the
+        # one keyed by file names the rows to remove from the other two.
+        call_keys = (
+            "files[file_path] <- $files\n"
+            "?[{keys}] := files[file_path], "
+            "*call_by_file[file_path, caller_qn, callee_qn, line, col, _, _] "
+            ":rm {relation} {{{keys} => }}"
+        )
+
+        def lookup(query: str) -> str:
+            head, body = query.split(" := ", 1)
+            relation = body[1:body.index("[")]
+            if relation in ("call", "call_by_callee"):
+                return call_keys.format(relation=relation, keys=head[2:-1])
+            if relation not in keyed_by_file:
+                return query
+            column = "importing_file" if relation == "import" else "file_path"
+            atom, rest = body.split(f", {column} in $fps", 1)
+            return f"files[{column}] <- $files\n{head} := files[{column}], {atom}{rest}"
+
+        params = {"fps": stored, "files": [[ident] for ident in stored]}
         # CozoDB `:rm` requires that the query variable names in `?[...]`
         # and `:rm relation { }` match the actual column names in the
         # stored relation schema.
-        for query in (
+        for query in map(lookup, (
             # All definition metadata has explicit file ownership.
             "?[symbol_qn, decorator, file_path] := *decorator_on[symbol_qn, decorator, file_path], "
             "file_path in $fps :rm decorator_on {symbol_qn, decorator, file_path}",
@@ -2461,12 +2672,12 @@ class FactGraph:
             "*import[importing_file, imported_module, imported_name, line, _], "
             "importing_file in $fps  :rm import "
             "{importing_file, imported_module, imported_name, line => }",
-        ):
+        )):
             if operations is not None:
-                operations.append((query, {"fps": stored}))
+                operations.append((query, params))
                 continue
             try:
-                self._client.run(query, {"fps": stored})
+                self._client.run(query, params)
             except Exception:
                 logger.debug("Fact removal query failed", exc_info=True)
 

@@ -397,6 +397,41 @@ class TestDottedCompletionEnrichment:
                 assert item["score"] >= 800
 
 
+REFERENCED_MEMBER_SOURCE = textwrap.dedent("""\
+    class Dog:
+        def bark(self):
+            pass
+
+    def main():
+        Dog.fetch_stick()
+        Dog.bark()
+""")
+
+
+def test_dotted_completion_offers_members_that_are_only_referenced(tmp_path):
+    """A member used on a parent but defined nowhere comes from the fact graph."""
+    from emend.transform import warm_caches
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "animals.py").write_text(REFERENCED_MEMBER_SOURCE)
+    warm_caches(str(proj), type_engine=None)
+    eng = EditorSearchEngine(str(proj))
+    try:
+        items = {item["word"]: item for item in eng.complete("Dog.fe").items}
+        defined = {item["word"]: item for item in eng.complete("Dog.ba").items}
+    finally:
+        eng.close()
+    assert items["fetch_stick"] == {
+        "word": "fetch_stick",
+        "kind": "reference",
+        "menu": "[ref:animals.Dog.fetch_stick]",
+        "score": 800,
+    }
+    # A defined member is offered as the symbol it is, not as a reference.
+    assert defined["bark"]["kind"] != "reference"
+
+
 class TestLatencyInstrumentation:
     """The complete() method should report actual elapsed time."""
 

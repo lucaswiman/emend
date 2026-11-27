@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 
 use crate::cfg::{self, FunctionCfg};
 use crate::scope::{LanguageConfig, Reference, ScopeResolver};
@@ -50,6 +50,17 @@ impl From<bool> for Cell {
     }
 }
 
+impl Cell {
+    fn into_py(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(match self {
+            Cell::String(value) => value.into_pyobject(py)?.into_any().unbind(),
+            Cell::Int(value) => value.into_pyobject(py)?.into_any().unbind(),
+            Cell::Bool(value) => value.into_pyobject(py)?.to_owned().into_any().unbind(),
+            Cell::Bytes(value) => PyBytes::new(py, &value).into_any().unbind(),
+        })
+    }
+}
+
 type Relations = BTreeMap<&'static str, Vec<Vec<Cell>>>;
 
 macro_rules! row {
@@ -61,6 +72,11 @@ macro_rules! row {
 struct FactBatch {
     rows: Relations,
     qnames: Vec<String>,
+    /// The editor's symbol search rows for this file.  They are not a fact
+    /// relation, but they come from the same parse and symbol tree.
+    search_symbols: Vec<Vec<Option<Cell>>>,
+    /// Every name the file mentions, for the rename pre-filter.
+    search_qnames: Vec<String>,
 }
 
 impl FactBatch {
@@ -94,6 +110,8 @@ impl FactBatch {
         Self {
             rows,
             qnames: Vec::new(),
+            search_symbols: Vec::new(),
+            search_qnames: Vec::new(),
         }
     }
 
@@ -109,16 +127,7 @@ impl FactBatch {
             for row in relation {
                 let values: Vec<Py<PyAny>> = row
                     .into_iter()
-                    .map(|cell| -> PyResult<Py<PyAny>> {
-                        Ok(match cell {
-                            Cell::String(value) => value.into_pyobject(py)?.into_any().unbind(),
-                            Cell::Int(value) => value.into_pyobject(py)?.into_any().unbind(),
-                            Cell::Bool(value) => {
-                                value.into_pyobject(py)?.to_owned().into_any().unbind()
-                            }
-                            Cell::Bytes(value) => PyBytes::new(py, &value).into_any().unbind(),
-                        })
-                    })
+                    .map(|cell| cell.into_py(py))
                     .collect::<PyResult<_>>()?;
                 py_rows.append(values)?;
             }
@@ -126,6 +135,19 @@ impl FactBatch {
         }
         result.set_item("rows", rows)?;
         result.set_item("qnames", self.qnames)?;
+        let search_symbols = PyList::empty(py);
+        for row in self.search_symbols {
+            let values: Vec<Py<PyAny>> = row
+                .into_iter()
+                .map(|cell| match cell {
+                    Some(cell) => cell.into_py(py),
+                    None => Ok(py.None()),
+                })
+                .collect::<PyResult<_>>()?;
+            search_symbols.append(PyTuple::new(py, values)?)?;
+        }
+        result.set_item("search_symbols", search_symbols)?;
+        result.set_item("search_qnames", self.search_qnames)?;
         Ok(result.into())
     }
 }
@@ -280,6 +302,93 @@ fn project_symbols(
         &normalize_qn(module_name),
         None,
     );
+    output
+}
+
+/// Split a collected signature such as `(x: int, y=(1, 2)) -> str` into its
+/// parameters.  Only a comma outside every bracket separates two of them.
+fn signature_parameters(signature: Option<&str>) -> Vec<String> {
+    let Some(signature) = signature.filter(|signature| !signature.is_empty()) else {
+        return Vec::new();
+    };
+    let mut text = signature
+        .split_once(" -> ")
+        .map_or(signature, |(parameters, _)| parameters)
+        .trim();
+    if text.starts_with('(') && text.ends_with(')') {
+        text = &text[1..text.len() - 1];
+    }
+    let mut parameters = Vec::new();
+    let mut depth = 0_i32;
+    let mut current = String::new();
+    for character in text.chars() {
+        match character {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parameters.push(std::mem::take(&mut current));
+                continue;
+            }
+            _ => {}
+        }
+        current.push(character);
+    }
+    parameters.push(current);
+    parameters
+        .iter()
+        .map(|parameter| parameter.trim())
+        .filter(|parameter| !parameter.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// One row per definition for the editor's symbol search: `(name, dotted
+/// path, kind, line, end line, depth, enclosing class, bases, signature,
+/// return type)`.  A reference symbol and everything under it is left out.
+fn search_symbol_rows(symbols: &[RustSymbol]) -> Vec<Vec<Option<Cell>>> {
+    fn walk(
+        output: &mut Vec<Vec<Option<Cell>>>,
+        symbols: &[RustSymbol],
+        depth: usize,
+        enclosing_class: Option<&str>,
+    ) {
+        for symbol in symbols {
+            if symbol.kind == "reference" {
+                continue;
+            }
+            let parameters = signature_parameters(symbol.signature.as_deref());
+            let signature = (!parameters.is_empty()).then(|| {
+                let returns = symbol
+                    .returns
+                    .as_deref()
+                    .filter(|returns| !returns.is_empty())
+                    .map(|returns| format!(" -> {returns}"))
+                    .unwrap_or_default();
+                format!("def {}({}){returns}", symbol.name, parameters.join(", "))
+            });
+            output.push(vec![
+                Some(symbol.name.clone().into()),
+                Some(symbol.path.join(".").into()),
+                Some(symbol.kind.clone().into()),
+                Some(symbol.line.into()),
+                Some(symbol.end_line.into()),
+                Some(depth.into()),
+                enclosing_class.map(Cell::from),
+                (!symbol.bases.is_empty()).then(|| symbol.bases.join(",").into()),
+                signature.map(Cell::from),
+                symbol.returns.clone().map(Cell::from),
+            ]);
+            walk(
+                output,
+                &symbol.children,
+                depth + 1,
+                if symbol.kind == "class" { Some(&symbol.name) } else { enclosing_class },
+            );
+        }
+    }
+
+    let mut output = Vec::new();
+    walk(&mut output, symbols, 1, None);
     output
 }
 
@@ -637,6 +746,10 @@ fn load_config(ext: &str, language: &str, config_toml: &str) -> Result<LanguageC
     Ok(config)
 }
 
+/// `project_root` and `module_root` are what a relative path import
+/// (`./helpers`) is named against.  Without them it would be named after the
+/// directories of this machine.
+#[allow(clippy::too_many_arguments)]
 fn extract_batch(
     source: &str,
     ext: &str,
@@ -645,11 +758,18 @@ fn extract_batch(
     module_name: &str,
     language: &str,
     config_toml: &str,
+    project_root: &str,
+    module_root: &str,
 ) -> Result<FactBatch, String> {
     let config = load_config(ext, language, config_toml)?;
     let tree = crate::pattern::parse_for_config(source, ext, &config)?
         .ok_or_else(|| format!("failed to parse {abs_path}"))?;
-    let resolver = ScopeResolver::new(config.clone(), PathBuf::new());
+    let resolver = ScopeResolver::new_with_module_root(
+        config.clone(),
+        PathBuf::from(project_root),
+        PathBuf::from(module_root),
+        None,
+    );
     let file_scope = resolver.build_file_scope_for_module(
         Path::new(abs_path),
         source,
@@ -669,6 +789,8 @@ fn extract_batch(
         ]);
     }
 
+    batch.search_symbols = search_symbol_rows(&raw_symbols);
+    batch.search_qnames = file_scope.all_qnames.clone();
     let symbols = project_symbols(&mut batch, &raw_symbols, rel_path, module_name);
     let exports = exported_names(source, &tree, language, &config, &raw_symbols);
     for symbol in &symbols {
@@ -748,7 +870,8 @@ fn extract_batch(
 
 /// Parse and extract one exact source revision into canonical relation rows.
 #[pyfunction]
-#[pyo3(signature = (source, ext, abs_path, rel_path, module_name, language, config_toml))]
+#[pyo3(signature = (source, ext, abs_path, rel_path, module_name, language, config_toml, project_root, module_root))]
+#[allow(clippy::too_many_arguments)]
 pub fn extract_file_fact_rows(
     py: Python<'_>,
     source: &str,
@@ -758,6 +881,8 @@ pub fn extract_file_fact_rows(
     module_name: &str,
     language: &str,
     config_toml: &str,
+    project_root: &str,
+    module_root: &str,
 ) -> PyResult<Py<PyAny>> {
     let batch = py
         .detach(|| {
@@ -769,6 +894,8 @@ pub fn extract_file_fact_rows(
                 module_name,
                 language,
                 config_toml,
+                project_root,
+                module_root,
             )
         })
         .map_err(|message| {
@@ -820,6 +947,8 @@ mod tests {
             "pkg.mod",
             "python",
             include_str!("../../src/emend/languages/python/config.toml"),
+            "/tmp",
+            "/tmp",
         )
         .unwrap();
         assert_eq!(batch.rows.len(), 21);
@@ -836,5 +965,89 @@ mod tests {
             .iter()
             .any(|row| { matches!(&row[1], Cell::String(name) if name == "run") }));
         assert!(!batch.rows["reachable_blocks"].is_empty());
+    }
+
+    #[test]
+    fn signature_parameters_split_only_at_top_level_commas() {
+        assert_eq!(
+            signature_parameters(Some("(a: Dict[str, int], b=(1, 2), *args) -> Tuple[int, str]")),
+            ["a: Dict[str, int]", "b=(1, 2)", "*args"],
+        );
+        assert!(signature_parameters(Some("()")).is_empty());
+        assert!(signature_parameters(Some("")).is_empty());
+        assert!(signature_parameters(None).is_empty());
+    }
+
+    fn typescript_batch(source: &str) -> FactBatch {
+        extract_batch(
+            source,
+            "ts",
+            "/home/someone/app/src/view.ts",
+            "src/view.ts",
+            "view",
+            "typescript",
+            include_str!("../../src/emend/languages/typescript/config.toml"),
+            "/home/someone/app",
+            "/home/someone/app/src",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn relative_path_imports_are_named_under_the_module_root() {
+        // Not after the directories the project happens to be checked out in.
+        for source in [
+            "import { run } from './helpers';\nrun();\n",
+            "export * from './helpers';\n",
+            "export { run } from './helpers';\n",
+            "export { top } from '../outside';\n",
+        ] {
+            let names = typescript_batch(source).search_qnames;
+            assert!(
+                names.iter().any(|name| name.starts_with("helpers") || name.starts_with("outside")),
+                "{source}: {names:?}",
+            );
+            assert!(!names.iter().any(|name| name.contains("someone")), "{source}: {names:?}");
+        }
+    }
+
+    #[test]
+    fn search_symbols_skip_references_and_name_the_enclosing_class() {
+        let source = "class Shape(Base):\n    def area(self, scale) -> float:\n        def inner():\n            pass\n";
+        let batch = extract_batch(
+            source,
+            "py",
+            "/tmp/pkg/mod.py",
+            "pkg/mod.py",
+            "pkg.mod",
+            "python",
+            include_str!("../../src/emend/languages/python/config.toml"),
+            "/tmp",
+            "/tmp",
+        )
+        .unwrap();
+        let text = |cell: &Option<Cell>| match cell {
+            Some(Cell::String(value)) => Some(value.clone()),
+            _ => None,
+        };
+        let rows: Vec<_> = batch
+            .search_symbols
+            .iter()
+            .map(|row| (text(&row[1]).unwrap(), text(&row[6]), text(&row[7]), text(&row[8])))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Shape".to_string(), None, Some("Base".to_string()), None),
+                (
+                    "Shape.area".to_string(),
+                    Some("Shape".to_string()),
+                    None,
+                    Some("def area(self, scale) -> float".to_string()),
+                ),
+                ("Shape.area.inner".to_string(), Some("Shape".to_string()), None, None),
+            ],
+        );
+        assert!(batch.search_qnames.iter().any(|name| name == "pkg.mod.Shape.area"));
     }
 }
