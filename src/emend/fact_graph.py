@@ -1570,14 +1570,31 @@ class FactGraph:
 
     # -- Transitive closures (Datalog! No more Python BFS) ---------------
 
-    def transitive_callers(self, symbol_qn: str) -> set[str]:
-        """Compute the transitive set of callers of *symbol_qn* via Datalog."""
-        result = self._run_namespaced(
-            "reaches[a] := scope_call_by_callee[$qn, a, _, _, _, _, _]\n"
-            "reaches[a] := reaches[mid], scope_call_by_callee[mid, a, _, _, _, _, _]\n"
-            "?[a] := reaches[a]",
-            {"qn": self._id(symbol_qn)},
-        )
+    def transitive_callers(self, symbol_qn: str, max_depth: int | None = None) -> set[str]:
+        """Compute the transitive set of callers of *symbol_qn* via Datalog.
+
+        *max_depth* keeps callers at most that many calls away: 1 is the
+        direct callers.  ``None`` follows every chain.
+        """
+        if max_depth is None:
+            query = (
+                "reaches[a] := scope_call_by_callee[$qn, a, _, _, _, _, _]\n"
+                "reaches[a] := reaches[mid], scope_call_by_callee[mid, a, _, _, _, _, _]\n"
+                "?[a] := reaches[a]"
+            )
+            params: dict[str, Any] = {"qn": self._id(symbol_qn)}
+        else:
+            # The shortest distance to each caller decides whether it is in
+            # range, and lets the recursion stop on a cycle.
+            query = (
+                "reaches[a, min(depth)] := scope_call_by_callee[$qn, a, _, _, _, _, _], "
+                "depth = 1\n"
+                "reaches[a, min(depth)] := reaches[mid, nearer], nearer < $max_depth, "
+                "scope_call_by_callee[mid, a, _, _, _, _, _], depth = nearer + 1\n"
+                "?[a] := reaches[a, _]"
+            )
+            params = {"qn": self._id(symbol_qn), "max_depth": int(max_depth)}
+        result = self._run_namespaced(query, params)
         return {r[0] for r in result["rows"]} - {symbol_qn}
 
     def transitive_callees(self, symbol_qn: str) -> set[str]:

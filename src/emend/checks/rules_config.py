@@ -743,17 +743,26 @@ def compile_rules_document(
         raise ValueError("Rules document must be a mapping")
     macros = _macro_map(data.get("macros"))
     raw_rules = data.get("rules") or {}
+    # A document in another shape used to load as no rules at all, and a run
+    # with no rules reports nothing and succeeds.
     if not isinstance(raw_rules, dict):
-        raw_rules = {}
+        raise ValueError(
+            "'rules' must map each rule name to its settings, as in "
+            "{my-rule: {find: ..., message: ...}}, not hold a "
+            f"{type(raw_rules).__name__}"
+        )
     top_excludes = _str_tuple(yaml_key(data, "exclude_paths"))
     patterns: list[CompiledPatternRule] = []
     flows: list[CompiledFlowRule] = []
     unified_policies: list[CompiledPolicy] = []
     embedded_deadcode: CompiledDeadCodeRule | None = None
     for name_value, raw in raw_rules.items():
-        if not isinstance(raw, dict):
-            continue
         name = str(name_value)
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"rule {name!r} must be a mapping of settings such as 'find' and "
+                f"'message', not {'empty' if raw is None else type(raw).__name__}"
+            )
         if "deadcode" in raw:
             candidate = _compile_deadcode(
                 raw.get("deadcode"), rule_name=name, rule_id=f"rule:{name}:deadcode",

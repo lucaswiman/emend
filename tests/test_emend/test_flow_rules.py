@@ -511,3 +511,50 @@ def test_flow_multiline_chain(tmp_path, sql_rule):
     assert w is not None
     assert w.source_line == 2
     assert w.sink_line == 6
+
+
+# ---------------------------------------------------------------------------
+# A rules document in the wrong shape is an error, not an empty rule set
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("document, complaint", [
+    # Rules written as a list of entries, the shape of many other linters.
+    ({"rules": [{"id": "no-eval", "find": "eval($X)", "message": "eval"}]},
+     r"'rules' must map each rule name to its settings"),
+    ({"rules": "eval($X)"}, r"'rules' must map each rule name to its settings"),
+    # A rule name with nothing under it.
+    ({"rules": {"no-eval": None}}, r"rule 'no-eval' must be a mapping"),
+    ({"rules": {"no-eval": "eval($X)"}}, r"rule 'no-eval' must be a mapping"),
+])
+def test_misshapen_rules_are_rejected(document, complaint):
+    """Each of these used to load as no rules at all, so a lint run printed
+    nothing and exited 0."""
+    from emend.checks.rules_config import compile_rules_document
+
+    with pytest.raises(ValueError, match=complaint):
+        compile_rules_document(document)
+
+
+def test_lint_reports_a_misshapen_rules_file(tmp_path):
+    from typer.testing import CliRunner
+
+    from emend.cli import app
+
+    (tmp_path / "app.py").write_text("eval(input())\n")
+    rules = tmp_path / "rules.yaml"
+    rules.write_text("rules:\n  - id: no-eval\n    find: eval($X)\n    message: eval\n")
+
+    result = CliRunner().invoke(app, ["lint", str(tmp_path), "--config", str(rules)])
+
+    assert result.exit_code != 0, result.output
+    assert "'rules' must map each rule name to its settings" in result.output
+    assert "not hold a list" in result.output
+
+
+def test_empty_rules_section_is_still_no_rules():
+    from emend.checks.rules_config import compile_rules_document
+
+    for document in ({}, {"rules": None}, {"rules": {}}):
+        compiled = compile_rules_document(document)
+        assert not compiled.pattern_rules and not compiled.flow_rules

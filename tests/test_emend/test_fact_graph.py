@@ -1516,3 +1516,53 @@ def test_imports_by_file_matches_the_per_file_query_in_one_read():
     imports = graph.imports_by_file()
     assert counting.runs == 1
     assert {path: imports.get(path, []) for path in per_file} == per_file
+
+
+# ---------------------------------------------------------------------------
+# Transitive callers, bounded by depth
+# ---------------------------------------------------------------------------
+
+
+def _call_chain() -> FactGraph:
+    """``a`` calls ``b`` calls ``c`` calls ``d``; ``side`` also calls ``c``."""
+    graph = FactGraph()
+    graph.add_calls_batch([
+        CallFact("pkg.a", "pkg.b", "pkg.py", 1, 0),
+        CallFact("pkg.b", "pkg.c", "pkg.py", 2, 0),
+        CallFact("pkg.c", "pkg.d", "pkg.py", 3, 0),
+        CallFact("pkg.side", "pkg.c", "pkg.py", 4, 0),
+        CallFact("pkg.d", "pkg.d", "pkg.py", 5, 0),
+    ])
+    return graph
+
+
+def test_transitive_callers_stop_at_the_requested_depth():
+    graph = _call_chain()
+    assert graph.transitive_callers("pkg.d") == {"pkg.a", "pkg.b", "pkg.c", "pkg.side"}
+    assert graph.transitive_callers("pkg.d", max_depth=1) == {"pkg.c"}
+    assert graph.transitive_callers("pkg.d", max_depth=2) == {"pkg.b", "pkg.c", "pkg.side"}
+    assert graph.transitive_callers("pkg.d", max_depth=10) == graph.transitive_callers("pkg.d")
+    assert graph.transitive_callers("pkg.absent", max_depth=3) == set()
+
+
+def test_facts_command_lists_transitive_callers(tmp_path):
+    """``analyze facts --type calls --transitive`` raised a TypeError."""
+    from typer.testing import CliRunner
+
+    from emend.cli import app
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'chain'\n")
+    (tmp_path / "chain.py").write_text(
+        "def leaf():\n    pass\n\n\ndef middle():\n    leaf()\n\n\ndef top():\n    middle()\n"
+    )
+    result = CliRunner().invoke(app, [
+        "analyze", "facts", str(tmp_path), "--type", "calls",
+        "--symbol", "chain.leaf", "--transitive", "--json",
+    ])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["transitive_callers"] == ["chain.middle", "chain.top"]
+    shallow = CliRunner().invoke(app, [
+        "analyze", "facts", str(tmp_path), "--type", "calls",
+        "--symbol", "chain.leaf", "--transitive", "--max-depth", "1", "--json",
+    ])
+    assert json.loads(shallow.stdout)["transitive_callers"] == ["chain.middle"]
